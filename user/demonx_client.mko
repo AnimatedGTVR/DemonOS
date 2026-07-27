@@ -1,0 +1,108 @@
+use "sdk.mko";
+
+fn pack_words(low: u64, high: u64) -> u64 {
+    return low + high * 4294967296;
+}
+
+fn clear_packet(packet: vptr<u64>) -> u64 {
+    word: u64 = 0;
+    while word < 8 {
+        vptr_write_u64(vptr_offset_u64(packet, word), 0);
+        word = word + 1;
+    }
+    return 0;
+}
+
+fn set_header(packet: vptr<u64>, payload_length: u64,
+              flags: u64, sequence: u64) -> u64 {
+    header: u64 = 1479618884 + payload_length * 4294967296 +
+        flags * 281474976710656;
+    vptr_write_u64(packet, header);
+    vptr_write_u64(vptr_offset_u64(packet, 1), 1 + sequence * 4294967296);
+    return 0;
+}
+
+fn send_request(channel: u64, packet_address: u64, packet: vptr<u64>,
+                first: u64, second: u64, sequence: u64) -> u64 {
+    clear_packet(packet);
+    set_header(packet, 8, 0, sequence);
+    vptr_write_u64(vptr_offset_u64(packet, 2), first + second * 4294967296);
+    return MakoAbi.channel_send(channel, packet_address, 64);
+}
+
+fn demonx_client_main(service_name: u64, reply_name: u64) -> u64 {
+    packet_address: u64 = 3293184;
+    packet: vptr<u64> = vptr_from_u64(packet_address);
+    reply_channel: u64 = MakoAbi.channel_create(reply_name, 14);
+    server: u64 = MakoAbi.channel_connect(service_name, 16);
+    if reply_channel > 4294967295 or server > 4294967295 { return 130; }
+
+    # A real X11 little-endian setup request: byte order 'l', version 11.0,
+    # and no authorization payload, carried in one DemonX transport record.
+    clear_packet(packet);
+    set_header(packet, 12, 1, 1);
+    vptr_write_u64(vptr_offset_u64(packet, 2), 721004);
+    if MakoAbi.channel_send(server, packet_address, 64) != 64 { return 131; }
+    if MakoAbi.channel_receive(reply_channel, packet_address, 64, 0) != 64 {
+        return 132;
+    }
+    reply_header: u64 = vptr_read_u64(packet);
+    reply_flags: u64 = reply_header / 281474976710656;
+    reply_flags = reply_flags - (reply_flags / 65536) * 65536;
+    if reply_flags != 2 { return 133; }
+
+    # X_CreateWindow, 240x160 at (80,60), resource id 0x200001.
+    clear_packet(packet);
+    set_header(packet, 32, 0, 2);
+    vptr_write_u64(vptr_offset_u64(packet, 2), pack_words(524289, 2097153));
+    vptr_write_u64(vptr_offset_u64(packet, 3), pack_words(256, 3932240));
+    vptr_write_u64(vptr_offset_u64(packet, 4), pack_words(10486000, 65536));
+    if MakoAbi.channel_send(server, packet_address, 64) != 64 { return 134; }
+    if send_request(server, packet_address, packet, 131080, 2097153, 3) != 64 {
+        return 135;
+    }
+    if send_request(server, packet_address, packet, 131086, 2097153, 4) != 64 {
+        return 136;
+    }
+    if MakoAbi.channel_receive(reply_channel, packet_address, 64, 0) != 64 {
+        return 137;
+    }
+    reply_header = vptr_read_u64(packet);
+    reply_flags = reply_header / 281474976710656;
+    reply_flags = reply_flags - (reply_flags / 65536) * 65536;
+    geometry: u64 = vptr_read_u64(vptr_offset_u64(packet, 3));
+    geometry_x: u64 = geometry - (geometry / 65536) * 65536;
+    geometry_y: u64 = geometry / 65536;
+    geometry_y = geometry_y - (geometry_y / 65536) * 65536;
+    geometry_width: u64 = geometry / 4294967296;
+    geometry_width = geometry_width - (geometry_width / 65536) * 65536;
+    geometry_height: u64 = geometry / 281474976710656;
+    if reply_flags != 2 {
+        error_word: u64 = vptr_read_u64(vptr_offset_u64(packet, 2));
+        error_code: u64 = error_word / 256;
+        error_code = error_code - (error_code / 256) * 256;
+        return 150 + error_code;
+    }
+    if geometry_x != 80 { return 144; }
+    if geometry_y != 60 { return 145; }
+    if geometry_width != 240 { return 146; }
+    if geometry_height != 160 { return 147; }
+
+    if send_request(server, packet_address, packet, 131076, 2097153, 5) != 64 {
+        return 139;
+    }
+    if send_request(server, packet_address, packet, 131086, 2097153, 6) != 64 {
+        return 140;
+    }
+    if MakoAbi.channel_receive(reply_channel, packet_address, 64, 0) != 64 {
+        return 141;
+    }
+    reply_header = vptr_read_u64(packet);
+    reply_flags = reply_header / 281474976710656;
+    reply_flags = reply_flags - (reply_flags / 65536) * 65536;
+    if reply_flags != 4 { return 142; }
+    MakoAbi.handle_close(server);
+    MakoAbi.handle_close(reply_channel);
+    MakoAbi.exit(0);
+    return 0;
+}

@@ -1,0 +1,107 @@
+use "sdk.mko";
+
+# Native MKO init process built against the reusable MAKO-ABI module.
+
+fn user_u64(high: u64, low: u64) -> u64 {
+    return high * 4294967296 + low;
+}
+
+fn user_project_valid(address: u64) -> bool {
+    words: vptr<u64> = vptr_from_u64(address);
+    second: vptr<u64> = vptr_offset_u64(words, 1);
+    first_expected: u64 = user_u64(1162625601, 1414680400);
+    second_expected: u64 = user_u64(1413694794, 1330794541);
+    return vptr_read_u64(words) == first_expected and vptr_read_u64(second) == second_expected;
+}
+
+fn user_fail() -> u64 {
+    MakoAbi.exit(99);
+    return 99;
+}
+
+# The ELF entry stub supplies pointers to its read-only data. Both processes
+# execute this exact code and use identical virtual scratch addresses, but the
+# kernel maps each stack page to a different physical frame.
+fn user_main(pid: u64, message: u64, project_name: u64, project_data: u64, ipc_name: u64, ipc_message: u64) -> u64 {
+    # The executable window ends at 0x324000. Physical code pages are assigned
+    # per process, while writable scratch always begins at this stable heap.
+    isolation: vptr<u64> = vptr_from_u64(3293184);
+    file_buffer: u64 = 3293440;
+    vptr_write_u64(isolation, pid);
+
+    process: u64 = MakoAbi.service_open(3);
+    if MakoAbi.handle_query(process, 0) != pid {
+        return user_fail();
+    }
+    clock: u64 = MakoAbi.service_open(2);
+    storage: u64 = MakoAbi.service_open(4);
+    file: u64 = 0;
+    channel: u64 = 0;
+
+    if pid == 1 {
+        console: u64 = MakoAbi.service_open(1);
+        if MakoAbi.handle_write(console, message, 33) != 33 {
+            return user_fail();
+        }
+        MakoAbi.handle_close(console);
+        # Reusing a closed generation must be rejected. A successful zero-byte
+        # console write would return zero, while the kernel returns -1 here.
+        if MakoAbi.handle_write(console, message, 0) == 0 {
+            return user_fail();
+        }
+
+        file = MakoAbi.file_open(storage, project_name, 11, 1);
+        if MakoAbi.handle_write(file, project_data, 16) != 16 {
+            return user_fail();
+        }
+        MakoAbi.handle_close(file);
+        channel = MakoAbi.channel_create(ipc_name, 12);
+        if MakoAbi.channel_receive(channel, file_buffer, 64, 0) != 8 {
+            return user_fail();
+        }
+    } else {
+        file = MakoAbi.file_open(storage, project_name, 11, 0);
+        channel = MakoAbi.channel_connect(ipc_name, 12);
+        if MakoAbi.channel_send(channel, ipc_message, 8) != 8 {
+            return user_fail();
+        }
+    }
+
+    started: u64 = MakoAbi.handle_query(clock, 0);
+    now: u64 = started;
+    while now - started < 5 {
+        now = MakoAbi.handle_query(clock, 0);
+    }
+    MakoAbi.yield_now();
+
+    if vptr_read_u64(isolation) != pid {
+        return user_fail();
+    }
+    if MakoAbi.handle_query(process, 0) != pid {
+        return user_fail();
+    }
+
+    if pid == 2 {
+        # PID 2 derives PID 1's otherwise-valid process handle. The query must
+        # fail because handles are owned, even though the slot exists.
+        foreign: u64 = process - 256;
+        if MakoAbi.handle_query(foreign, 0) == pid {
+            return user_fail();
+        }
+        if MakoAbi.handle_read(file, file_buffer, 128) != 16 {
+            return user_fail();
+        }
+        if !user_project_valid(file_buffer) {
+            return user_fail();
+        }
+        MakoAbi.handle_close(file);
+    }
+
+    MakoAbi.handle_close(storage);
+    MakoAbi.handle_close(process);
+    MakoAbi.handle_close(clock);
+    MakoAbi.handle_close(channel);
+
+    MakoAbi.exit(40 + pid);
+    return 40 + pid;
+}

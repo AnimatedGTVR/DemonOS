@@ -1,0 +1,6 @@
+# Compile-only coverage for the largest current MAKO-ABI intrinsic. Real ABI
+# 0.1 calls use at most four arguments, but reserving the fifth register now
+# keeps the native boundary extensible without changing application syntax.
+fn mako_abi_probe(number: u64, first: u64, second: u64, third: u64, fourth: u64, fifth: u64) -> u64 {
+    return abi_syscall5(number, first, second, third, fourth, fifth);
+}

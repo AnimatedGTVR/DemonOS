@@ -1,0 +1,22 @@
+{
+    "search.exclude": {
+        "**/.git": true,
+        "**/node_modules": true,
+        "**/bin": true,
+        "**/obj": true,
+        "**/target": true,
+        "**/result": true,
+        "**/.direnv": true,
+        "**/.cache": true
+    },
+    "files.watcherExclude": {
+        "**/.git/**": true,
+        "**/node_modules/**": true,
+        "**/bin/**": true,
+        "**/obj/**": true,
+        "**/target/**": true,
+        "**/result/**": true,
+        "**/.direnv/**": true
+    },
+    "makefile.configureOnOpen": false
+}

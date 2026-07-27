@@ -1,0 +1,171 @@
+namespace MakoAbi;
+
+# MAKO-ABI 0.1 typed userspace SDK. Applications import this module instead of
+# embedding syscall numbers or architecture register conventions.
+fn write(address: u64, length: u64) -> u64 {
+    return abi_syscall2(0, address, length);
+}
+
+fn yield_now() -> u64 {
+    return abi_syscall0(1);
+}
+
+fn exit(status: u64) -> u64 {
+    return abi_syscall1(2, status);
+}
+
+fn ticks() -> u64 {
+    return abi_syscall0(3);
+}
+
+fn getpid() -> u64 {
+    return abi_syscall0(4);
+}
+
+fn service_open(service: u64) -> u64 {
+    return abi_syscall1(5, service);
+}
+
+fn handle_write(handle: u64, address: u64, length: u64) -> u64 {
+    return abi_syscall3(6, handle, address, length);
+}
+
+fn handle_query(handle: u64, property: u64) -> u64 {
+    return abi_syscall2(7, handle, property);
+}
+
+fn handle_close(handle: u64) -> u64 {
+    return abi_syscall1(8, handle);
+}
+
+fn file_open(storage: u64, name: u64, length: u64, create: u64) -> u64 {
+    return abi_syscall4(9, storage, name, length, create);
+}
+
+fn handle_read(handle: u64, address: u64, capacity: u64) -> u64 {
+    return abi_syscall3(10, handle, address, capacity);
+}
+
+fn spawn(path: u64, length: u64, service_mask: u64) -> u64 {
+    return abi_syscall3(11, path, length, service_mask);
+}
+
+fn wait(pid: u64) -> u64 {
+    return abi_syscall1(12, pid);
+}
+
+fn channel_create(name: u64, length: u64) -> u64 {
+    return abi_syscall2(14, name, length);
+}
+
+fn channel_connect(name: u64, length: u64) -> u64 {
+    return abi_syscall2(15, name, length);
+}
+
+fn channel_send(channel: u64, message: u64, length: u64) -> u64 {
+    return abi_syscall3(16, channel, message, length);
+}
+
+fn channel_receive(channel: u64, destination: u64, capacity: u64, nonblocking: u64) -> u64 {
+    return abi_syscall4(17, channel, destination, capacity, nonblocking);
+}
+
+fn display_info(display: u64, destination: u64) -> u64 {
+    return abi_syscall2(18, display, destination);
+}
+
+fn display_submit(display: u64, request: u64) -> u64 {
+    return abi_syscall2(19, display, request);
+}
+
+fn input_poll(input_handle: u64, destination: u64) -> u64 {
+    return abi_syscall2(20, input_handle, destination);
+}
+
+fn display_dimensions(display: u64) -> u64 {
+    return abi_syscall1(21, display);
+}
+
+fn surface_create(factory: u64, width: u64, height: u64) -> u64 {
+    return abi_syscall3(22, factory, width, height);
+}
+
+fn surface_write(surface: u64, pixels: u64, count: u64, offset: u64) -> u64 {
+    return abi_syscall4(23, surface, pixels, count, offset);
+}
+
+# Transfer a read-only surface capability to the owner of an IPC channel.
+# The returned value is the destination-owned handle to place in CREATE.
+fn surface_share(surface: u64, channel: u64) -> u64 {
+    return abi_syscall2(24, surface, channel);
+}
+
+fn surface_read(surface: u64, destination: u64, capacity: u64) -> u64 {
+    return abi_syscall3(25, surface, destination, capacity);
+}
+
+# Block until either the compositor control channel or unified input becomes
+# ready. A nonzero relative timeout is a scheduler deadline. Returns 1 for a
+# 64-byte window packet, 2 for an input event, or 3 for the deadline.
+fn compositor_wait(channel: u64, input_handle: u64,
+                   message_destination: u64, event_destination: u64,
+                   timeout_ticks: u64) -> u64 {
+    return abi_syscall5(26, channel, input_handle,
+                        message_destination, event_destination, timeout_ticks);
+}
+
+# Map one retained surface read-only into the caller. The returned address is
+# stable for the process lifetime and can be submitted directly to display.
+fn surface_map(surface: u64) -> u64 {
+    return abi_syscall1(27, surface);
+}
+
+fn surface_damage(surface: u64, x: u64, y: u64,
+                  width: u64, height: u64) -> u64 {
+    return abi_syscall5(28, surface, x, y, width, height);
+}
+
+fn surface_take_damage(surface: u64) -> u64 {
+    return abi_syscall1(29, surface);
+}
+
+# Release one of this process's mapped-surface slots, freeing it for a later
+# surface_map call. Does not close the underlying capability handle.
+fn surface_unmap(surface: u64) -> u64 {
+    return abi_syscall1(30, surface);
+}
+
+# Compositor self-report: publish the current live window count and focused
+# window id into kernel-side counters (gated on the DISPLAY capability's
+# write right, the same one display_submit already requires), so a kernel
+# boot test can assert on real dynamic window-manager state -- create,
+# focus change, close -- instead of scripted pixel/frame counts. The kernel
+# stores exactly what it is told; no window-manager policy runs in ring 0.
+fn compositor_report(display: u64, window_count: u64, focused_window_id: u64) -> u64 {
+    return abi_syscall3(31, display, window_count, focused_window_id);
+}
+
+# Move the compositor-owned scanout cursor and select its icon. The kernel
+# performs only the bounded overlay operation; cursor position, icon choice,
+# and hit-test policy all remain userspace-owned. icon follows enum
+# graphics_cursor_icon: 0 is the default arrow, 1-13 select the contextual
+# resize/hand/text/blocked/info pack.
+fn display_cursor_move(display: u64, x: u64, y: u64, icon: u64) -> u64 {
+    return abi_syscall4(32, display, x, y, icon);
+}
+
+# Draws directly onto the kernel-resident backbuffer using the kernel's own
+# rounded-rect/border/gradient/shadow compositing (the same code the boot
+# screen uses), selected by the request's "kind" word. See
+# docs/application-abi.md for the full 10-word request layout.
+fn display_submit_effect(display: u64, request: u64) -> u64 {
+    return abi_syscall2(33, display, request);
+}
+
+# Returns 1 if this boot is the scripted boot-test harness (make smoke/check
+# via grub.cfg's "boot test" menu entry), 0 for a real interactive boot.
+# No capability gate -- carries no sensitive state. See
+# compositor_main's boot_test_mode/loading_deadline/login_deadline setup.
+fn boot_test_mode() -> u64 {
+    return abi_syscall0(34);
+}

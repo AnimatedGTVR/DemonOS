@@ -1,0 +1,148 @@
+use "sdk.mko";
+
+fn low32(value: u64) -> u64 {
+    return value - (value / 4294967296) * 4294967296;
+}
+
+# Window channel names are "desktop.win<pid>" (single decimal digit, pid
+# always < SCHEDULER_PROCESS_LIMIT=8 -- see compositor.mko's
+# write_event_channel_name, the exact same byte pattern this must match so
+# the compositor can connect to whichever client owns a given window id).
+fn write_event_name(name: vptr<u8>, pid: u64) -> u64 {
+    vptr_write_u8(name, 100); vptr_write_u8(vptr_offset_u8(name, 1), 101);
+    vptr_write_u8(vptr_offset_u8(name, 2), 115); vptr_write_u8(vptr_offset_u8(name, 3), 107);
+    vptr_write_u8(vptr_offset_u8(name, 4), 116); vptr_write_u8(vptr_offset_u8(name, 5), 111);
+    vptr_write_u8(vptr_offset_u8(name, 6), 112); vptr_write_u8(vptr_offset_u8(name, 7), 46);
+    vptr_write_u8(vptr_offset_u8(name, 8), 119); vptr_write_u8(vptr_offset_u8(name, 9), 105);
+    vptr_write_u8(vptr_offset_u8(name, 10), 110);
+    vptr_write_u8(vptr_offset_u8(name, 11), 48 + pid - (pid / 10) * 10);
+    return 0;
+}
+
+# Fill the 64x64 shared surface with a bar that grows one 8px row per click,
+# wrapping back to empty after 8 (64/8) so the window never needs more than
+# this one small canvas -- a real, visible, per-click state change without
+# needing a font/glyph table the way a genuine digit counter would.
+fn draw_click_bar(pixel_address: u64, clicks: u64) -> u64 {
+    pixels: vptr<u64> = vptr_from_u64(pixel_address);
+    filled_rows: u64 = clicks - (clicks / 8) * 8;
+    pixel: u64 = 0;
+    while pixel < 4096 {
+        row: u64 = pixel / 64;
+        color: u64 = 4279049002;
+        if row >= 64 - filled_rows * 8 {
+            color = 4281435368;
+        }
+        vptr_write_u64(vptr_offset_u64(pixels, pixel / 2),
+                       color + color * 4294967296);
+        pixel = pixel + 2;
+    }
+    return 0;
+}
+
+# A real, persistent, interactive app window -- unlike window-client.elf
+# (which several existing boot-tests deliberately keep as a one-shot
+# "draw a static texture and exit" placeholder, so it could not also be
+# made to loop without breaking those tests -- see the comment on that
+# file), this client stays alive and listens on its own event channel for
+# CLICK messages (compositor.mko's content-area click forwarding, opcode
+# 11) so clicking inside the window visibly does something: the bar grows
+# one row and the surface is redrawn and re-damaged for real, live
+# interaction. Spawned by the launcher's APP row; WEB has its own native
+# browser_client.mko process.
+fn counter_client_main(service_name: u64) -> u64 {
+    pid: u64 = MakoAbi.getpid();
+    packet_address: u64 = 3293184;
+    packet: vptr<u64> = vptr_from_u64(packet_address);
+    word: u64 = 0;
+    while word < 8 {
+        vptr_write_u64(vptr_offset_u64(packet, word), 0);
+        word = word + 1;
+    }
+    # version 1, CREATE opcode 2, serial 1.
+    vptr_write_u64(packet, 131073 + 4294967296);
+    vptr_write_u64(vptr_offset_u64(packet, 1), pid);
+    # Tile windows into a 2x2 grid across the usable desktop area (below the
+    # 28px topbar, above the 48px taskbar) based on pid, so concurrently
+    # spawned clients land in distinct, non-overlapping cells instead of a
+    # cascade tight enough to stack on top of each other. cell_index cycles
+    # every 4 windows so a 5th+ client wraps back to the first cell rather
+    # than drifting off-grid.
+    cell_index: u64 = pid - (pid / 4) * 4;
+    column: u64 = cell_index - (cell_index / 2) * 2;
+    row: u64 = cell_index / 2;
+    x: u64 = 16 + column * 312;
+    y: u64 = 40 + row * 196;
+    vptr_write_u64(vptr_offset_u64(packet, 2), x + y * 4294967296);
+    vptr_write_u64(vptr_offset_u64(packet, 3), 296 + 180 * 4294967296);
+
+    # The receive channel must exist before CREATE is sent: the compositor
+    # could route a content-area click to this window on any later frame,
+    # and channel_connect (compositor side) would fail if this client
+    # hasn't created its receive endpoint yet. packet_address+128 through
+    # +4224 is the 64x64 pixel buffer (see pixel_address below) -- placed
+    # past its end, not at a round +4096 offset that would land inside it.
+    name_address: u64 = packet_address + 4224;
+    write_event_name(vptr_from_u8(name_address), pid);
+    event_server: u64 = MakoAbi.channel_create(name_address, 12);
+
+    channel: u64 = MakoAbi.channel_connect(service_name, 18);
+
+    # Draw real content and share a read-only surface capability with the
+    # compositor. Only one surface can ever be mapped read-only inside the
+    # compositor process at a time (a real kernel constraint -- see
+    # map_surface_readonly in src/arch/x86_64/userspace.c), so whichever
+    # window's CREATE reaches the compositor first while no surface is yet
+    # mapped gets real zero-copy pixels; every later window is composited
+    # with flat placeholder content instead of forged pixels. The surface
+    # handle itself is kept open (not closed after the first write) since
+    # the event loop below redraws it on every click.
+    surface_factory: u64 = MakoAbi.service_open(9);
+    surface: u64 = MakoAbi.surface_create(surface_factory, 64, 64);
+    pixel_address: u64 = packet_address + 128;
+    clicks: u64 = 0;
+    if surface <= 4294967295 {
+        draw_click_bar(pixel_address, clicks);
+        if MakoAbi.surface_write(surface, pixel_address, 4096, 0) != 4096 {
+            MakoAbi.exit(109); return 109;
+        }
+        if MakoAbi.surface_damage(surface, 0, 0, 64, 64) != 0 {
+            MakoAbi.exit(112); return 112;
+        }
+        compositor_surface: u64 = MakoAbi.surface_share(surface, channel);
+        if compositor_surface <= 4294967295 {
+            vptr_write_u64(vptr_offset_u64(packet, 4), compositor_surface);
+        }
+    }
+    MakoAbi.handle_close(surface_factory);
+
+    if MakoAbi.channel_send(channel, packet_address, 64) != 64 {
+        MakoAbi.exit(94); return 94;
+    }
+    MakoAbi.handle_close(channel);
+
+    # Live loop: block waiting for the compositor to forward a content-area
+    # click (opcode 11, see compositor.mko's forwarding block), redraw the
+    # bar one row taller (wrapping at 8), and re-share the updated pixels.
+    # A malformed/unexpected packet is ignored rather than treated as fatal
+    # -- the same tolerance the compositor's own CREATE handler already
+    # gives unrecognized opcodes -- so this client can't be crashed by a
+    # stray message shape.
+    while true {
+        if MakoAbi.channel_receive(event_server, packet_address, 64, 0) != 64 {
+            MakoAbi.exit(0); return 0;
+        }
+        click_header: u64 = vptr_read_u64(packet);
+        click_low_header: u64 = low32(click_header);
+        click_identity: u64 = vptr_read_u64(vptr_offset_u64(packet, 1));
+        click_window_id: u64 = low32(click_identity);
+        if click_low_header == 720897 and click_window_id == pid and surface <= 4294967295 {
+            clicks = clicks + 1;
+            draw_click_bar(pixel_address, clicks);
+            if MakoAbi.surface_write(surface, pixel_address, 4096, 0) == 4096 {
+                MakoAbi.surface_damage(surface, 0, 0, 64, 64);
+            }
+        }
+    }
+    return 0;
+}

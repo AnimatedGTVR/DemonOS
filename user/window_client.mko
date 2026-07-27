@@ -1,0 +1,80 @@
+use "sdk.mko";
+
+# Generic "create a window with some content" client. Any process that runs
+# this creates exactly one window at a geometry derived from its own pid (so
+# concurrently spawned clients don't collide) and shares a real drawn surface
+# with the compositor for it. The compositor's window table has no notion of
+# "the 4th/5th/6th client" any more -- every window here is created the same
+# way, dynamically, and the compositor accepts CREATE at any time.
+fn window_client_main(service_name: u64) -> u64 {
+    pid: u64 = MakoAbi.getpid();
+    packet_address: u64 = 3293184;
+    packet: vptr<u64> = vptr_from_u64(packet_address);
+    word: u64 = 0;
+    while word < 8 {
+        vptr_write_u64(vptr_offset_u64(packet, word), 0);
+        word = word + 1;
+    }
+    # version 1, CREATE opcode 2, serial 1.
+    vptr_write_u64(packet, 131073 + 4294967296);
+    vptr_write_u64(vptr_offset_u64(packet, 1), pid);
+    # Tile windows into a 2x2 grid across the usable desktop area (below the
+    # 28px topbar, above the 48px taskbar) based on pid, so concurrently
+    # spawned clients land in distinct, non-overlapping cells instead of a
+    # cascade tight enough to stack on top of each other. cell_index cycles
+    # every 4 windows so a 5th+ client wraps back to the first cell rather
+    # than drifting off-grid.
+    cell_index: u64 = pid - (pid / 4) * 4;
+    column: u64 = cell_index - (cell_index / 2) * 2;
+    row: u64 = cell_index / 2;
+    x: u64 = 16 + column * 312;
+    y: u64 = 40 + row * 196;
+    vptr_write_u64(vptr_offset_u64(packet, 2), x + y * 4294967296);
+    vptr_write_u64(vptr_offset_u64(packet, 3), 296 + 180 * 4294967296);
+    channel: u64 = MakoAbi.channel_connect(service_name, 18);
+
+    # Draw real content and share a read-only surface capability with the
+    # compositor. Only one surface can ever be mapped read-only inside the
+    # compositor process at a time (a real kernel constraint -- see
+    # map_surface_readonly in src/arch/x86_64/userspace.c), so whichever
+    # window's CREATE reaches the compositor first while no surface is yet
+    # mapped gets real zero-copy pixels; every later window is composited
+    # with flat placeholder content instead of forged pixels.
+    surface_factory: u64 = MakoAbi.service_open(9);
+    surface: u64 = MakoAbi.surface_create(surface_factory, 64, 64);
+    if surface <= 4294967295 {
+        pixel_address: u64 = packet_address + 128;
+        pixels: vptr<u64> = vptr_from_u64(pixel_address);
+        pixel: u64 = 0;
+        while pixel < 4096 {
+            color: u64 = 4279049002;
+            # A deliberately cheap blue application texture. One branch keeps
+            # the client tiny while still exercising real shared-surface pixels.
+            if pixel % 6 < 3 {
+                color = 4281435368;
+            }
+            vptr_write_u64(vptr_offset_u64(pixels, pixel / 2),
+                           color + color * 4294967296);
+            pixel = pixel + 2;
+        }
+        if MakoAbi.surface_write(surface, pixel_address, 4096, 0) != 4096 {
+            MakoAbi.exit(109); return 109;
+        }
+        if MakoAbi.surface_damage(surface, 0, 0, 64, 64) != 0 {
+            MakoAbi.exit(112); return 112;
+        }
+        compositor_surface: u64 = MakoAbi.surface_share(surface, channel);
+        if compositor_surface <= 4294967295 {
+            vptr_write_u64(vptr_offset_u64(packet, 4), compositor_surface);
+        }
+        MakoAbi.handle_close(surface);
+    }
+    MakoAbi.handle_close(surface_factory);
+
+    if MakoAbi.channel_send(channel, packet_address, 64) != 64 {
+        MakoAbi.exit(94); return 94;
+    }
+    MakoAbi.handle_close(channel);
+    MakoAbi.exit(0);
+    return 0;
+}

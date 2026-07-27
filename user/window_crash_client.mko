@@ -1,0 +1,41 @@
+use "sdk.mko";
+
+# Crash-containment test client, intentionally and clearly named: creates one
+# window exactly like window_client.mko, then exits with a non-zero abnormal
+# status right after its CREATE message has been copied into the
+# compositor's channel. This exercises that the compositor keeps running and
+# keeps compositing every other window when one client dies immediately
+# after handing off its window -- it is not disguised as general client
+# behavior.
+fn window_crash_client_main(service_name: u64) -> u64 {
+    pid: u64 = MakoAbi.getpid();
+    packet_address: u64 = 3293184;
+    packet: vptr<u64> = vptr_from_u64(packet_address);
+    word: u64 = 0;
+    while word < 8 {
+        vptr_write_u64(vptr_offset_u64(packet, word), 0);
+        word = word + 1;
+    }
+    # version 1, CREATE opcode 2, serial 1.
+    vptr_write_u64(packet, 131073 + 4294967296);
+    vptr_write_u64(vptr_offset_u64(packet, 1), pid);
+    # Tile into the same 2x2 grid as window_client.mko so this window lands
+    # in a distinct, non-overlapping cell alongside any other live windows.
+    cell_index: u64 = pid - (pid / 4) * 4;
+    column: u64 = cell_index - (cell_index / 2) * 2;
+    row: u64 = cell_index / 2;
+    x: u64 = 16 + column * 312;
+    y: u64 = 40 + row * 196;
+    vptr_write_u64(vptr_offset_u64(packet, 2), x + y * 4294967296);
+    vptr_write_u64(vptr_offset_u64(packet, 3), 296 + 180 * 4294967296);
+    channel: u64 = MakoAbi.channel_connect(service_name, 18);
+    if MakoAbi.channel_send(channel, packet_address, 64) != 64 {
+        MakoAbi.exit(94); return 94;
+    }
+    MakoAbi.handle_close(channel);
+    # Deliberate abnormal exit: this client models an application crash after
+    # its CREATE has already been queued/copied. The compositor must still
+    # process that CREATE and remain alive and responsive afterward.
+    MakoAbi.exit(77);
+    return 77;
+}

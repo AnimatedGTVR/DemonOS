@@ -1,0 +1,14 @@
+use "../../user/sdk.mko";
+
+# A standalone project entry point. Its only operating-system dependency is
+# the typed MakoAbi module, so this source never calls Windows or Linux APIs.
+fn project_main(message: u64, length: u64) -> u64 {
+    console: u64 = MakoAbi.service_open(1);
+    if MakoAbi.handle_write(console, message, length) != length {
+        MakoAbi.exit(99);
+        return 99;
+    }
+    MakoAbi.handle_close(console);
+    MakoAbi.exit(0);
+    return 0;
+}

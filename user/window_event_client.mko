@@ -1,0 +1,42 @@
+use "sdk.mko";
+
+# Persistent isolated application endpoint for compositor-to-client events.
+# The client owns its receive channel; the compositor only ever reaches it by
+# connecting-by-name to "desktop.win<window_id>" (see write_event_channel_name
+# in compositor.mko), so this same client shape works for any window id --
+# window_id is a parameter here, not a hardcoded pid, even though the current
+# test harness (window_event_client.S) only ever launches it for one fixed
+# window per boot run.
+fn window_event_client_main(event_name: u64, delivery_marker: u64, window_id: u64) -> u64 {
+    packet_address: u64 = 3293184;
+    server: u64 = MakoAbi.channel_create(event_name, 12);
+    delivered: u64 = 0;
+    while true {
+        if MakoAbi.channel_receive(server, packet_address, 64, 0) != 64 {
+            MakoAbi.exit(112); return 112;
+        }
+        packet: vptr<u64> = vptr_from_u64(packet_address);
+        header: u64 = vptr_read_u64(packet);
+        low_header: u64 = header - (header / 4294967296) * 4294967296;
+        identity: u64 = vptr_read_u64(vptr_offset_u64(packet, 1));
+        received_window_id: u64 = identity - (identity / 4294967296) * 4294967296;
+        key: u64 = vptr_read_u64(vptr_offset_u64(packet, 2));
+        event_type: u64 = key - (key / 65536) * 65536;
+        key_code: u64 = key / 65536;
+        key_code = key_code - (key_code / 65536) * 65536;
+        if low_header != 524289 or received_window_id != window_id or
+           (event_type != 1 and event_type != 2) {
+            MakoAbi.exit(113); return 113;
+        }
+        if delivered == 0 {
+            if event_type != 1 or key_code != 30 {
+                MakoAbi.exit(114); return 114;
+            }
+            if MakoAbi.write(delivery_marker, 28) != 28 {
+                MakoAbi.exit(115); return 115;
+            }
+        }
+        delivered = delivered + 1;
+    }
+    return 0;
+}

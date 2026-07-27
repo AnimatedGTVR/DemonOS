@@ -1,0 +1,195 @@
+# First kernel-safe MAKO module. It deliberately uses only fixed-width values,
+# typed functions, branches, and arithmetic that can lower without a managed
+# runtime. These functions are compiled and linked into the kernel image.
+fn mako_add(left: u64, right: u64) -> u64 {
+    return left + right;
+}
+
+fn mako_mix(value: u64, salt: u64) -> u64 {
+    mixed: u64 = value * 33;
+    mixed = mixed + salt;
+    if mixed > 4096 {
+        return mixed - 4096;
+    }
+    return mixed;
+}
+
+# The first real kernel policy implemented in MKO: accept only Multiboot2
+# memory-map entries marked available (type 1) and accumulate their byte count.
+fn mako_memory_accumulate(total: u64, base: u64, length: u64, kind: u64) -> u64 {
+    if kind != 1 {
+        return total;
+    }
+    # Wrapped firmware entries are invalid and must not inflate usable memory.
+    end: u64 = base + length;
+    if end < base {
+        return total;
+    }
+    return total + length;
+}
+
+# Decode a Multiboot2 mmap entry directly from its packed firmware layout:
+# address:u64 at +0, length:u64 at +8, type:u32 at +16.
+fn mako_memory_entry_accumulate(total: u64, entry_address: u64) -> u64 {
+    base_pointer: vptr<u64> = vptr_from_u64(entry_address);
+    length_pointer: vptr<u64> = vptr_offset_u64(base_pointer, 1);
+    kind_pointer: vptr<u32> = vptr_from_u32(entry_address + 16);
+    base: u64 = vptr_read_u64(base_pointer);
+    length: u64 = vptr_read_u64(length_pointer);
+    kind: u32 = vptr_read_u32(kind_pointer);
+    if kind != 1 {
+        return total;
+    }
+    end: u64 = base + length;
+    if end < base {
+        return total;
+    }
+    return total + length;
+}
+
+fn mako_signed_less(left: i64, right: i64) -> bool {
+    return left < right;
+}
+
+fn mako_signed_div(value: i64, divisor: i64) -> i64 {
+    return value / divisor;
+}
+
+# Direct device-memory access: write a character/color pair into VGA text RAM.
+fn mako_vga_cell(index: u64, glyph: u64, color: u64) -> none {
+    screen: vptr<u16> = vptr_from_u16(753664);
+    cell_address: vptr<u16> = vptr_offset_u16(screen, index);
+    cell: u64 = glyph + color * 256;
+    vptr_write_u16(cell_address, cell);
+}
+
+fn mako_vga_read(index: u64) -> u16 {
+    screen: vptr<u16> = vptr_from_u16(753664);
+    cell_address: vptr<u16> = vptr_offset_u16(screen, index);
+    return vptr_read_u16(cell_address);
+}
+
+# Initialize a two-word bump allocator state from one packed Multiboot2 entry.
+# state[0] is the next 4 KiB frame and state[1] is the exclusive region end.
+fn mako_frame_region_init(state_address: u64, entry_address: u64, minimum: u64) -> bool {
+    entry64: vptr<u64> = vptr_from_u64(entry_address);
+    entry_length: vptr<u64> = vptr_offset_u64(entry64, 1);
+    entry_kind: vptr<u32> = vptr_from_u32(entry_address + 16);
+    base: u64 = vptr_read_u64(entry64);
+    length: u64 = vptr_read_u64(entry_length);
+    kind: u32 = vptr_read_u32(entry_kind);
+    if kind != 1 {
+        return false;
+    }
+    region_end: u64 = base + length;
+    if region_end < base {
+        return false;
+    }
+    start: u64 = base;
+    if start < minimum {
+        start = minimum;
+    }
+    aligned_input: u64 = start + 4095;
+    if aligned_input < start {
+        return false;
+    }
+    start = aligned_input / 4096 * 4096;
+    first_end: u64 = start + 4096;
+    if first_end < start {
+        return false;
+    }
+    if first_end > region_end {
+        return false;
+    }
+    state: vptr<u64> = vptr_from_u64(state_address);
+    state_end: vptr<u64> = vptr_offset_u64(state, 1);
+    vptr_write_u64(state, start);
+    vptr_write_u64(state_end, region_end);
+    return true;
+}
+
+fn mako_frame_allocate(state_address: u64) -> u64 {
+    state: vptr<u64> = vptr_from_u64(state_address);
+    state_end: vptr<u64> = vptr_offset_u64(state, 1);
+    next: u64 = vptr_read_u64(state);
+    region_end: u64 = vptr_read_u64(state_end);
+    if next == 0 {
+        return 0;
+    }
+    following: u64 = next + 4096;
+    if following < next {
+        return 0;
+    }
+    if following > region_end {
+        return 0;
+    }
+    vptr_write_u64(state, following);
+    return next;
+}
+
+fn mako_clear_page(page_address: u64) -> none {
+    page: vptr<u64> = vptr_from_u64(page_address);
+    index: u64 = 0;
+    while index < 512 {
+        entry: vptr<u64> = vptr_offset_u64(page, index);
+        vptr_write_u64(entry, 0);
+        index = index + 1;
+    }
+}
+
+# Build a four-level x86_64 hierarchy identity-mapping the first 1 GiB of
+# physical memory: PD index 0 and 1 keep the original 4 KiB-leaf page tables
+# (pt0 covers 0-2 MiB, pt1 covers 2-4 MiB) unchanged, because
+# edit_surface_ptes (src/arch/x86_64/userspace.c) directly indexes pt1 at
+# 4 KiB granularity to map/unmap individual client surface pages -- that
+# fine-grained region cannot become a 2 MiB huge page. Every PD index from 2
+# through 511 instead becomes a 2 MiB huge page (the PS bit) mapped straight
+# in the page directory with no separate page table at all, extending
+# identity-mapped room from 4 MiB to 1 GiB so the kernel, every ISO module,
+# the framebuffer backbuffer, the surface arena, and embedded assets like the
+# desktop wallpaper all have real headroom without needing yet another level
+# of page tables.
+fn mako_build_identity_4m(pml4_address: u64, pdpt_address: u64, pd_address: u64, pt0_address: u64, pt1_address: u64) -> bool {
+    mako_clear_page(pml4_address);
+    mako_clear_page(pdpt_address);
+    mako_clear_page(pd_address);
+    mako_clear_page(pt0_address);
+    mako_clear_page(pt1_address);
+
+    pml4: vptr<u64> = vptr_from_u64(pml4_address);
+    pdpt: vptr<u64> = vptr_from_u64(pdpt_address);
+    pd: vptr<u64> = vptr_from_u64(pd_address);
+    pt0: vptr<u64> = vptr_from_u64(pt0_address);
+    pt1: vptr<u64> = vptr_from_u64(pt1_address);
+    # Upper levels permit user traversal; individual leaf entries still decide
+    # whether a page is supervisor-only or ring-3 accessible.
+    vptr_write_u64(pml4, pdpt_address + 7);
+    vptr_write_u64(pdpt, pd_address + 7);
+    vptr_write_u64(pd, pt0_address + 7);
+    pd_second: vptr<u64> = vptr_offset_u64(pd, 1);
+    vptr_write_u64(pd_second, pt1_address + 7);
+
+    index: u64 = 0;
+    while index < 512 {
+        low_entry: vptr<u64> = vptr_offset_u64(pt0, index);
+        high_entry: vptr<u64> = vptr_offset_u64(pt1, index);
+        vptr_write_u64(low_entry, index * 4096 + 3);
+        vptr_write_u64(high_entry, 2097152 + index * 4096 + 3);
+        index = index + 1;
+    }
+
+    pd_index: u64 = 2;
+    while pd_index < 512 {
+        huge_entry: vptr<u64> = vptr_offset_u64(pd, pd_index);
+        # Present(1) | writable(2) | user(4) | page-size/PS(128) | address.
+        vptr_write_u64(huge_entry, pd_index * 2097152 + 135);
+        pd_index = pd_index + 1;
+    }
+    return true;
+}
+
+fn mako_page_probe(address: u64, value: u64) -> bool {
+    target: vptr<u64> = vptr_from_u64(address);
+    vptr_write_u64(target, value);
+    return vptr_read_u64(target) == value;
+}
