@@ -1,104 +1,142 @@
 # MAKO Kernel Project
 
-An x86_64 freestanding kernel and portable project runtime. Applications target
-MAKO-ABI instead of Windows or Linux APIs, and kernel/user components can be
-compiled from native MKO as the MAKO compiler matures.
+An x86_64 freestanding kernel and portable project runtime. Applications
+target MAKO-ABI instead of Windows or Linux APIs, and kernel/user components
+can be compiled from native MKO as the MAKO compiler matures.
 
-The native display path now has a Multiboot linear-framebuffer backend and a
+**Current milestone: kernel/platform desktop-demo complete at 100/100.** It
+boots a real ISO, isolates dynamic ring-3 programs, exposes capability
+IPC/files/input/display services, and keeps a persistent draggable userspace
+desktop alive beside the console. It is scoped to a credible developer
+desktop preview, not production OS completeness — persistence, USB/virtio
+drivers, networking, SMP, installation, full font shaping, broader
+applications, and hardware acceleration remain future production work.
+
+## Table of contents
+
+- [Native display stack](#native-display-stack)
+- [DemonX: X11 compatibility](#demonx-x11-compatibility)
+- [Demon Web](#demon-web)
+- [Bootable ISO distribution](#bootable-iso-distribution)
+- [Current milestone](#current-milestone)
+- [MakoBox](#makobox)
+- [Scheduler, syscalls, and user mode](#scheduler-syscalls-and-user-mode)
+- [Build and run](#build-and-run)
+- [Boot status and self-tests](#boot-status-and-self-tests)
+- [The native bridge](#the-native-bridge)
+
+## Native display stack
+
+The native display path has a Multiboot linear-framebuffer backend and a
 hardware-independent Stage 2 ARGB software renderer. See
 [framebuffer Stage 1](docs/framebuffer-stage1.md) and
-[graphics Stage 2](docs/graphics-stage2.md). A native MKO ring-3 display server
-now owns bounded framebuffer transfers and input capabilities; see
-[compositor Stage 6](docs/compositor-stage6.md). Three isolated creation clients,
-creation z-order, crash containment, atomic presentation, and pointer-driven
-focus are exercised during every graphical boot. A later fourth client moves a
-window and triggers frame two. The compositor then blocks on an atomic IPC/input
-waitset; real pointer press, motion, and release events drag the focused window
-and trigger frame three. Bottom-right capture then resizes it within minimum and
-screen bounds as frame four. A separate persistent ring-3 client receives and
-validates focused KEY packets. Init binds the live display-server PID to
-`desktop-compositor.service`, reaches `desktop.target`, the panel launcher
-toggles as frame five, and cursor-only motion repaints frame six before the
-userspace scene is restored as frame seven after the boot diagnostic. Dirty
-scenes use timer deadlines for measured two-tick
-frame pacing. The shell pumps only
-IRQ-woken desktop work, so the compositor stays interactive without polling.
-A bounded 64×64 client-owned surface is transferred and mapped read-only into
-the compositor at a fixed userspace address. Client-owned damage metadata is
-consumed exactly once, and final-handle close clears and reclaims the arena slot.
-PS/2 mouse decoding and the common keyboard/mouse event ABI are documented in
-[input Stage 3](docs/input-stage3.md).
-Bounded dynamic ELF64 spawning, process waiting, cleanup, and capability policy are
-documented in [process Stage 4](docs/process-stage4.md).
-Named capability channels and blocking message delivery are documented in
-[IPC Stage 5](docs/ipc-stage5.md).
+[graphics Stage 2](docs/graphics-stage2.md).
 
-The ISO also boots [DemonX](docs/demonx.md), a clean native X11 compatibility
+A native MKO ring-3 display server now owns bounded framebuffer transfers and
+input capabilities; see [compositor Stage 6](docs/compositor-stage6.md).
+Every graphical boot exercises:
+
+- three isolated creation clients, creation z-order, crash containment,
+  atomic presentation, and pointer-driven focus;
+- a fourth client that moves a window and triggers frame two;
+- an atomic IPC/input waitset, where real pointer press, motion, and release
+  events drag the focused window and trigger frame three;
+- bottom-right capture that resizes the window within minimum/screen bounds
+  as frame four;
+- a separate persistent ring-3 client that receives and validates focused
+  `KEY` packets;
+- init binding the live display-server PID to `desktop-compositor.service`,
+  reaching `desktop.target`, and the panel launcher toggling as frame five;
+- cursor-only motion repainting frame six before the userspace scene is
+  restored as frame seven after the boot diagnostic.
+
+Dirty scenes use timer deadlines for measured two-tick frame pacing. The
+shell pumps only IRQ-woken desktop work, so the compositor stays interactive
+without polling. A bounded 64×64 client-owned surface is transferred and
+mapped read-only into the compositor at a fixed userspace address;
+client-owned damage metadata is consumed exactly once, and final-handle
+close clears and reclaims the arena slot.
+
+PS/2 mouse decoding and the common keyboard/mouse event ABI are documented in
+[input Stage 3](docs/input-stage3.md). Bounded dynamic ELF64 spawning,
+process waiting, cleanup, and capability policy are documented in
+[process Stage 4](docs/process-stage4.md). Named capability channels and
+blocking message delivery are documented in [IPC Stage 5](docs/ipc-stage5.md).
+
+Graphical boots finish in the native userspace desktop: `desktop.target`
+retains framebuffer and unified-input ownership through the ring-3
+compositor. MakoBox remains the recovery console for framebuffer-less boots
+rather than covering or suspending the graphical session.
+
+The normal ISO presents a native wallpaper-backed loading transition and a
+local login/lock gate — the current preview credential is `demon` / `demon`,
+and Super+L relocks the live session. The unattended test ISO alone bypasses
+that gate. The `terminal-smoke` compatibility target verifies the desktop
+remains visible and compositor-owned after boot and responds to pointer
+motion without entering terminal ownership.
+
+The ISO also includes a freestanding C Tetris application, launchable from
+the recovery console with `tetris` or `apps launch tetris` (A/D, W, S, and
+Q). The reproducible freestanding C build contract is in
+[C applications](docs/c-apps.md). Freedoom is tracked as an honest engine
+port, not a renamed demo; see the
+[Freedoom port plan](docs/freedoom-port.md).
+
+## DemonX: X11 compatibility
+
+The ISO boots [DemonX](docs/demonx.md), a clean native X11 compatibility
 service. Its freestanding C server parses X11 11.0 wire requests transported
 over capability IPC, while a MAKO client proves setup, resource allocation,
 window creation/mapping, geometry replies, destruction, and error handling.
-Graphical boots now finish in the native userspace desktop: `desktop.target`
-retains framebuffer and unified-input ownership through the ring-3 compositor.
-MakoBox remains the recovery console for framebuffer-less boots rather than
-covering or suspending the graphical session. The normal ISO presents a native
-wallpaper-backed loading transition and local login/lock gate; the current
-preview credential is `demon` / `demon`, and Super+L relocks the live session.
-The unattended test ISO alone bypasses that gate. The ISO includes a freestanding
-C Tetris application, currently launchable from that recovery console with
-`tetris` or `apps launch tetris`; use A/D, W, S, and Q. The reproducible
-freestanding C build contract is in [C applications](docs/c-apps.md). Freedoom
-is tracked as an honest engine port, not a renamed demo; see the
-[Freedoom port plan](docs/freedoom-port.md). The `terminal-smoke` compatibility
-target now verifies the desktop remains visible and compositor-owned after
-boot and responds to pointer motion without entering terminal ownership.
 
-The desktop WEB launcher now starts **Demon Web**, a dedicated native MKO
-document-browser process rather than the old counter-app placeholder. It has an
-editable location field, four-entry back/forward history, home and reload
-controls, mouse and keyboard navigation, and rendered `demon://home`,
-`demon://about`, `demon://network`, and `demon://files` pages on a client-owned
-shared surface. `file:///` addresses are capability-checked reads from the real
-RAMFS; press `5` on the home page to open the ISO-seeded `/README.md`. Reads are
-bounded to a 512-byte preview so a document never forces the lightweight client
-to mirror a large kernel object in RAM. This is the real browser/UI foundation,
-but it is intentionally not described as internet-capable yet: NIC, TCP/IP,
-DNS, HTTP, and TLS remain platform work.
+## Demon Web
+
+The desktop WEB launcher starts **Demon Web**, a dedicated native MKO
+document-browser process rather than the old counter-app placeholder. It has:
+
+- an editable location field;
+- a four-entry back/forward history;
+- home and reload controls;
+- mouse and keyboard navigation;
+- rendered `demon://home`, `demon://about`, `demon://network`, and
+  `demon://files` pages on a client-owned shared surface.
+
+`file:///` addresses are capability-checked reads from the real RAMFS —
+press `5` on the home page to open the ISO-seeded `/README.md`. Reads are
+bounded to a 512-byte preview so a document never forces the lightweight
+client to mirror a large kernel object in RAM.
+
+This is the real browser/UI foundation, but it is intentionally not
+described as internet-capable yet: NIC, TCP/IP, DNS, HTTP, and TLS remain
+platform work.
 
 ## Bootable ISO distribution
 
-`make iso` produces `build/kernel.iso` and verifies that it contains the kernel,
-the shared MKO SDK, starter project source, compiled starter ELF, native
-compositor/client ELFs, and desktop roadmap. GRUB loads them as Multiboot2 modules; the kernel reserves
-their physical ranges and installs them into the RAM project store. At the
-interactive prompt, `mko` shows the installed environment and `projects` lists
-the actual files.
+`make iso` produces `build/kernel.iso` and verifies that it contains the
+kernel, the shared MKO SDK, starter project source, compiled starter ELF,
+native compositor/client ELFs, and desktop roadmap. GRUB loads them as
+Multiboot2 modules; the kernel reserves their physical ranges and installs
+them into the RAM project store. At the interactive prompt, `mko` shows the
+installed environment and `projects` lists the actual files.
 
 `make session-login-smoke` boots the normal `build/kernel-run.iso`, verifies
 wrong-password rejection, unlocks the desktop through real PS/2 key events,
 and verifies Super+L returns to the lock screen.
 
-`make run` enables QEMU GTK input grabbing so the host pointer does not remain
-visible beside the DemonOS PS/2 cursor. On a Wayland desktop it deliberately
-runs QEMU's GTK window through XWayland: QEMU's native GTK/Wayland path can
-deliver only the entry motion before relative-pointer capture is established.
-Press `Ctrl+Alt+G` to release input. PS/2 reports relative motion only; absolute
-host/guest synchronization requires the planned USB HID/tablet driver.
+`make run` enables QEMU GTK input grabbing so the host pointer does not
+remain visible beside the DemonOS PS/2 cursor. On a Wayland desktop it
+deliberately runs QEMU's GTK window through XWayland: QEMU's native
+GTK/Wayland path can deliver only the entry motion before relative-pointer
+capture is established. Press `Ctrl+Alt+G` to release input. PS/2 reports
+relative motion only; absolute host/guest synchronization requires the
+planned USB HID/tablet driver.
 
-The SDK and native runtime are preinstalled today. The compiler is still a host
-tool until the self-hosted compiler core and its required runtime services are
-ported. That work is specified in the
+The SDK and native runtime are preinstalled today. The compiler is still a
+host tool until the self-hosted compiler core and its required runtime
+services are ported. That work is specified in the
 [desktop ISO roadmap](docs/desktop-iso-roadmap.md).
 
 ## Current milestone
-
-The **kernel/platform desktop-demo milestone is complete at 100/100**: it boots a
-real ISO, isolates dynamic ring-3 programs, exposes capability IPC/files/input/
-display services, and keeps a persistent draggable userspace desktop alive
-beside the console. That milestone is met, and work has continued beyond its
-original keyboard and resize gaps. It is scoped to a credible developer desktop
-preview, not production OS completeness. Persistence, USB/virtio drivers,
-networking, SMP, installation, full font shaping, broader applications, and
-hardware acceleration remain future production work.
 
 - GRUB Multiboot2 boot
 - 32-bit bootstrap into x86_64 long mode
@@ -174,62 +212,67 @@ hardware acceleration remain future production work.
 
 ## MakoBox
 
-MakoBox is the kernel's single-binary command toolkit. `makobox_run()` dispatches
-`help`, `uname`, `status`, `mem`, `frames`, `paging`, `ticks`, `ps`, `abi`,
-`caps`, `projects`, `systemctl`, `runas`, `mko`, `input`, `fetch`, and `clear`
-without a C library. The diagnostic applets read live kernel state and
-write to both VGA and serial. Boot executes the dispatcher through all read-only
-applets and requires `MAKOBOX_SELF_TEST_OK`. The keyboard shell reuses this same
-dispatcher rather than implementing commands twice.
+MakoBox is the kernel's single-binary command toolkit. `makobox_run()`
+dispatches `help`, `uname`, `status`, `mem`, `frames`, `paging`, `ticks`,
+`ps`, `abi`, `caps`, `projects`, `systemctl`, `runas`, `mko`, `input`,
+`fetch`, and `clear` without a C library. The diagnostic applets read live
+kernel state and write to both VGA and serial. Boot executes the dispatcher
+through all read-only applets and requires `MAKOBOX_SELF_TEST_OK`. The
+keyboard shell reuses this same dispatcher rather than implementing commands
+twice.
 
 The dependency-aware init system and its deliberately smaller systemd-like
-operator surface are documented in [MAKO Init and Service
-Management](docs/init-system.md). Graphical boot resolves ten units through
-`desktop.target`; framebuffer fallback resolves the original eight through
-`default.target`.
-Read-only `systemctl` operations are public; mutations require the local-console
-`runas` policy boundary.
+operator surface are documented in
+[MAKO Init and Service Management](docs/init-system.md). Graphical boot
+resolves ten units through `desktop.target`; framebuffer fallback resolves
+the original eight through `default.target`. Read-only `systemctl`
+operations are public; mutations require the local-console `runas` policy
+boundary.
 
-Application discovery, the native Git foundation, and the boundary for dynamic
-launch/desktop work are documented in [Applications and Git
-Foundation](docs/apps-and-git.md).
+Application discovery, the native Git foundation, and the boundary for
+dynamic launch/desktop work are documented in
+[Applications and Git Foundation](docs/apps-and-git.md).
 
-The first real graphics milestone is documented in [Native Framebuffer Stage
-1](docs/framebuffer-stage1.md). It maps QEMU's high physical framebuffer,
-allocates a bounded backbuffer only when graphics is available, and renders a
-live graphical boot diagnostic without exposing device memory to userspace.
+The first real graphics milestone is documented in
+[Native Framebuffer Stage 1](docs/framebuffer-stage1.md). It maps QEMU's
+high physical framebuffer, allocates a bounded backbuffer only when
+graphics is available, and renders a live graphical boot diagnostic without
+exposing device memory to userspace.
 
 `make run` opens QEMU's VGA window; click it and type at the `mako#` prompt.
 The PS/2 IRQ driver supports US set-1 keys, Enter, Backspace, Shift, and Caps
-Lock. The kernel explicitly enables the i8042 first
-port, set-1 translation, IRQ1, and keyboard scanning instead of assuming the
-bootloader left them active. The `input` applet reports live IRQ and decoded
-character counts; `make keyboard-smoke` types `help` through QEMU and verifies
-the command actually runs.
+Lock. The kernel explicitly enables the i8042 first port, set-1 translation,
+IRQ1, and keyboard scanning instead of assuming the bootloader left them
+active. The `input` applet reports live IRQ and decoded character counts;
+`make keyboard-smoke` types `help` through QEMU and verifies the command
+actually runs.
 
-`fetch` is MakoBox's fastfetch-style summary. It reads CPUID, the live timer,
-memory-map totals, active CR3, allocator cursor, and linked kernel size. Kernel
-C uses `-Os`; functions and data get individual ELF sections, and the linker
-garbage-collects unreachable sections. Run `make size` for the image footprint.
+`fetch` is MakoBox's fastfetch-style summary. It reads CPUID, the live
+timer, memory-map totals, active CR3, allocator cursor, and linked kernel
+size. Kernel C uses `-Os`; functions and data get individual ELF sections,
+and the linker garbage-collects unreachable sections. Run `make size` for
+the image footprint.
 
 ## Scheduler, syscalls, and user mode
 
-The scheduler owns PID 0 (`idle`) plus PID 1 (`init`) and PID 2 (`worker`). Each
-user task has a separate 4 KiB ring-0 interrupt stack and 8 KiB user stack. The PIT
-charges CPU ticks to the running task and performs round-robin preemption every
-four ticks. The IRQ stub saves all general-purpose registers, C selects the next
-task and updates the TSS stack, then assembly restores the selected interrupt
-frame and returns with `iretq`. `yield` uses the same switch path; `exit` records
-the status and schedules the remaining task or returns to idle. The `ps` applet
-reports state, charged ticks, yields, quantum expirations, and dispatches.
+The scheduler owns PID 0 (`idle`) plus PID 1 (`init`) and PID 2 (`worker`).
+Each user task has a separate 4 KiB ring-0 interrupt stack and 8 KiB user
+stack. The PIT charges CPU ticks to the running task and performs
+round-robin preemption every four ticks. The IRQ stub saves all
+general-purpose registers, C selects the next task and updates the TSS
+stack, then assembly restores the selected interrupt frame and returns with
+`iretq`. `yield` uses the same switch path; `exit` records the status and
+schedules the remaining task or returns to idle. The `ps` applet reports
+state, charged ticks, yields, quantum expirations, and dispatches.
 
-The loader validates and copies an embedded ELF64 executable to `0x300000` in
-each private address space. Its capability, project-storage, scheduling,
-isolation, and exit logic comes from [native MKO source](user/init.mko) linked
-into the ELF. Timer IRQs arriving in ring 3 switch
-to the current task's TSS `rsp0` stack. Both processes remain live across timer
-preemption, yield, and exit with statuses 41 and 42. They store different PIDs
-at the same virtual stack offset, proving the physical mappings are isolated.
+The loader validates and copies an embedded ELF64 executable to `0x300000`
+in each private address space. Its capability, project-storage, scheduling,
+isolation, and exit logic comes from [native MKO source](user/init.mko)
+linked into the ELF. Timer IRQs arriving in ring 3 switch to the current
+task's TSS `rsp0` stack. Both processes remain live across timer
+preemption, yield, and exit with statuses 41 and 42. They store different
+PIDs at the same virtual stack offset, proving the physical mappings are
+isolated.
 
 The current `int 0x80` ABI is:
 
@@ -247,24 +290,26 @@ The current `int 0x80` ABI is:
 | 9 | `file_open` | storage handle, name, length, create flag | file handle or `-1` |
 | 10 | `handle_read` | file handle, destination, capacity | bytes or `-1` |
 
-The full compatibility boundary is documented in [MAKO Application ABI
-0.1](docs/application-abi.md). It keeps projects independent of host operating
-system APIs while remaining explicit that current binaries are x86-64. The
-typed MKO userspace SDK is live; multiple ELF segments, copy-on-write, and
-persistent storage are the next larger runtime steps.
+The full compatibility boundary is documented in
+[MAKO Application ABI 0.1](docs/application-abi.md). It keeps projects
+independent of host operating system APIs while remaining explicit that
+current binaries are x86-64. The typed MKO userspace SDK is live; multiple
+ELF segments, copy-on-write, and persistent storage are the next larger
+runtime steps.
 
 The ISO also includes a compressed snapshot of the actual
 `https://github.com/AnimatedGTVR/MAKO.git` checkout at
-`/system/mako/MAKO-source.tar.zst`. Its boot-visible `mako.txt` manifest records
-the origin, exact commit, working-tree state, archive size, and SHA-256. This is
-the compiler repository source—not a substitute SDK. Running that .NET-based
-compiler inside the freestanding kernel remains a separate VFS/runtime port.
+`/system/mako/MAKO-source.tar.zst`. Its boot-visible `mako.txt` manifest
+records the origin, exact commit, working-tree state, archive size, and
+SHA-256. This is the compiler repository source, not a substitute SDK.
+Running that .NET-based compiler inside the freestanding kernel remains a
+separate VFS/runtime port.
 
 The reusable SDK lives in [`user/sdk.mko`](user/sdk.mko). The independent
-[`projects/hello`](projects/hello/main.mko) example imports it with normal MAKO
-`use` syntax and builds to a 1,031-byte ELF. This is the project-home model:
-application code targets one small MAKO contract regardless of whether its
-development tools are running on Windows or Linux.
+[`projects/hello`](projects/hello/main.mko) example imports it with normal
+MAKO `use` syntax and builds to a 1,031-byte ELF. This is the project-home
+model: application code targets one small MAKO contract regardless of
+whether its development tools are running on Windows or Linux.
 
 ## Build and run
 
@@ -281,20 +326,29 @@ make footprint-check # enforce init/runas and total-kernel memory budgets
 make check           # smoke + MAKO checks
 ```
 
+## Boot status and self-tests
+
 The boot console reports each initialized subsystem with a colored `[ OK ]`
-line on both VGA text mode and COM1 serial, followed by a MAKO welcome banner.
-Serial output retains stable `MKO_*_OK` and `KERNEL_BOOT_OK` markers so the
-human-friendly startup remains fully smoke-testable.
+line on both VGA text mode and COM1 serial, followed by a MAKO welcome
+banner. Serial output retains stable `MKO_*_OK` and `KERNEL_BOOT_OK` markers
+so the human-friendly startup remains fully smoke-testable.
 
-Status lines are check results, not simulated progress. Boot reads CR0/CR3/CR4
-to validate paging, requires a usable Multiboot2 memory map, derives the frame
-allocator floor from the real linked `kernel_end` and boot-information end,
-checks consecutive physical allocations, executes native MKO arithmetic, and
-reads the MKO-written VGA cells back before reporting success. A failed check
-prints `[FAILED]` and halts.
+Status lines are check results, not simulated progress. Boot:
 
-The C/assembly bootstrap is temporary infrastructure. The first native bridge
-is live: MAKO emits `build/kernel_probe.S`, GCC assembles it into an ELF64
-relocatable object, and the C kernel calls its exported functions. The intended
-migration path is now to expand native types and memory operations, then replace
-kernel subsystems with MAKO one at a time.
+- reads CR0/CR3/CR4 to validate paging;
+- requires a usable Multiboot2 memory map;
+- derives the frame allocator floor from the real linked `kernel_end` and
+  boot-information end;
+- checks consecutive physical allocations;
+- executes native MKO arithmetic;
+- reads the MKO-written VGA cells back before reporting success.
+
+A failed check prints `[FAILED]` and halts.
+
+## The native bridge
+
+The C/assembly bootstrap is temporary infrastructure. The first native
+bridge is live: MAKO emits `build/kernel_probe.S`, GCC assembles it into an
+ELF64 relocatable object, and the C kernel calls its exported functions. The
+intended migration path is now to expand native types and memory
+operations, then replace kernel subsystems with MAKO one at a time.

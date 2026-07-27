@@ -4,6 +4,8 @@ The first DemonOS display server is compiled from `user/compositor.mko` and
 runs at ring 3 as an isolated ELF64 process. It receives the display and input
 capabilities explicitly; normal applications cannot open either service.
 
+## Scene policy and protocol
+
 The compositor owns scene policy and software rasterization. It draws the
 wallpaper, panel, and overlapping window surfaces into a private 64x32 tile
 (8 KiB), then submits that damage through MAKO-ABI syscalls 18-21. The kernel
@@ -63,6 +65,8 @@ budget (or with no surface at all, like the crash-containment client) is
 composited with flat placeholder content instead of forged pixels -- the
 compositor never claims a window has real client pixels when it does not.
 
+## Introspection and event loop
+
 A new syscall (31, `compositor_report`) lets the compositor self-report its
 live window count and currently focused window id into kernel-side counters
 after every table change, gated on the same DISPLAY capability write right
@@ -86,6 +90,8 @@ release ends capture, refocusing and raising whichever window was dragged.
 Bottom-right press captures resize instead of drag, clamped to a 160x120
 minimum and the remaining display bounds.
 
+## Keyboard focus and window decorations
+
 Keyboard focus crosses a real process boundary and follows live focus, not a
 boot-time snapshot. For key down/up, the compositor connects (by the focused
 window's derived channel name) with send-only authority and forwards a
@@ -101,6 +107,8 @@ bar and bottom dock;
 minimize removes only that window from composition while retaining its table
 entry, surface mapping, and process-visible identity. A second taskbar click
 restores the same normal or maximized mode and raises the window.
+
+## Keyboard shortcuts
 
 Desktop shortcuts are compositor policy and are consumed before ordinary key
 forwarding. Alt+Tab cycles across visible live-table slots and Alt+F4 closes
@@ -141,6 +149,8 @@ contract tests remain unattended; the normal run ISO never auto-unlocks.
 unlock, and Super+L relock from framebuffer screenshots, and rejects any
 page-fault/panic marker.
 
+## Dock, launcher, and cursor
+
 The bottom dock is built from the live window table rather than fixed sample
 rectangles. Every occupied slot has a stable task button with distinct
 focused, inactive, and minimized visuals. Clicking a focused task minimizes
@@ -161,6 +171,8 @@ damage instead of repainting the entire desktop. The overlay is blended from
 the clean scene backbuffer after every present, so cursor pixels never pollute
 application content, leave stale saved pixels, or flash during window frames.
 
+## Lifetime and surface sharing
+
 The compositor is not terminated at any point during the boot contract test;
 it remains alive as the desktop service through window creation, focus
 changes, moves, drags, keyboard routing, and a close, and stays running
@@ -180,6 +192,8 @@ mappings retain the underlying object independently; closing the final
 reference clears its slot and returns it to the fixed pool; closing a window
 that owns a mapped surface releases that mapping.
 
+## A cross-address-space copy bug it uncovered
+
 Blocking delivery uncovered a low-memory aliasing bug in kernel-to-user
 copies. Process page tables remap part of the identity-mapped 3-4 MiB region,
 so treating a physical frame number as a kernel pointer could write through
@@ -187,6 +201,8 @@ the sender's mapping. `userspace_copy_to` stages bounded chunks on the kernel
 stack, activates the destination CR3, writes through the validated user
 virtual range, and restores the caller CR3. IPC, input, and display metadata
 therefore reach the intended isolated address space.
+
+## Current scope
 
 This is now the window-manager foundation plus a native desktop-shell preview,
 not the finished desktop. Notifications, a clock service, workspaces,
