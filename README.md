@@ -1,9 +1,5 @@
 # MAKO Kernel Project
 
-
-## BUILT USING AI (btw)
-
-
 An x86_64 freestanding kernel and portable project runtime. Applications target
 MAKO-ABI instead of Windows or Linux APIs, and kernel/user components can be
 compiled from native MKO as the MAKO compiler matures.
