@@ -4,13 +4,7 @@ An x86_64 freestanding kernel and portable project runtime. Applications
 target MAKO-ABI instead of Windows or Linux APIs, and kernel/user components
 can be compiled from native MKO as the MAKO compiler matures.
 
-**Current milestone: kernel/platform desktop-demo complete at 100/100.** It
-boots a real ISO, isolates dynamic ring-3 programs, exposes capability
-IPC/files/input/display services, and keeps a persistent draggable userspace
-desktop alive beside the console. It is scoped to a credible developer
-desktop preview, not production OS completeness — persistence, USB/virtio
-drivers, networking, SMP, installation, full font shaping, broader
-applications, and hardware acceleration remain future production work.
+**Issues!**: If you find any issues I would love it if you could please report it, if you wamnt to fix them look at - [Contributing](#Contributing)
 
 ## Table of contents
 
