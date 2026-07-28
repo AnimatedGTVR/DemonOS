@@ -1,7 +1,9 @@
 use "sdk.mko";
+use "../Desktop/desktop.mko";
 
-# Native ring-3 display server. Scene policy and rasterization live here; the
-# kernel only validates capabilities and copies bounded damage tiles.
+# Native ring-3 compositor. This file owns display capability use, window
+# surfaces, z-order, focus, input routing, and bounded presentation. Desktop
+# shell policy and appearance live in Desktop/desktop.mko.
 #
 # Window table: MKO's kernel profile has no structs/arrays (verified against
 # the compiler: `struct construction` and `list` are both rejected under
@@ -44,8 +46,8 @@ use "sdk.mko";
 #   word7: restore_width + restore_height * 2^32
 #   word8: anim_start_phase + anim_kind * 2^32 (see slot_anim_kind/
 #          slot_set_anim below -- open/close transition state)
-#   word9: app_kind (see slot_app_kind/slot_set_app_kind and
-#          app_kind_terminal/app_kind_generic/app_kind_browser below --
+#   word9: app_kind (low32) + composition_layer * 2^32 (see
+#          slot_app_kind/slot_layer and the app_kind/layer helpers below --
 #          which icon/titlebar chrome this window renders with). Every
 #          window-creating client shares one CREATE wire format with no
 #          per-app tag field of its own (see the wire-format note below),
@@ -205,9 +207,18 @@ fn argb_with_alpha(color: u64, alpha: u64) -> u64 {
 # pack_words()/u64_max() already establish for anything constant-like. Every
 # render_* function below calls these instead of inlining raw decimal ARGB
 # literals.
-fn color_shadow() -> u64 { return 1610612736; }                # #60000000
-fn color_window_body() -> u64 { return 3860340268; }           # #E6181E2C
-fn color_window_border() -> u64 { return 4282280888; }         # #FF3E6BB8
+fn color_shadow() -> u64 { return 1879048192; }                # #70000000
+fn color_window_body() -> u64 { return 3941791740; }           # #EAF2F7FC frosted silver
+fn color_window_border() -> u64 { return 4286101990; }         # #FF78B9E6 aqua glass rim
+
+# Aero-glass specular sheen: a bright, fading-to-transparent band drawn near
+# the top of a glass panel (window titlebars, the login/loading card, the
+# settings popover) to match Desktop/desktop.mko's glass treatment without a
+# real blur buffer. Same values as Desktop.desktop_color_glass_sheen_top/
+# bottom(), duplicated here rather than cross-namespace-imported since these
+# are plain global functions like every other color_* helper in this file.
+fn color_glass_sheen_top() -> u64 { return 1895825407; }       # #70FFFFFF
+fn color_glass_sheen_bottom() -> u64 { return 2785208; }       # #002A7FB8
 
 # Accent-themed colors: settings_open's panel (see render_settings) lets the
 # user pick accent_theme 0-3 at runtime (0=blue, 1=purple, 2=green,
@@ -244,42 +255,27 @@ fn accent_task_focused(theme: u64) -> u64 {
     return 2956880824;                                          # #B03E6BB8 blue (default)
 }
 
-fn color_titlebar_unfocused_top() -> u64 { return 4282005061; } # #FF3A3645
-fn color_titlebar_unfocused_bottom() -> u64 { return 4280821043; } # #FF282533
-fn color_title_text() -> u64 { return 4293453040; }            # #FFE8E4F0
-fn color_btn_minimize() -> u64 { return 4294095914; }          # #FFF2B42A (amber dot)
-fn color_btn_maximize() -> u64 { return 4281714539; }          # #FF35C76B (green dot)
+fn color_titlebar_unfocused_top() -> u64 { return 4285499292; } # #FF6F879C
+fn color_titlebar_unfocused_bottom() -> u64 { return 4282735472; } # #FF455B70
+fn color_title_text() -> u64 { return 4293916671; }            # #FFEFF7FF
 fn color_btn_close() -> u64 { return 4292890460; }             # #FFE04F5C (red dot)
-fn color_btn_border() -> u64 { return 1610612736; }            # #60000000
 fn color_resize_grip() -> u64 { return 4285242080; }           # #FF6B9AE0
 fn color_terminal_bg() -> u64 { return 4278915616; }           # #FF0B1220 (matches terminal_client.mko's own redraw() background exactly, so the compositor's backing rect and the terminal's own fill share one seamless color instead of showing a border where they meet)
 fn color_placeholder() -> u64 { return 3861127728; }           # #E6242230
-fn color_taskbar_top() -> u64 { return 3642370110; }           # #D91A283E
-fn color_taskbar_bottom() -> u64 { return 3641711662; }        # #D9101C2E
 fn color_start_fill() -> u64 { return 4282280888; }            # #FF3E6BB8
 fn color_start_border() -> u64 { return 4285242080; }          # #FF6B9AE0
 fn color_task_normal() -> u64 { return 2149855304; }           # #80243048
 fn color_task_minimized() -> u64 { return 1612980784; }        # #60242230
-fn color_task_icon() -> u64 { return 4290303221; }             # #FFB8D4F5
 fn color_task_icon_terminal() -> u64 { return 4281714539; }    # #FF35C76B
 fn color_indicator_normal() -> u64 { return 1354290421; }      # #50B8D4F5
-fn color_indicator_minimized() -> u64 { return 817419509; }    # #30B8D4F5
-fn color_indicator_focused() -> u64 { return 3237131306; }     # #C0F2B42A
-fn color_status_bg() -> u64 { return 2955161672; }             # #B0243048
-fn color_status_bar() -> u64 { return 4290303221; }            # #FFB8D4F5
-fn color_brand_bg() -> u64 { return 3642500152; }              # #D91C2438
-fn color_brand_text() -> u64 { return 4290303221; }            # #FFB8D4F5
-fn color_home_fill() -> u64 { return 3862850488; }             # #E63E6BB8
 fn color_browser_fill() -> u64 { return 4293951552; }          # #FFF08040 (warm orange, deliberately distinct from the rest of the blue/green palette so the browser's globe icon reads at a glance across launcher/titlebar/taskbar)
 fn color_browser_mark() -> u64 { return 4280948744; }          # #FF2A1808 (dark line color for the globe's equator/meridian, drawn on top of color_browser_fill)
 fn color_launcher_body() -> u64 { return 3893632044; }         # #E8141C2C
-fn color_launcher_row1() -> u64 { return 4282280888; }         # #FF3E6BB8
-fn color_launcher_row2() -> u64 { return 2955029568; }         # #B0222C40
-fn color_launcher_row3() -> u64 { return 2954771528; }         # #B01E3C48
-fn color_topbar() -> u64 { return 3222281262; }                # #C0101C2E
 fn color_cursor() -> u64 { return 4293980405; }                # #FFF0F0F5
-fn color_control_base() -> u64 { return 2685938244; }           # #A0182A44
-fn color_control_hover() -> u64 { return 2153743300; }          # #805F83C4
+fn color_control_base() -> u64 { return 3222809408; }           # #C0182B40
+fn color_control_hover() -> u64 { return 2689433507; }          # #A04D7FA3
+fn color_control_minimize() -> u64 { return 4293636938; }       # #FFEBB34A
+fn color_control_maximize() -> u64 { return 4283220080; }       # #FF4CC070
 fn color_login_card() -> u64 { return 3860144696; }             # #E6152238
 fn color_login_error() -> u64 { return 4293745256; }            # #FFED5A68
 fn color_startup_overlay() -> u64 { return 2684882972; }        # #A008101C
@@ -288,7 +284,6 @@ fn color_startup_text_muted() -> u64 { return 4288397055; }     # #FF9BBEFF
 # gradient (render_loading, render_login) -- darker than the desktop
 # wallpaper gradient it replaces there since neither screen has the real
 # wallpaper bitmap composited behind it.
-fn color_startup_backdrop_bottom() -> u64 { return 4278717976; } # #FF080E18
 
 # 5x7 bitmap glyph masks for the loading/login screens (render_loading,
 # render_login), encoded the same way as the DEMON wordmark's existing
@@ -383,9 +378,10 @@ fn spawn_path_ptr() -> vptr<u64> {
     return vptr_from_u64(3310544);
 }
 
-# Launch a real new window by spawning one of three RAMFS-seeded clients
+# Launch a real new window by spawning one of four RAMFS-seeded clients
 # (see grub/grub-test.cfg and grub/grub.cfg): kind 0 is the terminal,
-# kind 1 is the counter demo, and kind 2 is Demon Web. All need IPC (bit
+# kind 1 is the native C calculator, kind 2 is Demon Web, and kind 3 is
+# ede-calc (Wave 1 of the EDE port). All need IPC (bit
 # 6) and SURFACE (bit 9) capabilities to create a window and share a drawn
 # surface with the compositor, matching exactly what the kernel boot test
 # grants the same two binaries (CAPABILITY_SERVICE_IPC |
@@ -415,7 +411,7 @@ fn spawn_app(kind: u64) -> u64 {
     # 64-bit decimal constants as floating-point (see u64_max()'s comment
     # for the same issue), which showed up here as an assembler "junk
     # after expression" error on these specific packed-ASCII values.
-    # kind 1 is the persistent click-counter app; kind 2 is the native
+    # kind 1 is the persistent graphical C calculator; kind 2 is the native
     # document browser. The browser additionally receives STORAGE (bit 4)
     # so file:/// locations read real RAMFS documents; no other launcher
     # child receives that capability. window-client.elf stays a separate, deliberately
@@ -433,13 +429,21 @@ fn spawn_app(kind: u64) -> u64 {
         vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 2003792482));
         vptr_write_u64(vptr_offset_u64(path, 2), pack_words(762471795, 1701407843));
         vptr_write_u64(vptr_offset_u64(path, 3), pack_words(1697543278, 26220));
+    } else if kind == 3 {
+        # "/system/bin/ede-calc.elf" -- Wave 1 of the EDE port
+        # (apps/ede_calc). 24 bytes, exactly three 8-byte words, no
+        # trailing partial word needed.
+        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 761619557));
+        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1668047203, 1718379822));
+        length = 24;
     } else {
-        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 1853189987));
-        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(762471796, 1701407843));
-        vptr_write_u64(vptr_offset_u64(path, 3), pack_words(1697543278, 26220));
+        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 1668047203));
+        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1952541813, 1697542767));
+        vptr_write_u64(vptr_offset_u64(path, 3), 26220);
+        length = 26;
     }
     service_mask: u64 = 576;
-    if kind == 2 { service_mask = 592; }
+    if kind == 2 { service_mask = 1616; }
     return MakoAbi.spawn(3310544, length, service_mask);
 }
 
@@ -579,8 +583,8 @@ fn draw_wallpaper(display: u64, position: u64, size: u64) -> u64 {
     return submit_effect(display, pack_words(4, 0), position, size, 0, 0);
 }
 
-# Blit one titlebar window-control icon (enum demon_ui_icon: 0=close,
-# 1=close-hover, 2=minimize, 3=minimize-hover) at its native 10x10 size.
+# Blit one Fluent titlebar-control icon: close/hover, minimize/hover,
+# maximize/hover, at its native 10x10 size.
 fn draw_ui_icon(display: u64, position: u64, icon_index: u64) -> u64 {
     return submit_effect(display, pack_words(5, 0), position,
                          pack_words(10, 10), pack_words(0, icon_index), 0);
@@ -592,82 +596,11 @@ fn draw_start_logo(display: u64, position: u64) -> u64 {
                          pack_words(22, 22), 0, 0);
 }
 
-# --- Procedural app-kind pictograms -----------------------------------------
-# No source art exists for terminal/app/browser icons (only cursor, titlebar-
-# control, and start-logo PNGs are baked in via assets.c/Makefile -- see
-# demon/assets.h), so these draw small recognizable shapes directly with the
-# same draw_rect/draw_rounded_rect primitives used everywhere else in this
-# file, instead of a plain bold letter. Each is sized to sit inside a 22x22
-# icon swatch with a few pixels of margin on every side.
-
-# Terminal: a ">" chevron (two short diagonal strokes approximated as two
-# angled 2px-thick rects) plus a trailing cursor bar -- the universal shell
-# prompt mark. x/y is the swatch's top-left corner.
-fn terminal_prompt_mark(display: u64, request_address: u64, pixel_address: u64,
-                        x: u64, y: u64) -> u64 {
-    mark: u64 = color_title_text();
-    if draw_rect(display, request_address, pixel_address,
-                 pack_words(x, y + 2), pack_words(2, 2), mark) != 0 { return 91; }
-    if draw_rect(display, request_address, pixel_address,
-                 pack_words(x + 2, y + 4), pack_words(2, 2), mark) != 0 { return 91; }
-    if draw_rect(display, request_address, pixel_address,
-                 pack_words(x, y + 6), pack_words(2, 2), mark) != 0 { return 91; }
-    if draw_rect(display, request_address, pixel_address,
-                 pack_words(x + 5, y + 7), pack_words(5, 2), mark) != 0 { return 91; }
-    return 0;
-}
-
-# Generic app: a small window pictogram -- an outer square with a thin top
-# "titlebar" strip -- instead of a bare letter, so the icon itself says
-# "this opens a window" rather than needing the row label to disambiguate.
-fn app_window_mark(display: u64, request_address: u64, pixel_address: u64,
-                   x: u64, y: u64) -> u64 {
-    if draw_rounded_border(display, pack_words(x, y), pack_words(12, 10),
-                           pack_words(2, 1), pack_words(color_title_text(),
-                           color_start_fill()), 0) != 0 { return 91; }
-    if draw_rect(display, request_address, pixel_address,
-                 pack_words(x + 1, y + 1), pack_words(10, 2),
-                 color_title_text()) != 0 { return 91; }
-    return 0;
-}
-
-# Browser: a globe mark drawn as an equator line and a meridian line over the
-# swatch's own already-circular fill (render_launcher/render_taskbar draw the
-# swatch itself with radius = size/2 for the circle; this only adds the two
-# lines on top). position/size describe the circle's own bounding box so the
-# lines land centered on it regardless of where the swatch is placed.
-fn globe_mark(display: u64, position: u64, size: u64) -> u64 {
-    x: u64 = low32(position);
-    y: u64 = high32(position);
-    w: u64 = low32(size);
-    h: u64 = high32(size);
-    if draw_rounded_rect(display, pack_words(x, y + h / 2 - 1), pack_words(w, 2),
-                         1, color_browser_mark(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(x + w / 2 - 3, y), pack_words(6, h),
-                         3, color_browser_mark(), 0) != 0 { return 91; }
-    return 0;
-}
-
-# Settings gear: a ring (draw_rounded_border with radius = size/2, so the
-# outer rect renders as a circle) with one N tick standing in for gear teeth
-# -- a simplified single-tick cog silhouette rather than a full four-tooth
-# gear, kept to two draw calls instead of five since MKO's native backend
-# fully inlines every call site with no code sharing (see the
-# RAMFS_DATA_MAX/USERSPACE_CODE_PAGES notes elsewhere in this file) and this
-# was real, measurable binary bloat pushing the compositor's compiled size
-# over its 34-page code budget. Still reads as "settings" at the taskbar's
-# small icon scale; there is no gear source image to blit instead.
-fn gear_mark(display: u64, position: u64, size: u64) -> u64 {
-    x: u64 = low32(position);
-    y: u64 = high32(position);
-    w: u64 = low32(size);
-    h: u64 = high32(size);
-    mark: u64 = color_title_text();
-    if draw_rounded_border(display, pack_words(x + 4, y + 4), pack_words(w - 8, h - 8),
-                           pack_words(w / 2 - 4, 2), pack_words(mark, 0), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(x + w / 2 - 1, y), pack_words(2, 3),
-                         1, mark, 0) != 0 { return 91; }
-    return 0;
+# Blit an icon from the embedded Fluent shell atlas:
+# terminal, folder, browser, application, settings, home.
+fn draw_shell_icon(display: u64, position: u64, icon_index: u64) -> u64 {
+    return submit_effect(display, pack_words(7, 0), position,
+                         pack_words(22, 22), pack_words(0, icon_index), 0);
 }
 
 fn mapped_pixel(address: u64, index: u64) -> u64 {
@@ -893,15 +826,43 @@ fn app_kind_generic() -> u64 { return 0; }
 fn app_kind_terminal() -> u64 { return 1; }
 fn app_kind_browser() -> u64 { return 2; }
 
+# Explicit composition layers follow Yutani's useful separation of normal
+# windows, menus, and overlays while remaining native to DemonOS. Desktop
+# background/panels are drawn outside the client table, so client slots begin
+# at NORMAL. Future shell surfaces can opt into MENU or OVERLAY without
+# inventing magic z-order numbers.
+fn layer_normal() -> u64 { return 1; }
+fn layer_menu() -> u64 { return 2; }
+fn layer_overlay() -> u64 { return 3; }
+
 fn slot_app_kind(slot: u64) -> u64 {
     table: vptr<u64> = table_ptr();
-    return vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9))));
+}
+
+fn slot_layer(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9))));
 }
 
 fn slot_set_app_kind(slot: u64, kind: u64) -> u64 {
     table: vptr<u64> = table_ptr();
-    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)), kind);
+    current: u64 = vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)),
+                   kind + high32(current) * 4294967296);
     return 0;
+}
+
+fn slot_set_layer(slot: u64, layer: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    current: u64 = vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)),
+                   low32(current) + layer * 4294967296);
+    return 0;
+}
+
+fn slot_stack_key(slot: u64) -> u64 {
+    return slot_zorder(slot) + slot_layer(slot) * 1048576;
 }
 
 # Classify a pointer position against one window's frame into one of the
@@ -971,13 +932,36 @@ fn find_free_slot() -> u64 {
 # The topmost (highest z-order) live slot, or 8 if the table is empty.
 fn find_top_slot() -> u64 {
     best_slot: u64 = 8;
-    best_z: u64 = 0;
+    best_key: u64 = 0;
     slot: u64 = 0;
     while slot < 8 {
         if slot_visible(slot) == 1 {
-            if best_slot == 8 or slot_zorder(slot) > best_z {
+            key: u64 = slot_stack_key(slot);
+            if best_slot == 8 or key > best_key {
                 best_slot = slot;
-                best_z = slot_zorder(slot);
+                best_key = key;
+            }
+        }
+        slot = slot + 1;
+    }
+    return best_slot;
+}
+
+# Return the topmost visible client containing a device-space point. Cursor
+# selection, focus, clicks, and drag initiation all use this one routine so
+# they cannot disagree about which window owns a pixel.
+fn top_slot_at(x: u64, y: u64) -> u64 {
+    best_slot: u64 = 8;
+    best_key: u64 = 0;
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_visible(slot) == 1 and
+           x >= slot_x(slot) and x < slot_x(slot) + slot_width(slot) and
+           y >= slot_y(slot) and y < slot_y(slot) + slot_height(slot) {
+            key: u64 = slot_stack_key(slot);
+            if best_slot == 8 or key > best_key {
+                best_slot = slot;
+                best_key = key;
             }
         }
         slot = slot + 1;
@@ -1152,6 +1136,11 @@ fn render_window(display: u64, request_address: u64, pixel_address: u64,
     if draw_gradient_v(display, pack_words(win_x, win_y),
                        pack_words(win_width, 32), title_top, title_bottom,
                        0) != 0 { return 91; }
+    # Aero glass sheen across the top of the titlebar, drawn before any
+    # text/controls so it reads as a highlight under them, not over them.
+    if draw_gradient_v(display, pack_words(win_x, win_y),
+                       pack_words(win_width, 10), color_glass_sheen_top(),
+                       color_glass_sheen_bottom(), 0) != 0 { return 91; }
     title_a: u64 = glyph_a();
     title_b: u64 = glyph_p();
     title_c: u64 = glyph_p();
@@ -1175,40 +1164,54 @@ fn render_window(display: u64, request_address: u64, pixel_address: u64,
                   pack_words(win_x + 24, win_y + 12), title_c, title_text_color) != 0 { return 108; }
     if draw_glyph(display, request_address, pixel_address,
                   pack_words(win_x + 32, win_y + 12), title_d, title_text_color) != 0 { return 108; }
-    # Compact glass window controls. They retain the familiar desktop
-    # minimize/maximize/close layout without the old traffic-light dots:
-    # inactive controls sit quietly in the titlebar, hover raises contrast,
-    # and close alone turns destructive red. The hit regions still match
-    # these exact 18x16 rectangles.
+    # macOS traffic-light color semantics in the familiar Vista/Windows
+    # right-side order. This is intentional hybrid identity, not a direct
+    # copy of either system; the established hit rectangles stay unchanged.
     minimize_x: u64 = win_x + win_width - 76;
-    minimize_fill: u64 = color_control_base();
+    minimize_fill: u64 = color_control_minimize();
     if cursor_x >= minimize_x and cursor_x < minimize_x + 18 and
        cursor_y >= win_y + 8 and cursor_y < win_y + 24 {
-        minimize_fill = color_control_hover();
+        minimize_fill = argb_lighten(color_control_minimize(), 24);
     }
-    if draw_rounded_rect(display, pack_words(minimize_x, win_y + 8),
-                         pack_words(18, 16), 4, minimize_fill, 0) != 0 { return 91; }
-    if draw_ui_icon(display, pack_words(win_x + win_width - 72, win_y + 11), 2) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(minimize_x, win_y + 8),
+                           pack_words(18, 16), pack_words(8, 1),
+                           pack_words(color_glass_sheen_top(), minimize_fill),
+                           0) != 0 { return 91; }
+    minimize_icon: u64 = 2;
+    if cursor_x >= minimize_x and cursor_x < minimize_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 { minimize_icon = 3; }
+    if draw_ui_icon(display, pack_words(win_x + win_width - 72, win_y + 11),
+                    minimize_icon) != 0 { return 91; }
     maximize_x: u64 = win_x + win_width - 52;
-    maximize_fill: u64 = color_control_base();
+    maximize_fill: u64 = color_control_maximize();
     if cursor_x >= maximize_x and cursor_x < maximize_x + 18 and
        cursor_y >= win_y + 8 and cursor_y < win_y + 24 {
-        maximize_fill = color_control_hover();
+        maximize_fill = argb_lighten(color_control_maximize(), 24);
     }
-    if draw_rounded_rect(display, pack_words(maximize_x, win_y + 8),
-                         pack_words(18, 16), 4, maximize_fill, 0) != 0 { return 91; }
-    if draw_rounded_border(display, pack_words(maximize_x + 5, win_y + 12),
-                           pack_words(8, 7), pack_words(1, 1),
-                           pack_words(color_title_text(), 0), 0) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(maximize_x, win_y + 8),
+                           pack_words(18, 16), pack_words(8, 1),
+                           pack_words(color_glass_sheen_top(), maximize_fill),
+                           0) != 0 { return 91; }
+    maximize_icon: u64 = 4;
+    if cursor_x >= maximize_x and cursor_x < maximize_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 { maximize_icon = 5; }
+    if draw_ui_icon(display, pack_words(maximize_x + 4, win_y + 11),
+                    maximize_icon) != 0 { return 91; }
     close_x: u64 = win_x + win_width - 28;
-    close_fill: u64 = color_control_base();
+    close_fill: u64 = color_btn_close();
     if cursor_x >= close_x and cursor_x < close_x + 18 and
        cursor_y >= win_y + 8 and cursor_y < win_y + 24 {
-        close_fill = color_btn_close();
+        close_fill = argb_lighten(color_btn_close(), 24);
     }
-    if draw_rounded_rect(display, pack_words(close_x, win_y + 8),
-                         pack_words(18, 16), 4, close_fill, 0) != 0 { return 91; }
-    if draw_ui_icon(display, pack_words(win_x + win_width - 24, win_y + 11), 0) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(close_x, win_y + 8),
+                           pack_words(18, 16), pack_words(8, 1),
+                           pack_words(color_glass_sheen_top(), close_fill),
+                           0) != 0 { return 91; }
+    close_icon: u64 = 0;
+    if cursor_x >= close_x and cursor_x < close_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 { close_icon = 1; }
+    if draw_ui_icon(display, pack_words(win_x + win_width - 24, win_y + 11),
+                    close_icon) != 0 { return 91; }
     if slot_state(slot) != 3 {
         if draw_rect(display, request_address, pixel_address,
                      pack_words(win_x + win_width - 14, win_y + win_height - 14),
@@ -1304,87 +1307,7 @@ fn render_window(display: u64, request_address: u64, pixel_address: u64,
     return 0;
 }
 
-# Draw the launcher menu box and its four entries (terminal, generic app,
-# browser, show-desktop). Pulled out of render_scene for the same reason as
-# render_window: keep the caller's own stack frame small. Row geometry: four
-# 38px rows starting at y=238 (see compositor_main's live_type==4 launcher
-# hit-test, which must be kept in sync with these same y-bands), box height
-# extended from 230 to 250 to fit the fourth row with a 14px bottom margin
-# above the taskbar (row4 ends at y=390, box bottom at y=404, 28px clear of
-# the taskbar's y=432).
-fn render_launcher(display: u64, request_address: u64, pixel_address: u64) -> u64 {
-    if draw_shadow(display, pack_words(12, 194), pack_words(214, 250), 6, 14,
-                   color_shadow()) != 0 { return 91; }
-    if draw_rounded_border(display, pack_words(12, 194), pack_words(214, 250),
-                           pack_words(6, 1), pack_words(color_window_border(),
-                           color_launcher_body()), 0) != 0 { return 91; }
-
-    # Terminal row: icon swatch with a real ">_" prompt mark (a chevron plus
-    # a cursor bar, drawn as three thin rects) instead of a single bold "T"
-    # -- a shape that reads as "terminal" at a glance instead of needing the
-    # label text next to it to disambiguate.
-    if draw_rounded_rect(display, pack_words(28, 238), pack_words(182, 38), 3,
-                         color_launcher_row1(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(36, 246), pack_words(22, 22), 4,
-                         color_task_icon_terminal(), 0) != 0 { return 91; }
-    if terminal_prompt_mark(display, request_address, pixel_address, 41, 251) != 0 { return 91; }
-    row1_y: u64 = 253;
-    if draw_glyph(display, request_address, pixel_address, 70 + row1_y * 4294967296,
-                  glyph_t(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 78 + row1_y * 4294967296,
-                  glyph_e(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 86 + row1_y * 4294967296,
-                  glyph_r(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 94 + row1_y * 4294967296,
-                  glyph_m(), color_title_text()) != 0 { return 108; }
-
-    # Application row: icon swatch with a small window pictogram (an outer
-    # square plus a thin top titlebar strip) instead of a bare "A" -- reads
-    # as "this opens a window" rather than any specific letter.
-    if draw_rounded_rect(display, pack_words(28, 286), pack_words(182, 38), 3,
-                         color_launcher_row2(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(36, 294), pack_words(22, 22), 4,
-                         color_start_fill(), 0) != 0 { return 91; }
-    if app_window_mark(display, request_address, pixel_address, 41, 299) != 0 { return 91; }
-    row2_y: u64 = 301;
-    if draw_glyph(display, request_address, pixel_address, 70 + row2_y * 4294967296,
-                  glyph_a(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 78 + row2_y * 4294967296,
-                  glyph_p(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 86 + row2_y * 4294967296,
-                  glyph_p(), color_title_text()) != 0 { return 108; }
-
-    # Browser row: icon swatch with a globe mark. It launches the dedicated
-    # native browser client, tagged for matching titlebar/taskbar chrome.
-    if draw_rounded_rect(display, pack_words(28, 334), pack_words(182, 38), 3,
-                         color_launcher_row3(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(36, 342), pack_words(22, 22), 11,
-                         color_browser_fill(), 0) != 0 { return 91; }
-    if globe_mark(display, pack_words(38, 344), pack_words(18, 18)) != 0 { return 91; }
-    row3_y: u64 = 349;
-    if draw_glyph(display, request_address, pixel_address, 70 + row3_y * 4294967296,
-                  glyph_w(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 78 + row3_y * 4294967296,
-                  glyph_e(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 86 + row3_y * 4294967296,
-                  glyph_b(), color_title_text()) != 0 { return 108; }
-
-    # Show-desktop row: icon swatch + "SHOW" label, now the fourth row.
-    if draw_rounded_rect(display, pack_words(28, 382), pack_words(182, 38), 3,
-                         color_launcher_row3(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(36, 390), pack_words(22, 22), 4,
-                         color_indicator_focused(), 0) != 0 { return 91; }
-    row4_y: u64 = 397;
-    if draw_glyph(display, request_address, pixel_address, 70 + row4_y * 4294967296,
-                  glyph_s(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 78 + row4_y * 4294967296,
-                  glyph_h(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 86 + row4_y * 4294967296,
-                  glyph_o(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 94 + row4_y * 4294967296,
-                  glyph_w(), color_title_text()) != 0 { return 108; }
-    return 0;
-}
+# Legacy launcher removed: Desktop/desktop.mko owns the applications menu.
 
 # Draw the settings popover: a small panel above the gear button (see
 # render_taskbar) with three clickable accent-color swatches, the one real
@@ -1403,6 +1326,9 @@ fn render_settings(display: u64, request_address: u64, pixel_address: u64,
     if draw_rounded_border(display, pack_words(520, 310), pack_words(112, 110),
                            pack_words(6, 1), pack_words(color_window_border(),
                            color_launcher_body()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(522, 312), pack_words(108, 10),
+                       color_glass_sheen_top(), color_glass_sheen_bottom(),
+                       0) != 0 { return 91; }
     label_y: u64 = 320;
     if draw_glyph(display, request_address, pixel_address, 532 + label_y * 4294967296,
                   glyph_a(), color_title_text()) != 0 { return 108; }
@@ -1437,169 +1363,9 @@ fn render_settings(display: u64, request_address: u64, pixel_address: u64,
     return 0;
 }
 
-# Draw the persistent desktop panel from the actual window table. Every live
-# window owns one stable slot button; focused, inactive, and minimized states
-# are visually distinct and the same geometry is used by pointer hit-testing.
-fn render_taskbar(display: u64, request_address: u64, pixel_address: u64,
-                  focused_window: u64, anim_and_cursor: u64) -> u64 {
-    anim_phase: u64 = low32(anim_and_cursor);
-    cursor_x: u64 = unpack_cursor_x(high32(anim_and_cursor));
-    cursor_y: u64 = unpack_cursor_y(high32(anim_and_cursor));
-    accent_theme: u64 = unpack_accent_theme(high32(anim_and_cursor));
-    settings_open: u64 = unpack_settings_open(high32(anim_and_cursor));
-    # Floating glass dock: inset from every screen edge instead of reading as
-    # an opaque strip. A deep soft shadow gives it lift and the thin top
-    # highlight keeps the dark translucent body distinct over bright
-    # wallpaper. Hit-testing in
-    # compositor_main only checks live_y >= 432 and absolute button x-ranges
-    # (start button x<112, task pills at 116+slot*54), never the panel's own
-    # drawn rect, so the dock can be restyled freely as long as those pixel
-    # positions stay put.
-    if draw_shadow(display, pack_words(6, 434), pack_words(628, 42),
-                   10, 14, color_shadow()) != 0 { return 91; }
-    if draw_rounded_border(display, pack_words(6, 434), pack_words(628, 42),
-                           pack_words(10, 1), pack_words(color_window_border(),
-                           color_taskbar_bottom()), 0) != 0 { return 91; }
-    if draw_rect(display, request_address, pixel_address,
-                 pack_words(18, 435), pack_words(604, 1), 1355397360) != 0 { return 91; }
+# Legacy task panel removed: Desktop/desktop.mko owns panels and tasks.
 
-    # Start orb: a glass pill with the real diamond "Liquid OS" logo mark
-    # instead of a drawn placeholder, plus a "START" label. Brightens on
-    # hover using the cursor position unpacked above, matching the same
-    # hand cursor icon compositor_main already shows over this same button.
-    start_fill: u64 = accent_fill(accent_theme);
-    if cursor_x >= 8 and cursor_x < 106 and cursor_y >= 440 and cursor_y < 472 {
-        start_fill = argb_lighten(start_fill, 24);
-    }
-    if draw_rounded_border(display, pack_words(8, 440), pack_words(98, 32),
-                           pack_words(9, 1), pack_words(accent_border_bright(accent_theme),
-                           start_fill), 0) != 0 { return 91; }
-    if draw_start_logo(display, pack_words(13, 445)) != 0 { return 91; }
-    start_label_y: u64 = 452;
-    if draw_glyph(display, request_address, pixel_address, 40 + start_label_y * 4294967296,
-                  glyph_s(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 48 + start_label_y * 4294967296,
-                  glyph_t(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 56 + start_label_y * 4294967296,
-                  glyph_a(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 64 + start_label_y * 4294967296,
-                  glyph_r(), color_title_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 72 + start_label_y * 4294967296,
-                  glyph_t(), color_title_text()) != 0 { return 108; }
-
-    slot: u64 = 0;
-    while slot < 8 {
-        if slot_state(slot) != 0 {
-            task_x: u64 = 116 + slot * 54;
-            task_color: u64 = color_task_normal();
-            if slot_minimized(slot) == 1 { task_color = color_task_minimized(); }
-            if slot_id(slot) == focused_window and slot_visible(slot) == 1 {
-                task_color = accent_task_focused(accent_theme);
-            }
-            if cursor_x >= task_x and cursor_x < task_x + 48 and
-               cursor_y >= 441 and cursor_y < 471 {
-                task_color = argb_lighten(task_color, 24);
-            }
-            # Pill-shaped task button (full-height radius) instead of a
-            # barely-rounded square, so each live window reads as a distinct
-            # glass chip on the dock.
-            if draw_rounded_rect(display, pack_words(task_x, 441), pack_words(48, 30),
-                                 10, task_color, 0) != 0 { return 91; }
-            # Small rounded icon swatch matching the window's own app kind
-            # (terminal's fixed slot_id 7 is checked first since it never
-            # goes through pending_spawn_kind tagging -- see word9's comment)
-            # instead of two blurry bars trying to fake a title that would
-            # never fit at this width anyway.
-            if slot_id(slot) == 7 {
-                if draw_rounded_rect(display, pack_words(task_x + 7, 447), pack_words(14, 14),
-                                     4, color_task_icon_terminal(), 0) != 0 { return 91; }
-                if draw_glyph(display, request_address, pixel_address,
-                              pack_words(task_x + 11, 449), glyph_t(),
-                              color_taskbar_top()) != 0 { return 108; }
-            } else if slot_app_kind(slot) == app_kind_browser() {
-                if draw_rounded_rect(display, pack_words(task_x + 7, 447), pack_words(14, 14),
-                                     7, color_browser_fill(), 0) != 0 { return 91; }
-                if globe_mark(display, pack_words(task_x + 9, 449), pack_words(10, 10)) != 0 { return 91; }
-            } else {
-                if draw_rounded_rect(display, pack_words(task_x + 7, 447), pack_words(14, 14),
-                                     4, color_task_icon(), 0) != 0 { return 91; }
-                if app_window_mark(display, request_address, pixel_address,
-                                   task_x + 8, 449) != 0 { return 91; }
-            }
-            indicator_color: u64 = color_indicator_normal();
-            if slot_minimized(slot) == 1 { indicator_color = color_indicator_minimized(); }
-            if slot_id(slot) == focused_window {
-                # Same breathing pulse as the focused titlebar, so the dock
-                # chip and its window's titlebar glow in sync.
-                indicator_color = argb_lighten(color_indicator_focused(),
-                                               anim_pulse(anim_phase, 40, 24));
-            }
-            # Focus indicator as a small centered pip under the chip (dock
-            # style) instead of a full-width bar across the top.
-            if draw_rounded_rect(display, pack_words(task_x + 20, 468), pack_words(8, 3),
-                                 2, indicator_color, 0) != 0 { return 91; }
-        }
-        slot = slot + 1;
-    }
-
-    # Compact native status cluster lives in the top system bar, styled as
-    # its own small glass pill with rounded icon swatches.
-    if draw_rounded_rect(display, pack_words(520, 3), pack_words(108, 22), 11,
-                         color_status_bg(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(535, 10), pack_words(5, 10), 2,
-                         color_status_bar(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(544, 7), pack_words(5, 13), 2,
-                         color_status_bar(), 0) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(553, 4), pack_words(5, 16), 2,
-                         color_status_bar(), 0) != 0 { return 91; }
-
-    # Settings gear button at the dock's right edge (x=[558,606), mirroring
-    # the Start button's footprint at the left edge), past the last possible
-    # task chip (x < 548 even with all 8 slots filled). See
-    # compositor_main's live_x >= 558 and live_x < 606 and live_y >= 432
-    # hit-test and render_settings for the panel this opens.
-    settings_fill: u64 = color_status_bg();
-    if settings_open == 1 { settings_fill = accent_fill(accent_theme); }
-    if cursor_x >= 558 and cursor_x < 606 and cursor_y >= 440 and cursor_y < 472 {
-        settings_fill = argb_lighten(settings_fill, 24);
-    }
-    if draw_rounded_rect(display, pack_words(558, 440), pack_words(48, 32),
-                         10, settings_fill, 0) != 0 { return 91; }
-    if gear_mark(display, pack_words(571, 445), pack_words(22, 22)) != 0 { return 91; }
-    return 0;
-}
-
-# Draw a compact DEMON wordmark into a matching dark pill so the fixed
-# glyph background remains intentional instead of punching boxes in the bar.
-fn render_brand(display: u64, request_address: u64, pixel_address: u64) -> u64 {
-    if draw_rounded_rect(display, pack_words(8, 4), pack_words(74, 20), 4,
-                         color_brand_bg(), 0) != 0 { return 91; }
-    glyph_y: u64 = 10;
-    if draw_glyph(display, request_address, pixel_address, 14 + glyph_y * 4294967296,
-                  16694953519, color_brand_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 22 + glyph_y * 4294967296,
-                  33321092159, color_brand_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 30 + glyph_y * 4294967296,
-                  18842572657, color_brand_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 38 + glyph_y * 4294967296,
-                  15621211694, color_brand_text()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address, 46 + glyph_y * 4294967296,
-                  18842703473, color_brand_text()) != 0 { return 108; }
-    return 0;
-}
-
-fn render_home_icon(display: u64, request_address: u64, pixel_address: u64) -> u64 {
-    # Native glass desktop shortcut tile. Its process-backed action lands in
-    # the desktop-shell phase; keep this compositor-side identity lightweight.
-    # Reuse the actual DemonOS diamond mark from the Start button so the
-    # shortcut is product identity rather than a placeholder letter.
-    if draw_shadow(display, pack_words(14, 46), pack_words(30, 30), 6, 8,
-                   color_shadow()) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(14, 46), pack_words(30, 30), 6,
-                         color_home_fill(), 0) != 0 { return 91; }
-    if draw_start_logo(display, pack_words(18, 50)) != 0 { return 91; }
-    return 0;
-}
+# Legacy brand and shortcut renderers removed: Desktop/desktop.mko owns them.
 
 # Commit a completed startup-screen frame the same way render_scene commits
 # the desktop: a 1x1 present-flagged submit. Without this, render_loading/
@@ -1638,6 +1404,9 @@ fn render_loading(display: u64, request_address: u64, pixel_address: u64,
     if draw_rounded_border(display, pack_words(176, 126), pack_words(288, 224),
                            pack_words(12, 1), pack_words(color_window_border(),
                            color_login_card()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(178, 128), pack_words(284, 12),
+                       color_glass_sheen_top(), color_glass_sheen_bottom(),
+                       0) != 0 { return 91; }
     if draw_rounded_border(display, pack_words(296, 144), pack_words(48, 48),
                            pack_words(14, 1), pack_words(color_start_border(),
                            accent_fill(0)), 0) != 0 { return 91; }
@@ -1719,6 +1488,9 @@ fn render_login(display: u64, request_address: u64, pixel_address: u64,
     if draw_rounded_border(display, pack_words(176, 74), pack_words(288, 332),
                            pack_words(14, 1), pack_words(card_border,
                            color_login_card()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(178, 76), pack_words(284, 14),
+                       color_glass_sheen_top(), color_glass_sheen_bottom(),
+                       0) != 0 { return 91; }
     if draw_rounded_border(display, pack_words(294, 98), pack_words(52, 52),
                            pack_words(26, 1), pack_words(accent_border_bright(0),
                            accent_fill(0)), 0) != 0 { return 91; }
@@ -1824,14 +1596,11 @@ fn render_login(display: u64, request_address: u64, pixel_address: u64,
 # why this needed packing instead of two more plain parameters.
 fn render_scene(display: u64, request_address: u64, pixel_address: u64,
                 launcher_open: u64, focused_window: u64, anim_and_cursor: u64) -> u64 {
-    background_size: u64 = pack_words(640, 480);
-    if draw_wallpaper(display, 0, background_size) != 0 { return 91; }
-    if draw_shadow(display, pack_words(6, 3), pack_words(628, 22),
-                   9, 8, color_shadow()) != 0 { return 91; }
-    if draw_rounded_rect(display, pack_words(6, 3), pack_words(628, 22), 9,
-                         color_topbar(), 0) != 0 { return 91; }
-    if render_brand(display, request_address, pixel_address) != 0 { return 91; }
-    if render_home_icon(display, request_address, pixel_address) != 0 { return 91; }
+    packed_cursor: u64 = high32(anim_and_cursor);
+    if Desktop.desktop_draw_background(display, request_address, pixel_address,
+                                       packed_cursor) != 0 { return 91; }
+    if Desktop.desktop_draw_shortcuts(display, request_address, pixel_address,
+                                      packed_cursor) != 0 { return 91; }
 
     # Draw windows back-to-front: repeatedly pick the lowest not-yet-drawn
     # z-order among live slots.
@@ -1854,9 +1623,10 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
                 while shift < slot { mask_bit = mask_bit * 2; shift = shift + 1; }
                 already: u64 = drawn_mask / mask_bit;
                 already = already - (already / 2) * 2;
-                if already == 0 and (pick_slot == 8 or slot_zorder(slot) < pick_z) {
+                if already == 0 and
+                   (pick_slot == 8 or slot_stack_key(slot) < pick_z) {
                     pick_slot = slot;
-                    pick_z = slot_zorder(slot);
+                    pick_z = slot_stack_key(slot);
                 }
             }
             slot = slot + 1;
@@ -1875,12 +1645,14 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
         }
     }
 
-    taskbar_status: u64 = render_taskbar(display, request_address, pixel_address,
-                                         focused_window, anim_and_cursor);
+    taskbar_status: u64 = Desktop.desktop_draw_task_panel(
+        display, request_address, pixel_address, focused_window, anim_and_cursor);
     if taskbar_status != 0 { return taskbar_status; }
 
     if launcher_open == 1 {
-        launcher_status: u64 = render_launcher(display, request_address, pixel_address);
+        launcher_status: u64 = Desktop.desktop_draw_launcher(
+            display, request_address, pixel_address, packed_cursor,
+            unpack_accent_theme(packed_cursor));
         if launcher_status != 0 { return launcher_status; }
     }
     if unpack_settings_open(high32(anim_and_cursor)) == 1 {
@@ -1953,12 +1725,14 @@ fn compositor_main(service_name: u64) -> u64 {
     boot_phase: u64 = 0;
     loading_deadline: u64 = MakoAbi.ticks() + loading_span;
     login_deadline: u64 = loading_deadline + login_span;
-    login_done: u64 = 0;
-    if is_test_boot == 1 { login_done = 1; }
-    # Password is packed big-endian one byte at a time so Backspace is a
-    # simple divide-by-256. Interactive demo credential: demon / demon.
-    # This is session authentication, not yet a persistent multi-user account
-    # database; that requires the block-storage milestone.
+    # The credential gate has been removed: boot always goes straight from
+    # the loading splash to the live desktop, so login_done starts (and
+    # stays) true. render_login, the Super+L relock branch, and the
+    # password-entry key handling below are now permanently unreachable
+    # rather than deleted outright, since login_done==1 already makes every
+    # login_done==0 branch dead code without touching the surrounding
+    # control flow.
+    login_done: u64 = 1;
     login_password: u64 = 0;
     login_password_length: u64 = 0;
     login_error: u64 = 0;
@@ -2055,6 +1829,7 @@ fn compositor_main(service_name: u64) -> u64 {
                         # boot-test spawn, or the terminal's own fixed-id
                         # window -- never inherits a stale tagged kind.
                         slot_set_app_kind(free_slot, pending_spawn_kind);
+                        slot_set_layer(free_slot, layer_normal());
                         pending_spawn_kind = app_kind_generic();
                         focused_window = update_window;
 
@@ -2143,25 +1918,7 @@ fn compositor_main(service_name: u64) -> u64 {
                 if resizing != 0 { pointer_icon = resizing + 3; }
                 else if dragging == 1 { pointer_icon = 1; }
                 else {
-                    icon_slot: u64 = 8;
-                    icon_best_z: u64 = 0;
-                    icon_scan: u64 = 0;
-                    while icon_scan < 8 {
-                        if slot_visible(icon_scan) == 1 {
-                            isx: u64 = slot_x(icon_scan);
-                            isy: u64 = slot_y(icon_scan);
-                            isw: u64 = slot_width(icon_scan);
-                            ish: u64 = slot_height(icon_scan);
-                            if cursor_x >= isx and cursor_x < isx + isw and
-                               cursor_y >= isy and cursor_y < isy + ish {
-                                if icon_slot == 8 or slot_zorder(icon_scan) > icon_best_z {
-                                    icon_slot = icon_scan;
-                                    icon_best_z = slot_zorder(icon_scan);
-                                }
-                            }
-                        }
-                        icon_scan = icon_scan + 1;
-                    }
+                    icon_slot: u64 = top_slot_at(cursor_x, cursor_y);
                     if icon_slot != 8 {
                         isx: u64 = slot_x(icon_slot);
                         isy: u64 = slot_y(icon_slot);
@@ -2180,8 +1937,8 @@ fn compositor_main(service_name: u64) -> u64 {
                             # Terminal content area: text-selection I-beam.
                             pointer_icon = 2;
                         }
-                    } else if cursor_x >= 14 and cursor_x < 44 and
-                              cursor_y >= 46 and cursor_y < 76 {
+                    } else if cursor_x >= 12 and cursor_x < 84 and
+                              cursor_y >= 48 and cursor_y < 126 {
                         pointer_icon = 1;
                     } else if cursor_y >= 432 {
                         # Taskbar band: start button and every live task chip
@@ -2329,16 +2086,6 @@ fn compositor_main(service_name: u64) -> u64 {
                             focused_window = toggle_show_desktop();
                             launcher_open = 0;
                             repaint = 1;
-                        } else if live_code == 38 {
-                            # Super+L locks the live session without
-                            # destroying windows or their surfaces.
-                            login_done = 0;
-                            login_password = 0;
-                            login_password_length = 0;
-                            login_error = 0;
-                            launcher_open = 0;
-                            settings_open = 0;
-                            repaint = 1;
                         } else if live_code == 331 or live_code == 333 or
                                   live_code == 328 or live_code == 336 {
                             snap_target: u64 = find_slot(focused_window);
@@ -2377,9 +2124,9 @@ fn compositor_main(service_name: u64) -> u64 {
                 }
             } else if live_type == 4 and launcher_open == 1 and
                       live_x >= 28 and live_x < 210 and
-                      live_y >= 238 and live_y < 390 {
-                # The first three launcher rows spawn a real new process (see
-                # spawn_app); the fourth is a show-desktop action. A launch
+                      live_y >= 238 and live_y < 428 {
+                # The first four launcher rows spawn a real new process (see
+                # spawn_app); the fifth is a show-desktop action. A launch
                 # only asks the kernel to spawn -- it does not itself
                 # create a table slot or change focus, since the spawned
                 # client sends its own real CREATE message once it runs,
@@ -2401,6 +2148,12 @@ fn compositor_main(service_name: u64) -> u64 {
                 } else if live_y < 352 {
                     pending_spawn_kind = app_kind_browser();
                     if find_free_slot() != 8 { spawn_app(2); }
+                } else if live_y < 390 {
+                    # ede-calc (Wave 1 of the EDE port, apps/ede_calc) --
+                    # classified as a generic app like the calculator row,
+                    # since it uses the same plain-window titlebar chrome.
+                    pending_spawn_kind = app_kind_generic();
+                    if find_free_slot() != 8 { spawn_app(3); }
                 } else {
                     focused_window = toggle_show_desktop();
                 }
@@ -2471,31 +2224,13 @@ fn compositor_main(service_name: u64) -> u64 {
                 # clicking any window (title bar or content) refocuses it and
                 # raises its z-order. This replaces the old single-window
                 # scalar hit test.
-                hit_slot: u64 = 8;
-                best_z: u64 = 0;
-                scan: u64 = 0;
-                while scan < 8 {
-                    if slot_visible(scan) == 1 {
-                        sx: u64 = slot_x(scan);
-                        sy: u64 = slot_y(scan);
-                        sw: u64 = slot_width(scan);
-                        sh: u64 = slot_height(scan);
-                        if live_x >= sx and live_x < sx + sw and
-                           live_y >= sy and live_y < sy + sh {
-                            if hit_slot == 8 or slot_zorder(scan) > best_z {
-                                hit_slot = scan;
-                                best_z = slot_zorder(scan);
-                            }
-                        }
-                    }
-                    scan = scan + 1;
-                }
+                hit_slot: u64 = top_slot_at(live_x, live_y);
                 # The desktop Demon shortcut opens the native launcher only
                 # when no window covers the tile. Window hit-testing happens
                 # first so this behaves like a real desktop icon rather than
                 # an invisible global hot zone.
-                if hit_slot == 8 and live_x >= 14 and live_x < 44 and
-                   live_y >= 46 and live_y < 76 {
+                if hit_slot == 8 and live_x >= 12 and live_x < 84 and
+                   live_y >= 48 and live_y < 126 {
                     launcher_open = 1;
                     repaint = 1;
                 }

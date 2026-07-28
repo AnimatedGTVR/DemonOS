@@ -4,6 +4,43 @@ fn low32(value: u64) -> u64 {
     return value - (value / 4294967296) * 4294967296;
 }
 
+# Same masking trick as low32, sized for shorter/longer exact-length command
+# names ("pid" needs 3 bytes, "uptime"/"whoami" need 6) read out of the same
+# single 8-byte word the length-4/5 checks already use.
+fn low24(value: u64) -> u64 {
+    return value - (value / 16777216) * 16777216;
+}
+
+fn low48(value: u64) -> u64 {
+    return value - (value / 281474976710656) * 281474976710656;
+}
+
+# Writes value as decimal ASCII starting at output_address+start, returns the
+# position just past the last digit (the new output_length). Used by uptime
+# and pid, which print live syscall results instead of a canned string.
+fn write_decimal(output_address: u64, start: u64, value: u64) -> u64 {
+    if value == 0 {
+        put_byte(output_address, start, 48);
+        return start + 1;
+    }
+    digit_count: u64 = 0;
+    probe: u64 = value;
+    while probe > 0 { digit_count = digit_count + 1; probe = probe / 10; }
+    divisor: u64 = 1;
+    index: u64 = 1;
+    while index < digit_count { divisor = divisor * 10; index = index + 1; }
+    position: u64 = start;
+    remaining: u64 = value;
+    while divisor > 0 {
+        digit: u64 = remaining / divisor;
+        put_byte(output_address, position, 48 + digit);
+        remaining = remaining - digit * divisor;
+        position = position + 1;
+        divisor = divisor / 10;
+    }
+    return position;
+}
+
 fn write_event_name(name: vptr<u8>, pid: u64) -> u64 {
     vptr_write_u8(name, 100); vptr_write_u8(vptr_offset_u8(name, 1), 101);
     vptr_write_u8(vptr_offset_u8(name, 2), 115); vptr_write_u8(vptr_offset_u8(name, 3), 107);
@@ -272,23 +309,57 @@ fn terminal_client_main(compositor_name: u64) -> u64 {
                 put_byte(output_address, 16, 108); put_byte(output_address, 17, 112);
                 output_length = 18;
                 if text_length == 4 and input_low32 == 1886152040 {
-                    # help -> "commands\nhelp fetch\nclear"
+                    # help -> "commands\nhelp echo uptime\npid whoami clear fetch"
                     clear_bytes(output_address, 64);
-                    put_byte(output_address, 0, 99); put_byte(output_address, 1, 111);
-                    put_byte(output_address, 2, 109); put_byte(output_address, 3, 109);
-                    put_byte(output_address, 4, 97); put_byte(output_address, 5, 110);
-                    put_byte(output_address, 6, 100); put_byte(output_address, 7, 115);
+                    put_byte(output_address, 0, 99);
+                    put_byte(output_address, 1, 111);
+                    put_byte(output_address, 2, 109);
+                    put_byte(output_address, 3, 109);
+                    put_byte(output_address, 4, 97);
+                    put_byte(output_address, 5, 110);
+                    put_byte(output_address, 6, 100);
+                    put_byte(output_address, 7, 115);
                     put_byte(output_address, 8, 10);
-                    put_byte(output_address, 9, 104); put_byte(output_address, 10, 101);
-                    put_byte(output_address, 11, 108); put_byte(output_address, 12, 112);
-                    put_byte(output_address, 13, 32); put_byte(output_address, 14, 102);
-                    put_byte(output_address, 15, 101); put_byte(output_address, 16, 116);
-                    put_byte(output_address, 17, 99); put_byte(output_address, 18, 104);
-                    put_byte(output_address, 19, 10);
-                    put_byte(output_address, 20, 99); put_byte(output_address, 21, 108);
-                    put_byte(output_address, 22, 101); put_byte(output_address, 23, 97);
-                    put_byte(output_address, 24, 114);
-                    output_length = 25;
+                    put_byte(output_address, 9, 104);
+                    put_byte(output_address, 10, 101);
+                    put_byte(output_address, 11, 108);
+                    put_byte(output_address, 12, 112);
+                    put_byte(output_address, 13, 32);
+                    put_byte(output_address, 14, 101);
+                    put_byte(output_address, 15, 99);
+                    put_byte(output_address, 16, 104);
+                    put_byte(output_address, 17, 111);
+                    put_byte(output_address, 18, 32);
+                    put_byte(output_address, 19, 117);
+                    put_byte(output_address, 20, 112);
+                    put_byte(output_address, 21, 116);
+                    put_byte(output_address, 22, 105);
+                    put_byte(output_address, 23, 109);
+                    put_byte(output_address, 24, 101);
+                    put_byte(output_address, 25, 10);
+                    put_byte(output_address, 26, 112);
+                    put_byte(output_address, 27, 105);
+                    put_byte(output_address, 28, 100);
+                    put_byte(output_address, 29, 32);
+                    put_byte(output_address, 30, 119);
+                    put_byte(output_address, 31, 104);
+                    put_byte(output_address, 32, 111);
+                    put_byte(output_address, 33, 97);
+                    put_byte(output_address, 34, 109);
+                    put_byte(output_address, 35, 105);
+                    put_byte(output_address, 36, 32);
+                    put_byte(output_address, 37, 99);
+                    put_byte(output_address, 38, 108);
+                    put_byte(output_address, 39, 101);
+                    put_byte(output_address, 40, 97);
+                    put_byte(output_address, 41, 114);
+                    put_byte(output_address, 42, 32);
+                    put_byte(output_address, 43, 102);
+                    put_byte(output_address, 44, 101);
+                    put_byte(output_address, 45, 116);
+                    put_byte(output_address, 46, 99);
+                    put_byte(output_address, 47, 104);
+                    output_length = 48;
                 } else if text_length == 5 and input_low40 == 448345171302 {
                     # fetch -> concise system identity that fits three rows.
                     clear_bytes(output_address, 64);
@@ -311,6 +382,35 @@ fn terminal_client_main(compositor_name: u64) -> u64 {
                     output_length = 0;
                     history_length = 0;
                     clear_bytes(history_address, 1536);
+                } else if text_length >= 5 and input_low40 == 139308065637 {
+                    # echo <text> -> print back whatever follows "echo ",
+                    # clamped to the 64-byte output buffer.
+                    clear_bytes(output_address, 64);
+                    argument_length: u64 = text_length - 5;
+                    if argument_length > 63 { argument_length = 63; }
+                    echo_index: u64 = 0;
+                    while echo_index < argument_length {
+                        put_byte(output_address, echo_index,
+                                 get_byte(text_address, 5 + echo_index));
+                        echo_index = echo_index + 1;
+                    }
+                    output_length = argument_length;
+                } else if text_length == 6 and low48(input_word) == 111520595079285 {
+                    # uptime -> scheduler ticks since boot, live syscall value.
+                    clear_bytes(output_address, 64);
+                    output_length = write_decimal(output_address, 0, MakoAbi.ticks());
+                } else if text_length == 3 and low24(input_word) == 6580592 {
+                    # pid -> this process's own scheduler PID, live syscall value.
+                    clear_bytes(output_address, 64);
+                    output_length = write_decimal(output_address, 0, MakoAbi.getpid());
+                } else if text_length == 6 and low48(input_word) == 115918507042935 {
+                    # whoami
+                    clear_bytes(output_address, 64);
+                    put_byte(output_address, 0, 114);
+                    put_byte(output_address, 1, 111);
+                    put_byte(output_address, 2, 111);
+                    put_byte(output_address, 3, 116);
+                    output_length = 4;
                 }
                 clear_bytes(text_address, 1536);
                 text_length = 0;

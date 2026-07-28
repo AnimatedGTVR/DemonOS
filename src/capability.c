@@ -45,6 +45,8 @@ static uint32_t service_rights(uint32_t service) {
         return CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_QUERY;
     if (service == CAPABILITY_SERVICE_SURFACE)
         return CAPABILITY_RIGHT_OPEN | CAPABILITY_RIGHT_QUERY;
+    if (service == CAPABILITY_SERVICE_NETWORK)
+        return CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_QUERY;
     return 0u;
 }
 

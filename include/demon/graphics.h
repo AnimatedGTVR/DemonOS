@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct graphics_rect { int32_t x, y, width, height; };
 
 struct graphics_surface {
@@ -67,5 +71,9 @@ void graphics_text(struct graphics_surface *surface, int32_t x, int32_t y,
 void graphics_cursor(struct graphics_surface *surface, int32_t x, int32_t y,
                      enum graphics_cursor_icon icon);
 bool graphics_self_test(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

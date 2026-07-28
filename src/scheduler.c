@@ -34,6 +34,24 @@ static volatile uint64_t dispatch_count;
 static bool initialized, users_running;
 static volatile uint64_t scheduler_ticks;
 
+/* One 512-byte FXSAVE area per task (16-byte alignment is an FXSAVE/FXRSTOR
+   hard requirement, not just perf -- misaligned operands #GP fault). Wave 1
+   of the EDE port (apps/ede_calc) is the first user code in this kernel to
+   use real `double` arithmetic; without saving/restoring x87/SSE state per
+   task here, one preempted task's in-flight FPU registers would bleed into
+   whichever task the PIT switches to next. fpu_template is captured once,
+   right after kernel.c's enable_fpu() leaves the FPU freshly fninit'd, and
+   reseeded into every task slot so a task that has never run yet starts
+   from a known-clean FPU state instead of another task's leftovers. */
+static uint8_t fpu_state[SCHEDULER_PROCESS_LIMIT][512] __attribute__((aligned(16)));
+static uint8_t fpu_template[512] __attribute__((aligned(16)));
+
+static void switch_fpu(uint32_t from_pid, uint32_t to_pid) {
+    if (from_pid == to_pid) return;
+    __asm__ volatile ("fxsave (%0)" : : "r"(fpu_state[from_pid]) : "memory");
+    __asm__ volatile ("fxrstor (%0)" : : "r"(fpu_state[to_pid]) : "memory");
+}
+
 static void copy_name(char output[16], const char *name) {
     size_t i = 0u; for (; i + 1u < 16u && name[i] != '\0'; ++i) output[i] = name[i];
     output[i] = '\0';
@@ -47,6 +65,7 @@ static uintptr_t prepare_frame(uint32_t pid, uint64_t entry, uint64_t stack) {
     tasks[pid].kernel_stack_top = top; return (uintptr_t)frame;
 }
 static uintptr_t dispatch(uint32_t pid) {
+    switch_fpu(current_pid, pid);
     current_pid = pid; tasks[pid].state = SCHEDULER_TASK_RUNNING; tasks[pid].slice_ticks = 0u;
     ++dispatch_count; activate(tasks[pid].address_space);
     userspace_set_kernel_stack(tasks[pid].kernel_stack_top);
@@ -60,12 +79,20 @@ static uint32_t next_ready(uint32_t after) {
     return 0u;
 }
 static uintptr_t return_idle(void) {
+    switch_fpu(current_pid, 0u);
     users_running = false; current_pid = 0u; tasks[0].state = SCHEDULER_TASK_RUNNING;
     ++dispatch_count; activate(tasks[0].address_space); return 0u;
 }
 
 void scheduler_init(uintptr_t kernel_space) {
     for (uint32_t pid = 0u; pid < SCHEDULER_PROCESS_LIMIT; ++pid) tasks[pid] = (struct task){.pid = pid};
+    // Captured here, right after kernel.c's enable_fpu() left the FPU
+    // freshly fninit'd and before anything else touches it, so this is a
+    // known-clean state every task slot starts from.
+    __asm__ volatile ("fxsave (%0)" : : "r"(fpu_template) : "memory");
+    for (uint32_t pid = 0u; pid < SCHEDULER_PROCESS_LIMIT; ++pid) {
+        for (size_t i = 0u; i < sizeof(fpu_template); ++i) fpu_state[pid][i] = fpu_template[i];
+    }
     copy_name(tasks[0].name, "idle"); tasks[0].state = SCHEDULER_TASK_RUNNING;
     tasks[0].address_space = kernel_space; current_pid = 0u; dispatch_count = 1u;
     users_running = false; scheduler_ticks = 0u; initialized = true;
@@ -78,6 +105,10 @@ uint32_t scheduler_create_user(uint32_t parent, const char *name, uint64_t entry
         tasks[pid] = (struct task){.pid = pid, .parent_pid = parent, .state = SCHEDULER_TASK_READY,
             .address_space = space}; copy_name(tasks[pid].name, name);
         tasks[pid].saved_frame = prepare_frame(pid, entry, stack);
+        // Reseed from the clean template: this pid slot may be a reused
+        // one whose fpu_state[] still holds a previous occupant's leftover
+        // FPU registers from switch_fpu's last fxsave into it.
+        for (size_t i = 0u; i < sizeof(fpu_template); ++i) fpu_state[pid][i] = fpu_template[i];
         return pid;
     }
     return 0u;

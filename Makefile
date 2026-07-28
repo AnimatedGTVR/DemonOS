@@ -1,4 +1,5 @@
 CC := gcc
+CXX := g++
 LD := ld
 STRIP := strip
 # MAKO is a plain .NET console project and does not use optional workloads.
@@ -30,9 +31,25 @@ WINDOW_CRASH_CLIENT_ELF := $(BUILD)/window_crash_client.elf
 DEMONX_ELF := $(BUILD)/demonx.elf
 DEMONX_CLIENT_ELF := $(BUILD)/demonx_client.elf
 TETRIS_ELF := $(BUILD)/tetris.elf
+CALCULATOR_ELF := $(BUILD)/calculator.elf
 TERMINAL_CLIENT_ELF := $(BUILD)/terminal_client.elf
 COUNTER_CLIENT_ELF := $(BUILD)/counter_client.elf
 BROWSER_CLIENT_ELF := $(BUILD)/browser_client.elf
+# Wave 0 of the EDE port (see Desktop/EDE/ede-2.1 and docs/c-apps.md's "C
+# runtime boundary" section): proves a real C++ app -- heap allocation,
+# vtables, a virtual destructor -- can build and run under MAKO-ABI at all,
+# before any actual EDE component is attempted.
+CXX_HELLO_ELF := $(BUILD)/cxx_hello.elf
+# Wave 1 of the EDE port: a real ede-calc, ported off SciCalc.cpp's FLTK
+# widget tree onto this kernel's own window/surface/graphics primitives
+# (see apps/ede_calc/). Needs actual `double` arithmetic, which is what
+# drove the FPU/SSE + FXSAVE/FXRSTOR scheduler work (src/scheduler.c) and
+# the FLOAT_CFLAGS/FLOAT_CXXFLAGS variants below -- kernel.c CFLAGS keep
+# -mno-sse/-msoft-float since GCC refuses `double`-returning functions
+# under those flags on x86_64 (soft-float there is calling-convention-
+# incompatible, not just slower), so anything using real floats needs SSE2
+# actually enabled instead.
+EDE_CALC_ELF := $(BUILD)/ede_calc.elf
 MAKO_REPO := ../MAKO
 MAKO_SOURCE_ARCHIVE := $(BUILD)/MAKO-source.tar.zst
 MAKO_MANIFEST := $(BUILD)/mako-manifest.txt
@@ -47,15 +64,15 @@ LDFLAGS := -nostdlib --gc-sections -z max-page-size=0x1000 -T linker.ld
 USER_LDFLAGS := -nostdlib -z max-page-size=0x10 -T user/linker.ld
 
 OBJECTS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/serial.o $(BUILD)/terminal.o \
-	$(BUILD)/interrupt_stubs.o $(BUILD)/interrupts.o $(BUILD)/input.o $(BUILD)/graphics.o $(BUILD)/mouse_argb.o $(BUILD)/wallpaper_argb.o $(BUILD)/cursor_icons_argb.o $(BUILD)/ui_icons_argb.o $(BUILD)/start_logo_argb.o $(BUILD)/assets.o $(BUILD)/framebuffer.o $(BUILD)/makobox.o $(BUILD)/kernel_probe.o
+	$(BUILD)/interrupt_stubs.o $(BUILD)/interrupts.o $(BUILD)/pci.o $(BUILD)/input.o $(BUILD)/graphics.o $(BUILD)/mouse_argb.o $(BUILD)/wallpaper_argb.o $(BUILD)/cursor_icons_argb.o $(BUILD)/ui_icons_argb.o $(BUILD)/start_logo_argb.o $(BUILD)/shell_icons_argb.o $(BUILD)/assets.o $(BUILD)/framebuffer.o $(BUILD)/makobox.o $(BUILD)/kernel_probe.o
 
 OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/capability.o \
-	$(BUILD)/ipc.o $(BUILD)/display.o $(BUILD)/surface.o $(BUILD)/init.o $(BUILD)/runas.o $(BUILD)/apps.o $(BUILD)/git.o \
+	$(BUILD)/ipc.o $(BUILD)/display.o $(BUILD)/surface.o $(BUILD)/network.o $(BUILD)/http.o $(BUILD)/e1000.o $(BUILD)/ahci.o $(BUILD)/init.o $(BUILD)/runas.o $(BUILD)/apps.o $(BUILD)/git.o \
 	$(BUILD)/ramfs.o \
 	$(BUILD)/user_program_blob.o
 
-.PHONY: all iso iso-check project run smoke framebuffer-smoke framebuffer-fallback-smoke keyboard-smoke desktop-shortcut-smoke session-login-smoke terminal-smoke mouse-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
+.PHONY: all iso iso-check project run run-wayland run-sdl run-vnc smoke framebuffer-smoke framebuffer-fallback-smoke keyboard-smoke desktop-shortcut-smoke terminal-smoke mouse-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
 
 all: $(KERNEL)
 
@@ -67,7 +84,7 @@ $(BUILD):
 $(BUILD)/boot.o: src/arch/x86_64/boot.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
-$(BUILD)/kernel.o: src/kernel.c include/demon/graphics.h include/demon/input.h include/kernel/multiboot2.h include/kernel/framebuffer.h include/kernel/display.h include/kernel/surface.h include/kernel/capability.h include/kernel/apps.h include/kernel/git.h include/kernel/init.h include/kernel/ipc.h include/kernel/runas.h include/kernel/ramfs.h include/kernel/serial.h include/kernel/terminal.h include/kernel/scheduler.h include/kernel/userspace.h | $(BUILD)
+$(BUILD)/kernel.o: src/kernel.c include/demon/graphics.h include/demon/input.h include/kernel/multiboot2.h include/kernel/framebuffer.h include/kernel/display.h include/kernel/surface.h include/kernel/network.h include/kernel/http.h include/kernel/pci.h include/kernel/e1000.h include/kernel/capability.h include/kernel/apps.h include/kernel/git.h include/kernel/init.h include/kernel/ipc.h include/kernel/runas.h include/kernel/ramfs.h include/kernel/serial.h include/kernel/terminal.h include/kernel/scheduler.h include/kernel/userspace.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/serial.o: src/arch/x86_64/serial.c include/kernel/serial.h | $(BUILD)
@@ -82,16 +99,31 @@ $(BUILD)/interrupt_stubs.o: src/arch/x86_64/interrupt_stubs.S | $(BUILD)
 $(BUILD)/interrupts.o: src/arch/x86_64/interrupts.c include/demon/input.h include/kernel/interrupts.h include/kernel/scheduler.h include/kernel/serial.h include/kernel/terminal.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/pci.o: src/arch/x86_64/pci.c include/kernel/pci.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/input.o: src/input.c include/demon/input.h include/kernel/ipc.h include/kernel/scheduler.h include/kernel/userspace.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/network.o: src/network.c include/kernel/network.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/http.o: src/http.c include/kernel/http.h include/kernel/network.h include/kernel/e1000.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/e1000.o: src/e1000.c include/kernel/e1000.h include/kernel/network.h include/kernel/pci.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/ahci.o: src/ahci.c include/kernel/ahci.h include/kernel/pci.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/graphics.o: libs/graphics/graphics.c include/demon/graphics.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/mouse.argb: assets/mouse.png | $(BUILD)
-	magick $< -alpha on -bordercolor black -border 1 \
-		-fill none -draw 'alpha 0,0 floodfill' -shave 1x1 \
-		-trim +repage -resize 16x24 -gravity northwest -background none \
+ICON_THEME := assets/IconPack/Fluent-icon-theme
+
+$(BUILD)/mouse.argb: $(ICON_THEME)/cursors/src/svg/default.svg | $(BUILD)
+	magick -background none $< -trim +repage -resize 16x24 -gravity northwest -background none \
 		-extent 16x24 -channel RGBA -depth 8 BGRA:$@
 
 $(BUILD)/mouse_argb.o: $(BUILD)/mouse.argb
@@ -120,19 +152,19 @@ $(BUILD)/wallpaper_argb.o: $(BUILD)/wallpaper.argb
 # this blob covers indices 1..12 back to back, 1536 bytes each, letting
 # demon_cursor_icon_pixels index it with one multiply.
 CURSOR_ICON_SOURCES := \
-	"assets/Mouse/New Icons/Mouse Icons/Mouse Pointer Hover New.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Text Selection.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Bottom Right.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Top.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Bottom.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Right.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Left.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Top Right.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Top Left.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Bottom Right.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Resize Bottom Left.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Can't Interact With.png" \
-	"assets/Mouse/New Icons/Mouse Icons/Info.png"
+	"$(ICON_THEME)/cursors/src/svg/pointer.svg" \
+	"$(ICON_THEME)/cursors/src/svg/text.svg" \
+	"$(ICON_THEME)/cursors/src/svg/size_bdiag.svg" \
+	"$(ICON_THEME)/cursors/src/svg/top_side.svg" \
+	"$(ICON_THEME)/cursors/src/svg/bottom_side.svg" \
+	"$(ICON_THEME)/cursors/src/svg/right_side.svg" \
+	"$(ICON_THEME)/cursors/src/svg/left_side.svg" \
+	"$(ICON_THEME)/cursors/src/svg/top_right_corner.svg" \
+	"$(ICON_THEME)/cursors/src/svg/top_left_corner.svg" \
+	"$(ICON_THEME)/cursors/src/svg/bottom_right_corner.svg" \
+	"$(ICON_THEME)/cursors/src/svg/bottom_left_corner.svg" \
+	"$(ICON_THEME)/cursors/src/svg/not-allowed.svg" \
+	"$(ICON_THEME)/cursors/src/svg/help.svg"
 
 $(BUILD)/cursor_icons.argb: FORCE | $(BUILD)
 	rm -f $@
@@ -153,16 +185,19 @@ $(BUILD)/cursor_icons_argb.o: $(BUILD)/cursor_icons.argb
 # duplicates of the close X), so the maximize control stays a drawn dot
 # rather than using a wrong icon.
 UI_ICON_SOURCES := \
-	"assets/Mouse/New Icons/exit program button.png" \
-	"assets/Mouse/New Icons/exit program button Selected.png" \
-	"assets/Mouse/New Icons/minimize program button.png" \
-	"assets/Mouse/New Icons/minimize program button Selected.png"
+	"$(ICON_THEME)/src/symbolic/actions/window-close-symbolic.svg" \
+	"$(ICON_THEME)/src/symbolic/actions/window-close-symbolic.svg" \
+	"$(ICON_THEME)/src/symbolic/actions/window-minimize-symbolic.svg" \
+	"$(ICON_THEME)/src/symbolic/actions/window-minimize-symbolic.svg" \
+	"$(ICON_THEME)/src/symbolic/actions/window-maximize-symbolic.svg" \
+	"$(ICON_THEME)/src/symbolic/actions/window-maximize-symbolic.svg"
 
 $(BUILD)/ui_icons.argb: FORCE | $(BUILD)
 	rm -f $@
 	for src in $(UI_ICON_SOURCES); do \
-		magick "$$src" -trim +repage -gravity center -background none \
-			-extent 10x10 -channel RGBA -depth 8 BGRA:- >> $@; \
+		magick -background none "$$src" -trim +repage -resize 8x8 -gravity center -background none \
+			-extent 10x10 -fill '#F1F5F9' -colorize 100 \
+			-channel RGBA -depth 8 BGRA:- >> $@; \
 	done
 
 $(BUILD)/ui_icons_argb.o: $(BUILD)/ui_icons.argb
@@ -172,14 +207,33 @@ $(BUILD)/ui_icons_argb.o: $(BUILD)/ui_icons.argb
 # padded to a square 22x22 canvas.
 $(BUILD)/start_logo.argb: FORCE | $(BUILD)
 	rm -f $@
-	magick "assets/Mouse/New Icons/Liquid OS Start Button Logo.png" \
-		-trim +repage -gravity center -background none \
+	magick -background none "$(ICON_THEME)/src/22/places/start-here.svg" \
+		-trim +repage -resize 20x20 -gravity center -background none \
 		-extent 22x22 -channel RGBA -depth 8 BGRA:$@
 
 $(BUILD)/start_logo_argb.o: $(BUILD)/start_logo.argb
 	$(LD) -r -b binary $< -o $@
 
-$(BUILD)/assets.o: src/assets.c include/demon/assets.h $(BUILD)/mouse_argb.o $(BUILD)/wallpaper_argb.o $(BUILD)/cursor_icons_argb.o $(BUILD)/ui_icons_argb.o $(BUILD)/start_logo_argb.o | $(BUILD)
+SHELL_ICON_SOURCES := \
+	"$(ICON_THEME)/src/scalable/apps/terminal.svg" \
+	"$(ICON_THEME)/src/scalable/places/default-folder.svg" \
+	"$(ICON_THEME)/src/scalable/apps/web-browser.svg" \
+	"$(ICON_THEME)/templates/app-blue-square.svg" \
+	"$(ICON_THEME)/src/scalable/apps/systemsettings.svg" \
+	"$(ICON_THEME)/src/scalable/devices/computer.svg"
+
+$(BUILD)/shell_icons.argb: FORCE | $(BUILD)
+	rm -f $@
+	for src in $(SHELL_ICON_SOURCES); do \
+		magick -background none "$$src" -trim +repage -resize 20x20 \
+			-gravity center -background none -extent 22x22 \
+			-channel RGBA -depth 8 BGRA:- >> $@; \
+	done
+
+$(BUILD)/shell_icons_argb.o: $(BUILD)/shell_icons.argb
+	$(LD) -r -b binary $< -o $@
+
+$(BUILD)/assets.o: src/assets.c include/demon/assets.h $(BUILD)/mouse_argb.o $(BUILD)/wallpaper_argb.o $(BUILD)/cursor_icons_argb.o $(BUILD)/ui_icons_argb.o $(BUILD)/start_logo_argb.o $(BUILD)/shell_icons_argb.o | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/framebuffer.o: src/framebuffer.c include/demon/assets.h include/demon/graphics.h include/kernel/framebuffer.h include/kernel/multiboot2.h | $(BUILD)
@@ -258,7 +312,7 @@ $(BUILD)/user_program_blob.o: $(USER_ELF)
 $(BUILD)/compositor_entry.o: user/compositor.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
-$(BUILD)/compositor_mko.S: user/compositor.mko user/sdk.mko | $(BUILD)
+$(BUILD)/compositor_mko.S: user/compositor.mko user/sdk.mko Desktop/desktop.mko | $(BUILD)
 	dotnet run --project ../MAKO/src/Mako -- native $< --kernel -o $@
 
 $(BUILD)/compositor_mko.o: $(BUILD)/compositor_mko.S
@@ -361,6 +415,91 @@ $(TETRIS_ELF): $(BUILD)/tetris_entry.o $(BUILD)/tetris.o user/linker.ld
 		$(BUILD)/tetris_entry.o $(BUILD)/tetris.o -o $@
 	$(STRIP) -s $@
 
+$(BUILD)/calculator_entry.o: apps/calculator/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/calculator.o: apps/calculator/main.c include/demon/c_app.h include/demon/window.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(CALCULATOR_ELF): $(BUILD)/calculator_entry.o $(BUILD)/calculator.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) \
+		$(BUILD)/calculator_entry.o $(BUILD)/calculator.o -o $@
+	$(STRIP) -s $@
+
+# Same freestanding constraints as CFLAGS, plus the two things every
+# freestanding C++ target needs: -fno-exceptions (no unwind-table runtime
+# support here) and -fno-rtti (no __cxa_type_match/typeinfo runtime either).
+# Every EDE-derived .cpp in later waves builds with this same flag set.
+CXXFLAGS := -std=c++17 -Os -g -Wall -Wextra -Werror \
+	-ffreestanding -fno-builtin -fno-exceptions -fno-rtti \
+	-fno-stack-protector -fno-pie -fno-pic \
+	-ffunction-sections -fdata-sections \
+	-m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -msoft-float \
+	-Iinclude
+
+$(BUILD)/cxx_runtime.o: src/cxx_runtime.cpp include/demon/cxx_runtime.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/cxx_hello_entry.o: apps/cxx_hello/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/cxx_hello.o: apps/cxx_hello/main.cpp include/demon/c_app.h include/demon/cxx_runtime.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(CXX_HELLO_ELF): $(BUILD)/cxx_hello_entry.o $(BUILD)/cxx_hello.o $(BUILD)/cxx_runtime.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) \
+		$(BUILD)/cxx_hello_entry.o $(BUILD)/cxx_hello.o $(BUILD)/cxx_runtime.o -o $@
+	$(STRIP) -s $@
+
+# CFLAGS/CXXFLAGS keep -mno-mmx -mno-sse -mno-sse2 -msoft-float because the
+# kernel and every non-floating-point app don't need the FPU at all, and
+# leaving it fully disabled is the safer default. GCC on x86_64 refuses to
+# even compile a function that returns `double` under those flags at all
+# ("SSE register return with SSE disabled") -- soft-float there still needs
+# XMM0 for the ABI return slot, so -msoft-float alone doesn't help. ede-calc
+# is this kernel's first real floating-point app (apps/ede_calc, Wave 1 of
+# the EDE port), so it -- and only it -- builds with SSE2 actually enabled;
+# src/scheduler.c's FXSAVE/FXRSTOR-per-task change is what makes that safe
+# under this kernel's preemptive scheduler.
+FLOAT_CFLAGS := -std=c11 -Os -g -Wall -Wextra -Werror \
+	-ffreestanding -fno-builtin -fno-stack-protector -fno-pie -fno-pic \
+	-ffunction-sections -fdata-sections \
+	-m64 -mno-red-zone \
+	-Iinclude
+FLOAT_CXXFLAGS := -std=c++17 -Os -g -Wall -Wextra -Werror \
+	-ffreestanding -fno-builtin -fno-exceptions -fno-rtti \
+	-fno-stack-protector -fno-pie -fno-pic \
+	-ffunction-sections -fdata-sections \
+	-m64 -mno-red-zone \
+	-Iinclude
+
+$(BUILD)/libm_freestanding.o: src/libm_freestanding.c include/demon/libm_freestanding.h | $(BUILD)
+	$(CC) $(FLOAT_CFLAGS) -c $< -o $@
+
+# libs/graphics/graphics.c has no floating point in it at all, so it builds
+# fine either way -- this is a second object file (not the kernel's own
+# $(BUILD)/graphics.o) purely because user apps and the kernel link
+# separately; ede-calc needs graphics_text()/graphics_rounded_rect() for its
+# button grid and LED display the same way the kernel's compositor does.
+$(BUILD)/graphics_user.o: libs/graphics/graphics.c include/demon/graphics.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/ede_calc_entry.o: apps/ede_calc/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/ede_calc_engine.o: apps/ede_calc/engine.cpp apps/ede_calc/engine.h include/demon/libm_freestanding.h | $(BUILD)
+	$(CXX) $(FLOAT_CXXFLAGS) -c $< -o $@
+
+$(BUILD)/ede_calc_main.o: apps/ede_calc/main.cpp apps/ede_calc/engine.h include/demon/c_app.h include/demon/window.h include/demon/graphics.h | $(BUILD)
+	$(CXX) $(FLOAT_CXXFLAGS) -c $< -o $@
+
+$(EDE_CALC_ELF): $(BUILD)/ede_calc_entry.o $(BUILD)/ede_calc_main.o $(BUILD)/ede_calc_engine.o \
+                 $(BUILD)/libm_freestanding.o $(BUILD)/graphics_user.o $(BUILD)/cxx_runtime.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) --gc-sections \
+		$(BUILD)/ede_calc_entry.o $(BUILD)/ede_calc_main.o $(BUILD)/ede_calc_engine.o \
+		$(BUILD)/libm_freestanding.o $(BUILD)/graphics_user.o $(BUILD)/cxx_runtime.o -o $@
+	$(STRIP) -s $@
+
 $(BUILD)/terminal_client_entry.o: user/terminal_client.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
@@ -420,7 +559,7 @@ $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) &: tools/package-mako-source.sh FORCE | 
 
 iso: $(ISO) iso-check
 
-$(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(DEMONX_ELF) $(DEMONX_CLIENT_ELF) $(TETRIS_ELF) $(TERMINAL_CLIENT_ELF) $(COUNTER_CLIENT_ELF) $(BROWSER_CLIENT_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/desktop-iso-roadmap.md docs/init-system.md docs/apps-and-git.md docs/c-apps.md docs/freedoom-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/compositor-stage6.md docs/demonx.md grub/grub-test.cfg
+$(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(DEMONX_ELF) $(DEMONX_CLIENT_ELF) $(TETRIS_ELF) $(CALCULATOR_ELF) $(TERMINAL_CLIENT_ELF) $(COUNTER_CLIENT_ELF) $(BROWSER_CLIENT_ELF) $(CXX_HELLO_ELF) $(EDE_CALC_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/desktop-iso-roadmap.md docs/init-system.md docs/apps-and-git.md docs/c-apps.md docs/freedoom-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/compositor-stage6.md docs/demonx.md docs/network-stage7.md grub/grub-test.cfg
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/grub $(ISO_ROOT)/boot/mako $(ISO_ROOT)/system/mako $(ISO_ROOT)/docs
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
@@ -435,6 +574,9 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDO
 	cp $(DEMONX_ELF) $(ISO_ROOT)/boot/mako/demonx.elf
 	cp $(DEMONX_CLIENT_ELF) $(ISO_ROOT)/boot/mako/demonx-client.elf
 	cp $(TETRIS_ELF) $(ISO_ROOT)/boot/mako/tetris.elf
+	cp $(CALCULATOR_ELF) $(ISO_ROOT)/boot/mako/calculator.elf
+	cp $(CXX_HELLO_ELF) $(ISO_ROOT)/boot/mako/cxx-hello.elf
+	cp $(EDE_CALC_ELF) $(ISO_ROOT)/boot/mako/ede-calc.elf
 	cp $(TERMINAL_CLIENT_ELF) $(ISO_ROOT)/boot/mako/terminal-client.elf
 	cp $(COUNTER_CLIENT_ELF) $(ISO_ROOT)/boot/mako/counter-client.elf
 	cp $(BROWSER_CLIENT_ELF) $(ISO_ROOT)/boot/mako/browser-client.elf
@@ -456,13 +598,29 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDO
 	cp docs/ipc-stage5.md $(ISO_ROOT)/docs/ipc-stage5.md
 	cp docs/compositor-stage6.md $(ISO_ROOT)/docs/compositor-stage6.md
 	cp docs/demonx.md $(ISO_ROOT)/docs/demonx.md
+	cp docs/network-stage7.md $(ISO_ROOT)/docs/network-stage7.md
 	cp grub/grub-test.cfg $(ISO_ROOT)/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(ISO_ROOT) >/dev/null 2>&1
 
-$(RUN_ISO): $(ISO) grub/grub.cfg
+$(RUN_ISO): $(ISO) grub/grub.cfg assets/Flowers.jpg
 	rm -rf $(BUILD)/iso-run
 	cp -r $(ISO_ROOT) $(BUILD)/iso-run
 	cp grub/grub.cfg $(BUILD)/iso-run/boot/grub/grub.cfg
+	# Re-encoded to PNG, not just copied: assets/Flowers.jpg is a progressive
+	# JPEG, and GRUB's built-in jpeg.mod only decodes baseline JPEGs -- fed a
+	# progressive one it renders scrambled noise instead of an error. PNG has
+	# no such baseline/progressive split, so this sidesteps the whole class
+	# of bug rather than re-encoding as a baseline JPEG and hoping nothing
+	# ever regresses that.
+	magick assets/Flowers.jpg $(BUILD)/iso-run/boot/grub/boot-background.png
+	mkdir -p $(BUILD)/iso-run/boot/grub/fonts
+	# Font location varies by distro/packaging (plain /usr/share/grub on most
+	# hosts, a per-store path under Nix); grub.cfg's own loadfont call is
+	# already guarded (see grub/grub.cfg) so a miss here just means the boot
+	# menu falls back to plain text mode instead of failing the ISO build.
+	cp /usr/share/grub/unicode.pf2 $(BUILD)/iso-run/boot/grub/fonts/unicode.pf2 2>/dev/null || \
+		cp $$(find /nix/store -maxdepth 4 -name unicode.pf2 2>/dev/null | head -n1) \
+			$(BUILD)/iso-run/boot/grub/fonts/unicode.pf2 2>/dev/null || true
 	grub-mkrescue -o $@ $(BUILD)/iso-run >/dev/null 2>&1
 
 iso-check: $(ISO)
@@ -478,6 +636,10 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/mako/demonx.elf -type f 2>/dev/null | grep -q demonx.elf
 	@xorriso -indev $(ISO) -find /boot/mako/demonx-client.elf -type f 2>/dev/null | grep -q demonx-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/tetris.elf -type f 2>/dev/null | grep -q tetris.elf
+	@xorriso -indev $(ISO) -find /boot/mako/calculator.elf -type f 2>/dev/null | grep -q calculator.elf
+	@test $$(wc -c < $(CALCULATOR_ELF)) -le 49152
+	@test $$(wc -c < $(CXX_HELLO_ELF)) -le 16384
+	@test $$(wc -c < $(EDE_CALC_ELF)) -le 32768
 	@xorriso -indev $(ISO) -find /boot/mako/terminal-client.elf -type f 2>/dev/null | grep -q terminal-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/counter-client.elf -type f 2>/dev/null | grep -q counter-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/browser-client.elf -type f 2>/dev/null | grep -q browser-client.elf
@@ -492,6 +654,7 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /docs/c-apps.md -type f 2>/dev/null | grep -q c-apps.md
 	@xorriso -indev $(ISO) -find /docs/freedoom-port.md -type f 2>/dev/null | grep -q freedoom-port.md
 	@xorriso -indev $(ISO) -find /docs/display-address-space.md -type f 2>/dev/null | grep -q display-address-space.md
+	@xorriso -indev $(ISO) -find /docs/network-stage7.md -type f 2>/dev/null | grep -q network-stage7.md
 	@xorriso -indev $(ISO) -find /docs/framebuffer-stage1.md -type f 2>/dev/null | grep -q framebuffer-stage1.md
 	@xorriso -indev $(ISO) -find /docs/graphics-stage2.md -type f 2>/dev/null | grep -q graphics-stage2.md
 	@xorriso -indev $(ISO) -find /docs/input-stage3.md -type f 2>/dev/null | grep -q input-stage3.md
@@ -509,19 +672,49 @@ iso-check: $(ISO)
 	@test $$(wc -c < $(DEMONX_ELF)) -le 12288
 	@test $$(wc -c < $(DEMONX_CLIENT_ELF)) -le 16384
 	@test $$(wc -c < $(TETRIS_ELF)) -le 12288
-	@test $$(wc -c < $(TERMINAL_CLIENT_ELF)) -le 32768
+	@# Bumped from 32768: echo/uptime/pid/whoami plus the shared
+	@# low24/low48/write_decimal helpers pushed the binary to 33088 bytes.
+	@test $$(wc -c < $(TERMINAL_CLIENT_ELF)) -le 36864
 	@test $$(wc -c < $(COUNTER_CLIENT_ELF)) -le 12288
 	@test $$(wc -c < $(BROWSER_CLIENT_ELF)) -le 49152
 	@test $$(wc -c < $(MAKO_MANIFEST)) -le 8192
 	@zstd -q -t $(MAKO_SOURCE_ARCHIVE)
-	@grep -q '^origin=https://github.com/Xeno-Tech-Systems/MAKO$$' $(MAKO_MANIFEST)
+	@grep -Eq '^origin=https://github.com/AnimatedGTVR/MAKO([.]git)?$$' $(MAKO_MANIFEST)
 	@grep -q '^archive_sha256=' $(MAKO_MANIFEST)
 	@echo "MAKO ISO contents verified"
 
 run: $(RUN_ISO)
-	@echo "Mouse: captured on hover through XWayland; Ctrl+Alt+G releases it"
+	@echo "Mouse: using the reliable XWayland QEMU backend; Ctrl+Alt+G releases it"
 	env GDK_BACKEND=x11 qemu-system-x86_64 -cdrom $(RUN_ISO) -m 256M -serial stdio \
 		-display gtk,grab-on-hover=on \
+		-no-reboot -no-shutdown
+
+# Native Wayland is opt-in because GTK's relative-pointer grab can render a
+# perfectly healthy guest while forwarding only the first host movement on
+# some compositors. Keep it available for systems where that protocol works.
+run-wayland: $(RUN_ISO)
+	@echo "Mouse: native Wayland mode (experimental); Ctrl+Alt+G releases it"
+	env GDK_BACKEND=wayland qemu-system-x86_64 -cdrom $(RUN_ISO) -m 256M -serial stdio \
+		-display gtk,grab-on-hover=on \
+		-no-reboot -no-shutdown
+
+# SDL is a second local fallback when the GTK backend cannot acquire a
+# relative pointer grab through either XWayland or native Wayland.
+run-sdl: $(RUN_ISO)
+	@echo "Mouse: SDL relative-pointer mode; Ctrl+Alt+G releases it"
+	qemu-system-x86_64 -cdrom $(RUN_ISO) -m 256M -serial stdio \
+		-display sdl \
+		-no-reboot -no-shutdown
+
+# Alternative for environments where a local QEMU window never receives
+# host pointer/keyboard input at all.
+# VNC does its own independent pointer/keyboard capture in the connecting
+# client, sidestepping GTK/Wayland grab entirely. Connect with any VNC
+# client to localhost:5901 (VNC display :1 = TCP port 5900+1).
+run-vnc: $(RUN_ISO)
+	@echo "Connect a VNC client to localhost:5901. Ctrl+Alt+G is not needed -- VNC has no host/guest grab step."
+	qemu-system-x86_64 -cdrom $(RUN_ISO) -m 256M -serial stdio \
+		-display vnc=:1 \
 		-no-reboot -no-shutdown
 
 smoke: $(ISO)
@@ -536,6 +729,19 @@ smoke: $(ISO)
 	@grep -q "FRAMEBUFFER_MAPPING_OK" $(BUILD)/serial.log
 	@grep -q "FRAMEBUFFER_PRIMITIVES_OK" $(BUILD)/serial.log
 	@grep -q "GRAPHICS_LIBRARY_OK" $(BUILD)/serial.log
+	@grep -q "NETWORK_PACKET_CORE_OK" $(BUILD)/serial.log
+	@grep -q "PCI_ENUMERATION_OK" $(BUILD)/serial.log
+	@grep -q "PCI_ETHERNET_FOUND" $(BUILD)/serial.log
+	@grep -q "E1000_DEVICE_READY" $(BUILD)/serial.log
+	@grep -q "E1000_DMA_RINGS_READY" $(BUILD)/serial.log
+	@grep -q "E1000_REAL_ARP_OK" $(BUILD)/serial.log
+	@grep -q "DHCP_REAL_OFFER_OK" $(BUILD)/serial.log
+	@grep -q "DHCP_REAL_ACK_OK" $(BUILD)/serial.log
+	@grep -q "DNS_REAL_QUERY_OK host=example.com" $(BUILD)/serial.log
+	@grep -q "TCP_REAL_HANDSHAKE_OK" $(BUILD)/serial.log
+	@grep -q "HTTP_REAL_RESPONSE_OK" $(BUILD)/serial.log
+	@grep -q "DEMON_WEB_NETWORK_ABI_OK" $(BUILD)/serial.log
+	@grep -q "HTTP_RUNTIME_CLIENT_OK" $(BUILD)/serial.log
 	@grep -q "MOUSE_INPUT_READY" $(BUILD)/serial.log
 	@grep -q "UNIFIED_INPUT_ABI_OK" $(BUILD)/serial.log
 	@grep -q "GRAPHICAL_BOOT_TEST_OK" $(BUILD)/serial.log
@@ -562,12 +768,13 @@ smoke: $(ISO)
 	@grep -q "preinstalled MKO asset: /system/bin/terminal-client.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/bin/counter-client.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/bin/browser-client.elf" $(BUILD)/serial.log
+	@grep -q "preinstalled MKO asset: /system/bin/calculator.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/mako/manifest.txt" $(BUILD)/serial.log
 	@grep -q "MKO system environment:" $(BUILD)/serial.log
 	@grep -q "repository: AnimatedGTVR/MAKO" $(BUILD)/serial.log
 	@grep -q "ISO source: /system/mako/MAKO-source.tar.zst" $(BUILD)/serial.log
-	@grep -q "ISO-provided assets: 16" $(BUILD)/serial.log
-	@grep -q "files: 17" $(BUILD)/serial.log
+	@grep -q "ISO-provided assets: 19" $(BUILD)/serial.log
+	@grep -q "files: 20" $(BUILD)/serial.log
 	@grep -q "USERSPACE_SYSCALLS_OK" $(BUILD)/serial.log
 	@grep -q "ELF64_MKO_LOAD_OK" $(BUILD)/serial.log
 	@grep -q "USERSPACE_CODE_POOLS_OK pages=92 max=36 heap=0x324000" $(BUILD)/serial.log
@@ -755,50 +962,6 @@ desktop-shortcut-smoke: $(ISO)
 	@! grep -Eq "PAGE FAULT|EXCEPTION|PANIC|\[FAILED\]" $(BUILD)/desktop-shortcut.log
 	@echo "Native desktop Super-key launcher smoke test passed"
 
-session-login-smoke: $(RUN_ISO)
-	@command -v socat >/dev/null
-	@rm -f $(BUILD)/session-login.log $(BUILD)/session-login-monitor.sock \
-		$(BUILD)/session-login.ppm $(BUILD)/session-login-error.ppm \
-		$(BUILD)/session-login-desktop.ppm $(BUILD)/session-login-relock.ppm
-	@qemu-system-x86_64 -cdrom $(RUN_ISO) -m 256M \
-		-serial file:$(BUILD)/session-login.log -display none \
-		-monitor unix:$(BUILD)/session-login-monitor.sock,server,nowait \
-		-no-reboot -no-shutdown >/dev/null 2>&1 & pid=$$!; \
-		for attempt in $$(seq 1 100); do \
-			if grep -q "DESKTOP_SESSION_READY" $(BUILD)/session-login.log 2>/dev/null && \
-			   test -S $(BUILD)/session-login-monitor.sock; then break; fi; \
-			sleep 0.1; \
-		done; \
-		sleep 2; \
-		printf 'screendump %s/$(BUILD)/session-login.ppm\n' "$(CURDIR)" | \
-			socat - UNIX-CONNECT:$(BUILD)/session-login-monitor.sock >/dev/null; \
-		printf 'sendkey x\nsendkey ret\n' | \
-			socat - UNIX-CONNECT:$(BUILD)/session-login-monitor.sock >/dev/null; \
-		sleep 0.25; \
-		printf 'screendump %s/$(BUILD)/session-login-error.ppm\n' "$(CURDIR)" | \
-			socat - UNIX-CONNECT:$(BUILD)/session-login-monitor.sock >/dev/null; \
-		{ for key in d e m o n ret; do printf 'sendkey %s\n' "$$key"; done; } | \
-			socat - UNIX-CONNECT:$(BUILD)/session-login-monitor.sock >/dev/null; \
-		sleep 0.5; \
-		printf 'screendump %s/$(BUILD)/session-login-desktop.ppm\n' "$(CURDIR)" | \
-			socat - UNIX-CONNECT:$(BUILD)/session-login-monitor.sock >/dev/null; \
-		printf 'sendkey meta_l-l\n' | \
-			socat - UNIX-CONNECT:$(BUILD)/session-login-monitor.sock >/dev/null; \
-		sleep 0.35; \
-		printf 'screendump %s/$(BUILD)/session-login-relock.ppm\n' "$(CURDIR)" | \
-			socat - UNIX-CONNECT:$(BUILD)/session-login-monitor.sock >/dev/null; \
-		for image in session-login session-login-error session-login-desktop session-login-relock; do \
-			for attempt in $$(seq 1 20); do test -s $(BUILD)/$$image.ppm && break; sleep 0.05; done; \
-		done; \
-		kill $$pid 2>/dev/null || true; wait $$pid 2>/dev/null || true
-	@! cmp -s $(BUILD)/session-login.ppm $(BUILD)/session-login-error.ppm
-	@! cmp -s $(BUILD)/session-login-error.ppm $(BUILD)/session-login-desktop.ppm
-	@! cmp -s $(BUILD)/session-login-desktop.ppm $(BUILD)/session-login-relock.ppm
-	@grep -q "DESKTOP_DEFAULT_TARGET_OK target=desktop.target" $(BUILD)/session-login.log
-	@grep -q "DESKTOP_SESSION_READY display=compositor input=compositor console=recovery-only" $(BUILD)/session-login.log
-	@! grep -Eq "PAGE FAULT|EXCEPTION|PANIC|\[FAILED\]" $(BUILD)/session-login.log
-	@echo "Native loading, credential gate, desktop unlock, and Super+L relock smoke test passed"
-
 terminal-smoke: $(ISO)
 	@command -v socat >/dev/null
 	@rm -f $(BUILD)/terminal-visual.log $(BUILD)/terminal-monitor.sock \
@@ -978,7 +1141,7 @@ footprint-check: $(KERNEL) $(BUILD)/init.o $(BUILD)/runas.o
 		test $$kernel -le 1048576 || { echo "kernel memory footprint $$kernel exceeds 1-MiB budget"; exit 1; }
 	@echo "Footprint budgets passed: init+runas <= 4 KiB, BSS <= 256 B, kernel <= 1 MiB"
 
-check: iso-check framebuffer-smoke framebuffer-fallback-smoke keyboard-smoke desktop-shortcut-smoke session-login-smoke terminal-smoke mouse-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check
+check: iso-check framebuffer-smoke framebuffer-fallback-smoke keyboard-smoke desktop-shortcut-smoke terminal-smoke mouse-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check
 
 size: $(KERNEL)
 	@size $(KERNEL)

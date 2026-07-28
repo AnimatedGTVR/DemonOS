@@ -62,7 +62,7 @@ bool display_submit_effect(const struct display_user_effect *request) {
         request->width > (uint64_t)INT32_MAX || request->height > (uint64_t)INT32_MAX ||
         request->x > (uint64_t)INT32_MAX || request->y > (uint64_t)INT32_MAX ||
         (request->flags & ~DISPLAY_SUBMIT_PRESENT) != 0u ||
-        request->kind > DISPLAY_EFFECT_START_LOGO) {
+        request->kind > DISPLAY_EFFECT_SHELL_ICON) {
         return false;
     }
     struct graphics_surface surface;
@@ -122,6 +122,16 @@ bool display_submit_effect(const struct display_user_effect *request) {
             if (logo == NULL) return false;
             graphics_blit(&surface, (int32_t)request->x, (int32_t)request->y,
                 logo, DEMON_START_LOGO_WIDTH, DEMON_START_LOGO_HEIGHT, DEMON_START_LOGO_WIDTH);
+            break;
+        }
+        case DISPLAY_EFFECT_SHELL_ICON: {
+            if (request->arg1 >= DEMON_SHELL_ICON_COUNT) return false;
+            const uint32_t *icon =
+                demon_shell_icon_pixels((enum demon_shell_icon)request->arg1);
+            if (icon == NULL) return false;
+            graphics_blit(&surface, (int32_t)request->x, (int32_t)request->y,
+                icon, DEMON_SHELL_ICON_WIDTH, DEMON_SHELL_ICON_HEIGHT,
+                DEMON_SHELL_ICON_WIDTH);
             break;
         }
     }

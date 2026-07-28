@@ -238,7 +238,13 @@ static void applet_ls(const char *path) {
         serial_write("  "); serial_write(entry_name);
         if (is_directory) { serial_write("\n"); }
         else { serial_write("  "); serial_write_u64(length); serial_write(" bytes\n"); }
-        terminal_write("  "); terminal_write(entry_name);
+        terminal_write("  ");
+        /* Classic ls convention: directories in a distinct color (light
+           blue, VGA color 9) from plain files (default white, 15) -- serial
+           output stays plain text either way, no ANSI codes to strip there. */
+        terminal_set_color(is_directory ? 9u : 15u, 0u);
+        terminal_write(entry_name);
+        terminal_set_color(15u, 0u);
         if (is_directory) { terminal_write_line(""); }
         else { terminal_write("  "); terminal_write_u64(length); terminal_write_line(" bytes"); }
     }
@@ -386,7 +392,8 @@ static void applet_desktop(void) {
         line("  [fallback] desktop.target unavailable without framebuffer");
     }
     line("  [complete] desktop-demo platform contract 100/100");
-    line("  [future] persistence, acceleration, networking, and hardware breadth");
+    line("  [ready] allocation-free Ethernet/ARP/IPv4 packet core");
+    line("  [future] NIC drivers, DHCP, DNS, TCP/TLS, and hardware breadth");
 }
 
 static void print_unit(const struct init_unit_snapshot *unit) {
@@ -591,6 +598,12 @@ void makobox_shell(void) {
         terminal_graphical_refresh();
         serial_write("TERMINAL_OWNERSHIP_READY display=kernel input=makobox compositor=suspended\n");
     }
+    /* Clear the visual console only (serial keeps every boot-status line
+       that already scrolled by -- smoke tests grep that log). Without this,
+       a real interactive session starts buried under dozens of "[ OK ]"
+       boot lines and reads like a dmesg dump instead of a shell you just
+       landed in. */
+    terminal_write("\f");
     line("");
     line("MakoBox interactive console ready. Type 'help'.");
     if (terminal_graphical_active())
@@ -600,7 +613,12 @@ void makobox_shell(void) {
         serial_write("DESKTOP_EVENT_PUMP_READY\n");
     }
     terminal_set_color(11u, 0u);
-    terminal_write("mako# ");
+    /* Visual prompt only -- serial_write keeps the plain "mako# " text every
+       keyboard/process/vfs smoke test greps for (see the Makefile's
+       "mako# help"/"mako# ls /system"/etc. assertions), so it's left alone
+       and only the on-screen rendering gets the friendlier [user@host]#
+       shape. */
+    terminal_write("ROOT-DEMONOS: ");
     serial_write("mako# ");
     terminal_set_color(15u, 0u);
     for (;;) {
@@ -627,7 +645,7 @@ void makobox_shell(void) {
             if (length > 0u) (void)makobox_run(input);
             length = 0;
             terminal_set_color(11u, 0u);
-            terminal_write("mako# ");
+            terminal_write("ROOT-DEMONOS: ");
             serial_write("mako# ");
             terminal_set_color(15u, 0u);
         } else if (value == '\b') {

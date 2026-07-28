@@ -49,6 +49,7 @@ static bool mouse_ready;
 static bool mouse_wheel;
 static uint8_t mouse_packet[4];
 static uint8_t mouse_packet_index;
+static void drain_mouse_bytes(uint32_t limit);
 static uint8_t mouse_button_state;
 static int32_t pointer_x;
 static int32_t pointer_y;
@@ -220,6 +221,14 @@ static void publish_key(uint16_t code, bool released, char character) {
 
 uintptr_t interrupt_timer_handler(uintptr_t frame_address) {
     ++timer_ticks;
+    /* Some emulators expose the PS/2 auxiliary output as level-triggered
+       state behind an edge-triggered legacy PIC. If more bytes arrive after
+       IRQ12's handler observed an empty controller, the output-full bit can
+       remain asserted without another usable edge. Pumping a small bounded
+       number of auxiliary bytes from the timer prevents the cursor from
+       moving once and then stalling. This is not polling the pointer state:
+       it only drains bytes the controller already reports as available. */
+    drain_mouse_bytes(8u);
     const uintptr_t next_frame = scheduler_on_timer_tick(frame_address);
     out8(0x20u, 0x20u);
     return next_frame;
@@ -358,14 +367,8 @@ static void decode_mouse_packet(void) {
     ++mouse_packets;
 }
 
-void interrupt_mouse_handler(void) {
-    ++mouse_irqs;
-    /* Drain every auxiliary byte already queued by the controller. Reading a
-       single byte per edge can strand the remaining packet bytes after a
-       longer userspace/compositor timeslice (notably during terminal startup):
-       the output-full line stays asserted, so no new IRQ edge is guaranteed.
-       The bound prevents a broken controller from trapping us in IRQ context. */
-    for (uint32_t drained = 0u; drained < 32u; ++drained) {
+static void drain_mouse_bytes(uint32_t limit) {
+    for (uint32_t drained = 0u; drained < limit; ++drained) {
         const uint8_t status = in8(0x64u);
         if ((status & 0x01u) == 0u || (status & 0x20u) == 0u) break;
         const uint8_t byte = in8(0x60u);
@@ -378,6 +381,16 @@ void interrupt_mouse_handler(void) {
             }
         }
     }
+}
+
+void interrupt_mouse_handler(void) {
+    ++mouse_irqs;
+    /* Drain every auxiliary byte already queued by the controller. Reading a
+       single byte per edge can strand the remaining packet bytes after a
+       longer userspace/compositor timeslice (notably during terminal startup):
+       the output-full line stays asserted, so no new IRQ edge is guaranteed.
+       The bound prevents a broken controller from trapping us in IRQ context. */
+    drain_mouse_bytes(32u);
     out8(0xA0u, 0x20u);
     out8(0x20u, 0x20u);
 }

@@ -14,6 +14,7 @@ enum capability_service {
     CAPABILITY_SERVICE_DISPLAY = 7,
     CAPABILITY_SERVICE_INPUT = 8,
     CAPABILITY_SERVICE_SURFACE = 9,
+    CAPABILITY_SERVICE_NETWORK = 10,
 };
 
 enum capability_right {

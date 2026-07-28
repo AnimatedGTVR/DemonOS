@@ -57,3 +57,18 @@ const uint32_t *demon_start_logo_pixels(void) {
         return NULL;
     return (const uint32_t *)(const void *)_binary_build_start_logo_argb_start;
 }
+
+extern const uint8_t _binary_build_shell_icons_argb_start[];
+extern const uint8_t _binary_build_shell_icons_argb_end[];
+
+const uint32_t *demon_shell_icon_pixels(enum demon_shell_icon icon) {
+    const size_t icon_bytes =
+        DEMON_SHELL_ICON_WIDTH * DEMON_SHELL_ICON_HEIGHT * sizeof(uint32_t);
+    const size_t expected = icon_bytes * DEMON_SHELL_ICON_COUNT;
+    if ((size_t)(_binary_build_shell_icons_argb_end -
+                 _binary_build_shell_icons_argb_start) != expected)
+        return NULL;
+    if ((unsigned int)icon >= DEMON_SHELL_ICON_COUNT) return NULL;
+    return (const uint32_t *)(const void *)
+        (_binary_build_shell_icons_argb_start + (size_t)icon * icon_bytes);
+}

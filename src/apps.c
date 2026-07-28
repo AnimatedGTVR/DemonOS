@@ -1,7 +1,7 @@
 #include <kernel/apps.h>
 #include <kernel/ramfs.h>
 
-#define APP_LIMIT 12u
+#define APP_LIMIT 16u
 
 struct app_record {
     const char *name;
@@ -27,6 +27,8 @@ static bool elf_suffix(const char *name, size_t length) {
 static const char *app_name_for_path(const char *path) {
     if (equal(path, "/projects/hello/main.elf")) return "hello";
     if (equal(path, "/system/bin/tetris.elf")) return "tetris";
+    if (equal(path, "/system/bin/calculator.elf")) return "calculator";
+    if (equal(path, "/system/bin/ede-calc.elf")) return "ede-calc";
     return path;
 }
 
@@ -74,8 +76,11 @@ bool apps_find(const char *name, struct app_snapshot *snapshot) {
 bool apps_self_test(void) {
     struct app_snapshot hello;
     struct app_snapshot tetris;
+    struct app_snapshot calculator;
     return catalog_count >= 1u && apps_find("hello", &hello) &&
         hello.valid_elf64 && hello.image_bytes > 0u &&
         apps_find("tetris", &tetris) && tetris.valid_elf64 &&
-        tetris.image_bytes > 0u;
+        tetris.image_bytes > 0u &&
+        apps_find("calculator", &calculator) && calculator.valid_elf64 &&
+        calculator.image_bytes > 0u;
 }

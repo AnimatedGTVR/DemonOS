@@ -1,15 +1,20 @@
 #include <kernel/multiboot2.h>
+#include <kernel/ahci.h>
 #include <kernel/capability.h>
 #include <kernel/apps.h>
 #include <kernel/framebuffer.h>
 #include <kernel/display.h>
+#include <kernel/e1000.h>
 #include <demon/graphics.h>
 #include <demon/input.h>
 #include <kernel/git.h>
+#include <kernel/http.h>
 #include <kernel/init.h>
 #include <kernel/interrupts.h>
 #include <kernel/ipc.h>
 #include <kernel/makobox.h>
+#include <kernel/network.h>
+#include <kernel/pci.h>
 #include <kernel/ramfs.h>
 #include <kernel/runas.h>
 #include <kernel/scheduler.h>
@@ -74,6 +79,37 @@ static uint64_t allocate_contiguous(size_t bytes, size_t *capacity) {
     *capacity = pages * 4096u;
     return first;
 }
+
+static bool map_mmio_identity_2m(uint64_t pdpt_address, uint64_t low_pd_address,
+                                 uint64_t spare_pd_address,
+                                 uint64_t physical_address, size_t length) {
+    if (length == 0u || physical_address > UINT64_MAX - length) return false;
+    const uint64_t first = physical_address & ~0x1FFFFFull;
+    const uint64_t end = (physical_address + length + 0x1FFFFFull) & ~0x1FFFFFull;
+    if (end <= first || (first >> 30u) != ((end - 1u) >> 30u) ||
+        (first >> 39u) != 0u) return false;
+    uint64_t *pdpt = (uint64_t *)(uintptr_t)pdpt_address;
+    const size_t pdpt_index = (size_t)(first >> 30u) & 0x1FFu;
+    uint64_t *pd;
+    if (pdpt_index == 0u) {
+        pd = (uint64_t *)(uintptr_t)low_pd_address;
+    } else if ((pdpt[pdpt_index] & 1u) != 0u) {
+        pd = (uint64_t *)(uintptr_t)(pdpt[pdpt_index] & ~0xFFFull);
+    } else {
+        pd = (uint64_t *)(uintptr_t)spare_pd_address;
+        for (size_t index = 0u; index < 512u; ++index) pd[index] = 0u;
+        pdpt[pdpt_index] = spare_pd_address | 3u;
+    }
+    for (uint64_t address = first; address < end; address += 0x200000u) {
+        const size_t index = (size_t)(address >> 21u) & 0x1FFu;
+        if (pdpt_index == 0u && index < 2u) continue;
+        if ((pd[index] & 1u) != 0u && (pd[index] & ~0x1FFFFFull) != address)
+            return false;
+        /* Present, writable, huge, and cache-disabled for device registers. */
+        pd[index] = address | 0x93u;
+    }
+    return true;
+}
 extern char kernel_end[];
 extern char kernel_start[];
 
@@ -97,6 +133,33 @@ static uint64_t read_cr4(void) {
 
 static void write_cr3(uint64_t value) {
     __asm__ volatile ("mov %0, %%cr3" : : "r"(value) : "memory");
+}
+
+static void write_cr0(uint64_t value) {
+    __asm__ volatile ("mov %0, %%cr0" : : "r"(value) : "memory");
+}
+
+static void write_cr4(uint64_t value) {
+    __asm__ volatile ("mov %0, %%cr4" : : "r"(value) : "memory");
+}
+
+// User apps built with real `double` arithmetic (Wave 1 of the EDE port --
+// see apps/ede_calc) need the hardware FPU/SSE unit actually enabled, and
+// the scheduler needs FXSAVE/FXRSTOR per task (see scheduler.c's
+// fpu_state[]/switch_fpu) so one task's floating-point registers can't leak
+// into or get clobbered by another's on a preemptive context switch. This
+// must run once, here, before scheduler_init() creates any task and before
+// any code executes an x87/SSE instruction.
+static void enable_fpu(void) {
+    uint64_t cr0 = read_cr0();
+    cr0 &= ~(1ull << 2u);  // CR0.EM = 0: FPU/SSE instructions are not emulated/trapped
+    cr0 |= (1ull << 1u);   // CR0.MP = 1: WAIT/FWAIT instructions respect TS
+    write_cr0(cr0);
+    uint64_t cr4 = read_cr4();
+    cr4 |= (1ull << 9u);   // CR4.OSFXSR: FXSAVE/FXRSTOR are legal
+    cr4 |= (1ull << 10u);  // CR4.OSXMMEXCPT: unmasked SSE exceptions use #XM, not #UD
+    write_cr4(cr4);
+    __asm__ volatile ("fninit");
 }
 
 static bool run_users_until_frame(uint64_t expected_frames,
@@ -357,7 +420,10 @@ static uint64_t report_memory_map(const struct multiboot2_tag_mmap *map,
    ever passed. Absent the token (the default, normal menu entry), boot is
    real/interactive; this is the correct default for what is meant to become
    an actual installable OS, not a permanently-scripted demo. */
-static bool multiboot_test_mode(uintptr_t info_address) {
+/* Substring search over the multiboot2 command line -- shared by
+   multiboot_test_mode (needle "boottest", grub-test.cfg only) and
+   multiboot_cli_mode (needle "cli", the new console-boot menu entry). */
+static bool multiboot_cmdline_has(uintptr_t info_address, const char *needle) {
     const struct multiboot2_info *info = (const struct multiboot2_info *)info_address;
     uintptr_t cursor = info_address + sizeof(*info);
     const uintptr_t end = info_address + info->total_size;
@@ -368,7 +434,6 @@ static bool multiboot_test_mode(uintptr_t info_address) {
         if (tag->type == MULTIBOOT2_TAG_CMDLINE) {
             const struct multiboot2_tag_string *cmdline =
                 (const struct multiboot2_tag_string *)tag;
-            const char *needle = "boottest";
             for (const char *scan = cmdline->string; *scan != '\0'; ++scan) {
                 size_t match = 0u;
                 while (needle[match] != '\0' && scan[match] == needle[match]) ++match;
@@ -378,6 +443,19 @@ static bool multiboot_test_mode(uintptr_t info_address) {
         cursor = align_up_8(cursor + tag->size);
     }
     return false;
+}
+
+static bool multiboot_test_mode(uintptr_t info_address) {
+    return multiboot_cmdline_has(info_address, "boottest");
+}
+
+/* "cli" cmdline token (see the new "MAKO Kernel Project -- Command Line"
+   grub.cfg entry): boots straight to makobox_shell() on tty1 instead of
+   spawning the compositor and native desktop. Independent of test_mode --
+   grub-test.cfg's scripted smoke-test entry never passes "cli", so every
+   existing desktop/mouse/terminal smoke target is unaffected. */
+static bool multiboot_cli_mode(uintptr_t info_address) {
+    return multiboot_cmdline_has(info_address, "cli");
 }
 
 static uint64_t report_multiboot(uintptr_t info_address, uintptr_t allocation_floor) {
@@ -451,12 +529,15 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     if ((cr0 & (1ull << 31u)) == 0u || cr3 == 0u || (cr4 & (1ull << 5u)) == 0u)
         boot_fatal("CPU paging/PAE state is invalid");
     boot_status("CPU paging", "CR0.PG + CR4.PAE active, CR3 loaded");
+    enable_fpu();
+    boot_status("FPU/SSE", "CR0.EM cleared, CR4.OSFXSR set, FPU reset");
     if (multiboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC) {
         boot_fatal("Invalid Multiboot2 magic");
     }
     boot_status("Boot protocol", "Multiboot2 validated");
     const bool test_mode = multiboot_test_mode(multiboot_info);
     userspace_set_boot_test_mode(test_mode);
+    const bool cli_mode = multiboot_cli_mode(multiboot_info);
 
     const struct multiboot2_info *boot_info =
         (const struct multiboot2_info *)multiboot_info;
@@ -542,7 +623,346 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     capabilities_init();
     ipc_init();
     ramfs_init();
-    if (install_multiboot_projects(multiboot_info) != 16u)
+    network_init();
+    if (!network_self_test())
+        boot_fatal("Ethernet/ARP/IPv4 packet-core self-test failed");
+    /* The self-test uses a synthetic link; restore the honest boot state.
+       A NIC driver will call network_set_device/network_set_link later. */
+    network_init();
+    serial_write("NETWORK_PACKET_CORE_OK ethernet=validated arp=cache ipv4=checksum\n");
+    boot_status("Network core", "Ethernet + ARP + IPv4 parser ready; no NIC attached");
+    pci_init();
+    serial_write("PCI_ENUMERATION_OK devices=");
+    serial_write_u64(pci_device_count());
+    serial_write("\n");
+    struct pci_device ethernet;
+    if (pci_find_class(2u, 0u, 0u, &ethernet)) {
+        serial_write("PCI_ETHERNET_FOUND vendor=");
+        serial_write_hex(ethernet.vendor_id);
+        serial_write(" device=");
+        serial_write_hex(ethernet.device_id);
+        serial_write(" bdf=");
+        serial_write_u64(ethernet.bus);
+        serial_write(":");
+        serial_write_u64(ethernet.slot);
+        serial_write(".");
+        serial_write_u64(ethernet.function);
+        serial_write(" irq=");
+        serial_write_u64(ethernet.interrupt_line);
+        serial_write("\n");
+        boot_status("PCI network", "Ethernet controller discovered; driver pending");
+        const uint64_t ethernet_mmio = ethernet.bars[0] & ~0xFull;
+        if (ethernet.vendor_id == 0x8086u && ethernet.device_id == 0x100Eu &&
+            map_mmio_identity_2m(pdpt, pd, framebuffer_pd, ethernet_mmio, 0x20000u)) {
+            write_cr3(pml4);
+            if (!e1000_probe(&ethernet, (uintptr_t)ethernet_mmio))
+                boot_fatal("E1000 reset/MAC probe failed");
+            const uint8_t *mac = e1000_mac();
+            serial_write("E1000_DEVICE_READY mmio=");
+            serial_write_hex(e1000_mmio_base());
+            serial_write(" mac=");
+            for (size_t byte = 0u; byte < 6u; ++byte) {
+                if (byte != 0u) serial_write(":");
+                const char digits[] = "0123456789ABCDEF";
+                char pair[3] = {digits[mac[byte] >> 4u],
+                                digits[mac[byte] & 0x0Fu], '\0'};
+                serial_write(pair);
+            }
+            serial_write(e1000_link_up() ? " link=up\n" : " link=down\n");
+            boot_status("E1000", e1000_link_up() ?
+                "reset + MAC discovery passed; link up" :
+                "reset + MAC discovery passed; link down");
+            size_t network_dma_capacity = 0u;
+            const uint64_t network_dma = allocate_contiguous(9u * 4096u,
+                                                              &network_dma_capacity);
+            if (network_dma == 0u ||
+                !e1000_start((uintptr_t)network_dma, network_dma_capacity))
+                boot_fatal("E1000 descriptor-ring initialization failed");
+            serial_write("E1000_DMA_RINGS_READY rx=8 tx=8 buffers=2048 arena=");
+            serial_write_hex(network_dma);
+            serial_write("\n");
+            uint8_t dhcp_discover[320];
+            const uint32_t dhcp_transaction = 0x4D414B4Fu;
+            const size_t dhcp_length = network_build_dhcp_discover(
+                dhcp_discover, sizeof(dhcp_discover), dhcp_transaction);
+            if (dhcp_length == 0u ||
+                !e1000_transmit(dhcp_discover, dhcp_length))
+                boot_fatal("E1000 could not submit DHCP Discover");
+            struct network_dhcp_offer offer;
+            bool offered = false;
+            for (size_t wait = 0u; wait < 50000000u; ++wait) {
+                (void)e1000_poll();
+                if (network_dhcp_offer(dhcp_transaction, &offer)) {
+                    offered = true;
+                    break;
+                }
+                __asm__ volatile ("pause");
+            }
+            if (!offered)
+                boot_fatal("DHCP Discover transmitted but no Offer arrived");
+            serial_write("DHCP_REAL_OFFER_OK address=");
+            serial_write_u64((offer.address >> 24u) & 0xFFu); serial_write(".");
+            serial_write_u64((offer.address >> 16u) & 0xFFu); serial_write(".");
+            serial_write_u64((offer.address >> 8u) & 0xFFu); serial_write(".");
+            serial_write_u64(offer.address & 0xFFu);
+            serial_write(" gateway=");
+            serial_write_hex(offer.gateway);
+            serial_write(" dns=");
+            serial_write_hex(offer.dns);
+            serial_write(" server=");
+            serial_write_hex(offer.server);
+            serial_write("\n");
+            uint8_t dhcp_request[320];
+            const size_t request_length = network_build_dhcp_request(
+                dhcp_request, sizeof(dhcp_request), dhcp_transaction,
+                offer.address, offer.server);
+            if (request_length == 0u ||
+                !e1000_transmit(dhcp_request, request_length))
+                boot_fatal("E1000 could not submit DHCP Request");
+            struct network_dhcp_offer lease;
+            bool acknowledged = false;
+            for (size_t wait = 0u; wait < 50000000u; ++wait) {
+                (void)e1000_poll();
+                if (network_dhcp_ack(dhcp_transaction, &lease)) {
+                    acknowledged = true;
+                    break;
+                }
+                __asm__ volatile ("pause");
+            }
+            if (!acknowledged)
+                boot_fatal("DHCP Request transmitted but no ACK arrived");
+            network_set_ipv4(lease.address);
+            serial_write("DHCP_REAL_ACK_OK address=");
+            serial_write_u64((lease.address >> 24u) & 0xFFu); serial_write(".");
+            serial_write_u64((lease.address >> 16u) & 0xFFu); serial_write(".");
+            serial_write_u64((lease.address >> 8u) & 0xFFu); serial_write(".");
+            serial_write_u64(lease.address & 0xFFu);
+            serial_write(" gateway=");
+            serial_write_hex(lease.gateway);
+            serial_write(" dns=");
+            serial_write_hex(lease.dns);
+            serial_write("\n");
+            if (lease.gateway == 0u)
+                boot_fatal("DHCP ACK did not provide a gateway");
+            uint8_t arp_request[60];
+            const size_t arp_length = network_build_arp_request(
+                arp_request, sizeof(arp_request), lease.gateway);
+            if (arp_length == 0u || !e1000_transmit(arp_request, arp_length))
+                boot_fatal("E1000 could not submit gateway ARP request");
+            uint8_t gateway_mac[6];
+            bool gateway_resolved = false;
+            for (size_t wait = 0u; wait < 50000000u; ++wait) {
+                (void)e1000_poll();
+                if (network_arp_lookup(lease.gateway, gateway_mac)) {
+                    gateway_resolved = true;
+                    break;
+                }
+                __asm__ volatile ("pause");
+            }
+            if (!gateway_resolved)
+                boot_fatal("E1000 transmitted ARP but received no gateway reply");
+            network_set_route(lease.gateway, lease.dns, gateway_mac);
+            serial_write("E1000_REAL_ARP_OK gateway=");
+            serial_write_hex(lease.gateway);
+            serial_write(" mac=");
+            for (size_t byte = 0u; byte < 6u; ++byte) {
+                if (byte != 0u) serial_write(":");
+                const char digits[] = "0123456789ABCDEF";
+                char pair[3] = {digits[gateway_mac[byte] >> 4u],
+                                digits[gateway_mac[byte] & 0x0Fu], '\0'};
+                serial_write(pair);
+            }
+            serial_write(" tx=");
+            serial_write_u64(e1000_transmitted_frames());
+            serial_write(" rx=");
+            serial_write_u64(e1000_received_frames());
+            serial_write("\n");
+            if (lease.dns == 0u)
+                boot_fatal("DHCP ACK did not provide a DNS server");
+            uint8_t dns_query[320];
+            const uint16_t dns_transaction = 0xD305u;
+            const size_t dns_length = network_build_dns_query(
+                dns_query, sizeof(dns_query), gateway_mac, lease.dns,
+                dns_transaction, "example.com");
+            if (dns_length == 0u || !e1000_transmit(dns_query, dns_length))
+                boot_fatal("E1000 could not submit DNS query");
+            struct network_dns_answer dns_answer;
+            bool dns_resolved = false;
+            for (size_t wait = 0u; wait < 50000000u; ++wait) {
+                (void)e1000_poll();
+                if (network_dns_answer(dns_transaction, &dns_answer)) {
+                    dns_resolved = true;
+                    break;
+                }
+                __asm__ volatile ("pause");
+            }
+            if (!dns_resolved)
+                boot_fatal("DNS query transmitted but no A answer arrived");
+            serial_write("DNS_REAL_QUERY_OK host=example.com address=");
+            serial_write_u64((dns_answer.address >> 24u) & 0xFFu);
+            serial_write(".");
+            serial_write_u64((dns_answer.address >> 16u) & 0xFFu);
+            serial_write(".");
+            serial_write_u64((dns_answer.address >> 8u) & 0xFFu);
+            serial_write(".");
+            serial_write_u64(dns_answer.address & 0xFFu);
+            serial_write(" ttl=");
+            serial_write_u64(dns_answer.ttl_seconds);
+            serial_write("\n");
+            uint8_t tcp_syn[60];
+            const uint16_t tcp_local_port = 49153u;
+            const uint16_t tcp_remote_port = 80u;
+            const uint32_t tcp_initial_sequence = 0x44454D4Fu;
+            const size_t tcp_syn_length = network_build_tcp_syn(
+                tcp_syn, sizeof(tcp_syn), gateway_mac, dns_answer.address,
+                tcp_local_port, tcp_remote_port, tcp_initial_sequence);
+            if (tcp_syn_length == 0u || !e1000_transmit(tcp_syn, tcp_syn_length))
+                boot_fatal("E1000 could not submit TCP SYN");
+            struct network_tcp_syn_ack tcp_syn_ack;
+            bool tcp_answered = false;
+            for (size_t wait = 0u; wait < 50000000u; ++wait) {
+                (void)e1000_poll();
+                if (network_tcp_syn_ack(dns_answer.address, tcp_local_port,
+                                        tcp_remote_port, tcp_initial_sequence,
+                                        &tcp_syn_ack)) {
+                    tcp_answered = true;
+                    break;
+                }
+                __asm__ volatile ("pause");
+            }
+            if (!tcp_answered)
+                boot_fatal("TCP SYN transmitted but no SYN-ACK arrived");
+            uint8_t tcp_ack[60];
+            const size_t tcp_ack_length = network_build_tcp_ack(
+                tcp_ack, sizeof(tcp_ack), gateway_mac, dns_answer.address,
+                tcp_local_port, tcp_remote_port, tcp_initial_sequence + 1u,
+                tcp_syn_ack.remote_sequence + 1u);
+            if (tcp_ack_length == 0u ||
+                !e1000_transmit(tcp_ack, tcp_ack_length))
+                boot_fatal("E1000 could not submit final TCP ACK");
+            serial_write("TCP_REAL_HANDSHAKE_OK remote=");
+            serial_write_u64((dns_answer.address >> 24u) & 0xFFu);
+            serial_write(".");
+            serial_write_u64((dns_answer.address >> 16u) & 0xFFu);
+            serial_write(".");
+            serial_write_u64((dns_answer.address >> 8u) & 0xFFu);
+            serial_write(".");
+            serial_write_u64(dns_answer.address & 0xFFu);
+            serial_write(":80 window=");
+            serial_write_u64(tcp_syn_ack.receive_window);
+            serial_write("\n");
+            static const uint8_t http_request[] =
+                "GET / HTTP/1.0\r\n"
+                "Host: example.com\r\n"
+                "User-Agent: DemonWeb/0.1\r\n"
+                "Connection: close\r\n\r\n";
+            uint8_t http_frame[256];
+            const size_t http_request_length = sizeof(http_request) - 1u;
+            const uint32_t http_local_sequence = tcp_initial_sequence + 1u;
+            const uint32_t http_remote_sequence =
+                tcp_syn_ack.remote_sequence + 1u;
+            const size_t http_frame_length = network_build_tcp_data(
+                http_frame, sizeof(http_frame), gateway_mac, dns_answer.address,
+                tcp_local_port, tcp_remote_port, http_local_sequence,
+                http_remote_sequence, http_request, http_request_length);
+            if (http_frame_length == 0u ||
+                !e1000_transmit(http_frame, http_frame_length))
+                boot_fatal("E1000 could not submit HTTP request");
+            uint8_t http_response[1024];
+            uint32_t http_remote_next = 0u;
+            size_t http_response_length = 0u;
+            for (size_t wait = 0u; wait < 50000000u; ++wait) {
+                (void)e1000_poll();
+                http_response_length = network_tcp_receive(
+                    dns_answer.address, tcp_local_port, tcp_remote_port,
+                    http_response, sizeof(http_response), &http_remote_next);
+                if (http_response_length != 0u) break;
+                __asm__ volatile ("pause");
+            }
+            if (http_response_length < 12u ||
+                http_response[0] != 'H' || http_response[1] != 'T' ||
+                http_response[2] != 'T' || http_response[3] != 'P' ||
+                http_response[4] != '/')
+                boot_fatal("HTTP server returned no valid status line");
+            network_publish_http_response(http_response, http_response_length);
+            uint8_t http_ack[60];
+            const size_t http_ack_length = network_build_tcp_ack(
+                http_ack, sizeof(http_ack), gateway_mac, dns_answer.address,
+                tcp_local_port, tcp_remote_port,
+                http_local_sequence + (uint32_t)http_request_length,
+                http_remote_next);
+            if (http_ack_length == 0u ||
+                !e1000_transmit(http_ack, http_ack_length))
+                boot_fatal("E1000 could not acknowledge HTTP response");
+            serial_write("HTTP_REAL_RESPONSE_OK bytes=");
+            serial_write_u64(http_response_length);
+            serial_write(" status=\"");
+            for (size_t index = 0u; index < http_response_length &&
+                 index < 64u && http_response[index] != '\r' &&
+                 http_response[index] != '\n'; ++index) {
+                char character[2] = {(char)http_response[index], '\0'};
+                serial_write(character);
+            }
+            serial_write("\"\n");
+        }
+    } else {
+        serial_write("PCI_ETHERNET_UNAVAILABLE\n");
+        boot_status("PCI network", "no Ethernet controller exposed");
+    }
+    struct pci_device ahci_controller;
+    /* class 1 (mass storage), subclass 6 (SATA) -- programming_interface 1
+       (AHCI) is the norm for anything exposing this class/subclass at all,
+       so it isn't re-checked here the same way E1000's exact vendor/device
+       pair is. Entirely optional: a machine with no SATA controller, or an
+       AHCI controller with nothing plugged into any port, just boots
+       without a disk exactly like it boots without a NIC above -- never
+       boot_fatal for absence, only for the driver itself misbehaving once
+       a live port was actually found. */
+    if (pci_find_class(1u, 6u, 0u, &ahci_controller)) {
+        serial_write("PCI_AHCI_FOUND vendor=");
+        serial_write_hex(ahci_controller.vendor_id);
+        serial_write(" device=");
+        serial_write_hex(ahci_controller.device_id);
+        serial_write(" bdf=");
+        serial_write_u64(ahci_controller.bus);
+        serial_write(":");
+        serial_write_u64(ahci_controller.slot);
+        serial_write(".");
+        serial_write_u64(ahci_controller.function);
+        serial_write("\n");
+        const uint64_t ahci_mmio = ahci_controller.bars[5] & ~0xFull;
+        if (ahci_mmio != 0u &&
+            map_mmio_identity_2m(pdpt, pd, framebuffer_pd, ahci_mmio, 0x20000u)) {
+            write_cr3(pml4);
+            if (!ahci_probe(&ahci_controller, (uintptr_t)ahci_mmio)) {
+                serial_write("AHCI_NO_LIVE_PORT\n");
+                boot_status("AHCI", "controller present, no drive detected on any port");
+            } else {
+                size_t ahci_dma_capacity = 0u;
+                const uint64_t ahci_dma = allocate_contiguous(
+                    AHCI_DMA_ARENA_BYTES, &ahci_dma_capacity);
+                if (ahci_dma == 0u ||
+                    !ahci_start((uintptr_t)ahci_dma, ahci_dma_capacity)) {
+                    serial_write("AHCI_START_FAILED\n");
+                    boot_status("AHCI", "port found but command-list/IDENTIFY setup failed");
+                } else {
+                    serial_write("AHCI_DEVICE_READY mmio=");
+                    serial_write_hex(ahci_mmio_base());
+                    serial_write(" sectors=");
+                    serial_write_u64(ahci_sector_count());
+                    serial_write("\n");
+                    boot_status("AHCI", "SATA disk ready for sector read/write");
+                }
+            }
+        } else {
+            serial_write("AHCI_MMIO_MAP_FAILED\n");
+            boot_status("AHCI", "controller present, BAR5 could not be mapped");
+        }
+    } else {
+        serial_write("PCI_AHCI_UNAVAILABLE\n");
+        boot_status("AHCI", "no SATA/AHCI controller exposed");
+    }
+    if (install_multiboot_projects(multiboot_info) != 19u)
         boot_fatal("MKO repository/SDK/starter modules are missing from the ISO");
     serial_write("MKO_SYSTEM_PREINSTALLED\n");
     boot_status("MKO system", "MAKO manifest + SDK + starter installed from ISO");
@@ -652,6 +1072,23 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write(" status="); serial_write_u64(spawned_status); serial_write("\n");
     serial_write("PROCESS_WAIT_CLEANUP_OK\n");
     boot_status("Process manager", "RAMFS spawn, PID/PPID, wait, cleanup, and policy passed");
+    /* Wave 0 of the EDE port (Desktop/EDE/ede-2.1, docs/c-apps.md): proves a
+       real C++ MAKO-ABI process -- heap allocation through cxx_runtime.cpp's
+       bump arena, a vtable call through a virtual method, a clean destructor
+       -- actually runs, not just links. Spawned and reaped exactly like the
+       hello.elf dynamic-spawn test above; a future EDE-derived component
+       reuses this same proof, not a new one. */
+    const uint32_t cxx_hello_pid = userspace_spawn_path(0u, "/system/bin/cxx-hello.elf", 25u,
+        "cxx-hello", CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+                     CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS));
+    if (cxx_hello_pid == 0u || !userspace_run_init())
+        boot_fatal("C++ runtime proof-of-concept spawn failed");
+    uint64_t cxx_hello_status = UINT64_MAX;
+    if (!scheduler_reap(0u, cxx_hello_pid, &cxx_hello_status) || cxx_hello_status != 0u)
+        boot_fatal("C++ runtime proof-of-concept did not exit cleanly");
+    serial_write("CXX_RUNTIME_SPAWN_OK pid="); serial_write_u64(cxx_hello_pid);
+    serial_write(" status="); serial_write_u64(cxx_hello_status); serial_write("\n");
+    boot_status("C++ runtime (Wave 0)", "heap alloc, vtable dispatch, and clean exit passed");
     uint32_t compositor_pid = 0u;
     uint64_t compositor_code_hash = 0u;
     /* Real interactive boot (no "boottest" cmdline token, see
@@ -664,7 +1101,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
        compositor.mko's boot_test_mode/loading_deadline/login_deadline).
        Just spawn the compositor and hand off to the ordinary desktop
        session loop, exactly like the scripted path's own final step. */
-    if (framebuffer_available() && !test_mode) {
+    if (framebuffer_available() && !test_mode && !cli_mode) {
         if (capability_open(1u, CAPABILITY_SERVICE_DISPLAY) != UINT64_MAX ||
             capability_open(2u, CAPABILITY_SERVICE_INPUT) != UINT64_MAX)
             boot_fatal("Display/input authority leaked to bootstrap applications");
@@ -1286,7 +1723,14 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     boot_status("MakoBox", "init/systemctl/runas applets ready");
     serial_write("KERNEL_BOOT_OK\n");
     boot_welcome();
-    if (framebuffer_available()) {
+    /* This entire block (final desktop repaint, DemonX spawn, and everything
+       after it) assumes a live compositor to talk to over IPC -- true for
+       every framebuffer_available() boot until cli_mode made "framebuffer
+       present, compositor never spawned" a real combination. Gate on
+       compositor_pid too so cli_mode boots skip straight past all of this
+       graphical validation instead of boot_fatal-ing on a compositor that
+       was never supposed to exist this boot. */
+    if (framebuffer_available() && compositor_pid != 0u) {
         const uint64_t render_start = interrupts_timer_ticks();
         framebuffer_draw_boot_test();
         if (compositor_pid == 0u) (void)framebuffer_cursor_move(mouse_x(), mouse_y());
@@ -1466,6 +1910,12 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         }
         if (!spawn_window_seen)
             boot_fatal("Launcher WEB row did not spawn the native browser");
+        if (network_http_reads() == 0u)
+            boot_fatal("Demon Web did not consume the live HTTP document");
+        if (http_completed_requests() == 0u || http_close_requests() == 0u)
+            boot_fatal("Demon Web HTTP transaction did not close cleanly");
+        serial_write("DEMON_WEB_NETWORK_ABI_OK source=HTTP body=userspace\n");
+        serial_write("HTTP_RUNTIME_CLIENT_OK retransmit=enabled close=FIN queued=1\n");
         if (!run_users_until_frame(display_frames_presented() + 1u, 10u))
             boot_fatal("Launcher spawn click missed its repaint deadline");
         serial_write("DESKTOP_LAUNCHER_SPAWN_OK kind=browser-client windows=");
@@ -1533,6 +1983,21 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write("DEMON_WEB_HISTORY_OK controls=back,forward depth=4 input=mouse\n");
 
         desktop_session_loop(compositor_pid);
+    }
+    if (cli_mode) {
+        serial_write("CLI_BOOT_MODE_OK target=console.target compositor=skipped\n");
+        boot_status("Init system", "cli cmdline token set; console.target only, no desktop.target");
+        /* Everything MakoBox prints goes through terminal_write(), which
+           only mirrors onto VGA text memory (0xB8000) by default -- inert
+           once the display is actually in linear-framebuffer graphics mode
+           (true for any real GRUB/QEMU boot with a mode the bootloader
+           handed off as a pixel framebuffer, not legacy text mode). Without
+           this, MakoBox runs and answers input correctly but every line it
+           prints is invisible: nothing paints the actual screen the user is
+           looking at. terminal_graphical_enable() is a no-op if there's no
+           framebuffer to mirror onto, so it's safe to call unconditionally
+           here rather than re-deriving framebuffer_available() again. */
+        terminal_graphical_enable();
     }
     makobox_shell();
 }

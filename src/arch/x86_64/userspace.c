@@ -7,6 +7,8 @@
 #include <kernel/interrupt_frame.h>
 #include <kernel/interrupts.h>
 #include <kernel/ipc.h>
+#include <kernel/http.h>
+#include <kernel/network.h>
 #include <kernel/ramfs.h>
 #include <kernel/scheduler.h>
 #include <kernel/serial.h>
@@ -788,6 +790,60 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
         frame->rax = boot_test_mode ? 1u : 0u;
         return frame_address;
     }
+    if (number == 35u) {
+        enum capability_service service;
+        uint8_t response[512];
+        if (!capability_resolve(scheduler_current_pid(), frame->rdi,
+                CAPABILITY_RIGHT_READ, &service) ||
+            service != CAPABILITY_SERVICE_NETWORK || frame->rdx == 0u ||
+            frame->rdx > sizeof(response) ||
+            !user_write_range(frame->rsi, frame->rdx)) {
+            frame->rax = UINT64_MAX;
+            return frame_address;
+        }
+        uint64_t caller_cr3;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(caller_cr3));
+        if (caller_cr3 != kernel_address_space)
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+        const size_t amount = network_http_response(response, (size_t)frame->rdx);
+        if (caller_cr3 != kernel_address_space)
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(caller_cr3) : "memory");
+        frame->rax = amount != 0u &&
+            userspace_copy_to(scheduler_current_pid(), frame->rsi,
+                              response, amount) ? amount : UINT64_MAX;
+        return frame_address;
+    }
+    if (number == 36u) {
+        enum capability_service service;
+        char url[128];
+        uint8_t response[512];
+        if (!capability_resolve(scheduler_current_pid(), frame->rdi,
+                CAPABILITY_RIGHT_READ, &service) ||
+            service != CAPABILITY_SERVICE_NETWORK || frame->rdx == 0u ||
+            frame->rdx >= sizeof(url) || frame->r8 == 0u ||
+            frame->r8 > sizeof(response) ||
+            !user_range(frame->rsi, frame->rdx) ||
+            !user_write_range(frame->r10, frame->r8)) {
+            frame->rax = UINT64_MAX;
+            return frame_address;
+        }
+        const char *user_url = (const char *)(uintptr_t)frame->rsi;
+        for (size_t index = 0u; index < (size_t)frame->rdx; ++index)
+            url[index] = user_url[index];
+        url[frame->rdx] = '\0';
+        uint64_t caller_cr3;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(caller_cr3));
+        if (caller_cr3 != kernel_address_space)
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+        const size_t amount = http_get_url(url, (size_t)frame->rdx,
+                                           response, (size_t)frame->r8);
+        if (caller_cr3 != kernel_address_space)
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(caller_cr3) : "memory");
+        frame->rax = amount != 0u &&
+            userspace_copy_to(scheduler_current_pid(), frame->r10,
+                              response, amount) ? amount : UINT64_MAX;
+        return frame_address;
+    }
     frame->rax = (uint64_t)-1;
     return frame_address;
 }
@@ -828,8 +884,14 @@ static bool load_process(uint32_t expected_pid, uint32_t parent_pid, const char 
     if (!elf64_load_executable(image, image_size, &target, &entry)) return false;
 
     uint64_t *pt1 = (uint64_t *)(uintptr_t)memory->page_table;
+    // +7u (present+write+user), not +5u: the ELF loader folds every app's
+    // .bss/.data into this same single LOAD segment as .text (there is no
+    // separate read-only text vs. writable data mapping in this loader), so
+    // any app with mutable static storage here needs the code pages
+    // writable. Previously unnoticed because no self-test-spawned app wrote
+    // to a code-segment static until cxx_hello's cxx_runtime arena did.
     for (size_t i = 0; i < memory->code_page_count; ++i)
-        pt1[(USER_CODE - 0x200000u) / 4096u + i] = memory->code_frames[i] + 5u;
+        pt1[(USER_CODE - 0x200000u) / 4096u + i] = memory->code_frames[i] + 7u;
     for (size_t i = 0; i < USERSPACE_HEAP_PAGES; ++i)
         pt1[(USER_HEAP - 0x200000u) / 4096u + i] = memory->heap_frames[i] + 7u;
     for (size_t page = 0u; page < USERSPACE_STACK_PAGES; ++page)

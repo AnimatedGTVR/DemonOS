@@ -1,0 +1,16 @@
+#
+# $Id: Jamfile 2331 2008-09-22 12:49:55Z karijes $
+#
+# Part of Equinox Desktop Environment (EDE).
+# Copyright (c) 2008 EDE Authors.
+#
+# This program is licensed under terms of the 
+# GNU General Public License version 2 or newer.
+# See COPYING for details.
+
+SubDir TOP ede-about ;
+
+SOURCE = ede-about.cpp ;
+
+EdeProgram ede-about : $(SOURCE) ;
+TranslationStrings  locale : $(SOURCE) ;

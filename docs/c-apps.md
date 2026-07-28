@@ -6,7 +6,10 @@ MAKO-ABI. These are real ring-3 ELF64 processes with private page tables; they
 are not Linux programs and do not use a host libc. Desktop launcher integration
 for these applications is the next shell milestone.
 
-The first complete example is `apps/tetris`. Its build has three pieces:
+The first complete example is `apps/tetris`. A second native application,
+`apps/calculator`, opens a real desktop window and uses compositor IPC,
+retained surfaces, damage notifications, and forwarded pointer events from
+freestanding C. Its build has the same three pieces:
 
 - `main.c` contains the game and includes `demon/c_app.h`.
 - `entry.S` supplies the tiny ELF entry point and calls the C function.
@@ -20,8 +23,8 @@ the actual RAMFS. `tetris` is merely the MakoBox shortcut for
 
 Applications may currently use the inline wrappers in
 `include/demon/c_app.h` for console output, ticks, yielding, process exit,
-service handles, and unified input. The complete syscall and capability table
-is in `docs/application-abi.md`.
+service handles, unified input, IPC channels, and retained surfaces. The
+complete syscall and capability table is in `docs/application-abi.md`.
 
 ## Test loop
 

@@ -1,0 +1,333 @@
+namespace Desktop;
+
+# Native DemonOS desktop shell.
+#
+# This module contains desktop policy and appearance.  It intentionally does
+# not own a framebuffer, receive raw input, map application surfaces, or
+# decide window z-order; those are compositor responsibilities.  The shell
+# draws through the compositor's small bounded primitive API.
+#
+# Visual language: Windows Vista/Aero glass (glossy specular sheen near the
+# top of every bar/panel, a round glass "orb" start button, accent-tinted
+# glass rims) blended with a modern macOS sense of restraint (bigger corner
+# radii, calmer spacing, one accent color used sparingly rather than tinting
+# everything). Every pixel position that the compositor also hit-tests
+# (the launcher-opening desktop tile, the taskbar's start box/task-slot
+# columns/settings box, and the launcher's row bands) is left exactly where
+# it was; only fill colors, borders, and added gloss layers change.
+
+fn desktop_color_top() -> u64 { return 3642107704; }        # #D9162738 graphite glass
+fn desktop_color_panel() -> u64 { return 3860607045; }      # #E61C3045 blue glass
+fn desktop_color_panel_edge() -> u64 { return 4288601343; } # #FF9EDCFF icy rim
+fn desktop_color_card() -> u64 { return 3861396818; }       # #E6283D52 raised glass
+fn desktop_color_card_hover() -> u64 { return 4063778930; } # #F2385872 aqua hover
+fn desktop_color_muted() -> u64 { return 4291023326; }      # #FFC3D1DE
+fn desktop_color_folder() -> u64 { return 4282654474; }     # #FF442BCA (unused: folder icon is a real Fluent blit)
+fn desktop_color_terminal() -> u64 { return 4279309347; }   # #FF111923 (unused: terminal icon is a real Fluent blit)
+fn desktop_color_web() -> u64 { return 4281908476; }        # #FF385E7C (unused: browser icon is a real Fluent blit)
+
+# Aero-glass specular sheen: a bright, fading-to-transparent band drawn near
+# the top of a glass panel to fake the classic Aero "glossy highlight" look
+# without a real blur buffer.
+fn desktop_color_glass_sheen_top() -> u64 { return 1895825407; }    # #70FFFFFF
+fn desktop_color_glass_sheen_bottom() -> u64 { return 2785208; }    # #002A7FB8
+fn desktop_color_orb_rim() -> u64 { return 4292801791; }            # #FFDEF4FF
+
+fn desktop_draw_word_demon(display: u64, request_address: u64,
+                           pixel_address: u64, x: u64, y: u64,
+                           foreground: u64) -> u64 {
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x, y), glyph_d(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 8, y), glyph_e(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 16, y), glyph_m(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 24, y), glyph_o(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 32, y), glyph_n(), foreground) != 0 { return 108; }
+    return 0;
+}
+
+fn desktop_draw_folder(display: u64, request_address: u64,
+                       pixel_address: u64, x: u64, y: u64,
+                       color: u64) -> u64 {
+    if draw_shell_icon(display, pack_words(x, y), 1) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_terminal(display: u64, request_address: u64,
+                         pixel_address: u64, x: u64, y: u64,
+                         color: u64) -> u64 {
+    if draw_shell_icon(display, pack_words(x, y), 0) != 0 { return 91; }
+    return 0;
+}
+
+# Small glass "orb" backdrop: a filled circle plus a bright rim ring, tinted
+# by the active accent theme so the Vista-style orb still reacts to the
+# existing blue/purple/green accent picker. Caller draws its own icon/logo
+# centered on top.
+fn desktop_draw_glass_orb(display: u64, x: u64, y: u64, diameter: u64,
+                          theme: u64) -> u64 {
+    radius: u64 = diameter / 2;
+    if draw_rounded_rect(display, pack_words(x, y), pack_words(diameter, diameter),
+                         radius, accent_fill(theme), 0) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(x, y), pack_words(diameter, diameter),
+                           pack_words(radius, 1),
+                           pack_words(Desktop.desktop_color_orb_rim(), accent_fill(theme)),
+                           0) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_background(display: u64, request_address: u64,
+                           pixel_address: u64, cursor_and_theme: u64) -> u64 {
+    theme: u64 = unpack_accent_theme(cursor_and_theme);
+    if draw_wallpaper(display, 0, pack_words(640, 480)) != 0 { return 91; }
+
+    # A floating menu bar combines the macOS single system strip with
+    # Vista's dimensional glass. The six-pixel outer breathing room keeps
+    # the wallpaper visible and makes the shell feel like a coherent layer.
+    if draw_shadow(display, pack_words(6, 4), pack_words(628, 24),
+                   7, 8, color_shadow()) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(6, 4), pack_words(628, 24),
+                           pack_words(8, 1),
+                           pack_words(Desktop.desktop_color_panel_edge(),
+                                      Desktop.desktop_color_panel()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(7, 5), pack_words(626, 22),
+                       Desktop.desktop_color_top(), Desktop.desktop_color_panel(),
+                       0) != 0 { return 91; }
+    # Aero specular sheen near the top of the glass.
+    if draw_gradient_v(display, pack_words(8, 6), pack_words(624, 8),
+                       Desktop.desktop_color_glass_sheen_top(),
+                       Desktop.desktop_color_glass_sheen_bottom(), 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(18, 25), pack_words(604, 1), 1,
+                         accent_fill(theme), 0) != 0 { return 91; }
+
+    # Round Aero glass orb standing in for the old rectangular menu button
+    # (macOS menu bars don't carry a big labeled pill here either). No hit
+    # test targets this region, so its exact shape is free to change.
+    if Desktop.desktop_draw_glass_orb(display, 10, 5, 22, theme) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(10, 5)) != 0 { return 91; }
+
+    # Three stable quick-launch icons inspired by traditional lightweight
+    # desktops: terminal, files, and web. Left bare on the glass, matching
+    # a calmer modern menu-bar look rather than individually boxed buttons.
+    if Desktop.desktop_draw_terminal(display, request_address, pixel_address,
+                             106, 5, Desktop.desktop_color_terminal()) != 0 { return 91; }
+    if Desktop.desktop_draw_folder(display, request_address, pixel_address,
+                           145, 5, Desktop.desktop_color_folder()) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(184, 4), 2) != 0 { return 91; }
+
+    # Compact right-side system cluster, now a thin glass pill (border +
+    # fill in one call) instead of a flat card.
+    if draw_rounded_border(display, pack_words(522, 6), pack_words(106, 18),
+                           pack_words(5, 1), pack_words(Desktop.desktop_color_panel_edge(),
+                           Desktop.desktop_color_card()), 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(538, 13), pack_words(4, 7), 1,
+                         accent_fill(theme), 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(546, 10), pack_words(4, 10), 1,
+                         accent_fill(theme), 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(554, 7), pack_words(4, 13), 1,
+                         accent_fill(theme), 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(578, 9), pack_words(15, 9), 2,
+                         Desktop.desktop_color_muted(), 0) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                 pack_words(593, 12), pack_words(2, 3),
+                 Desktop.desktop_color_muted()) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_shortcuts(display: u64, request_address: u64,
+                          pixel_address: u64, cursor_packed: u64) -> u64 {
+    cursor_x: u64 = unpack_cursor_x(cursor_packed);
+    cursor_y: u64 = unpack_cursor_y(cursor_packed);
+    tile: u64 = Desktop.desktop_color_card();
+    if cursor_x >= 12 and cursor_x < 84 and cursor_y >= 48 and cursor_y < 126 {
+        tile = Desktop.desktop_color_card_hover();
+    }
+    # Bigger corner radius (mac-modern) plus a bright glass rim in place of
+    # the old flat fill. Position/size are the compositor's real hit box
+    # for opening the launcher, so both stay exactly where they were.
+    if draw_rounded_border(display, pack_words(12, 48), pack_words(72, 78),
+                           pack_words(14, 1), pack_words(Desktop.desktop_color_panel_edge(),
+                           tile), 0) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(37, 59)) != 0 { return 91; }
+    if Desktop.desktop_draw_word_demon(display, request_address, pixel_address,
+                               27, 92, color_title_text()) != 0 { return 108; }
+
+    # Home/Files shortcut. It is visual groundwork for the native file
+    # manager and keeps the desktop useful without crowding it with samples.
+    if draw_rounded_border(display, pack_words(12, 136), pack_words(72, 78),
+                           pack_words(14, 1), pack_words(Desktop.desktop_color_panel_edge(),
+                           Desktop.desktop_color_card()), 0) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(36, 151), 5) != 0 { return 91; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(28, 184), glyph_h(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(36, 184), glyph_o(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(44, 184), glyph_m(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(52, 184), glyph_e(), color_title_text()) != 0 { return 108; }
+    return 0;
+}
+
+fn desktop_draw_task_panel(display: u64, request_address: u64,
+                           pixel_address: u64, focused_window: u64,
+                           anim_and_cursor: u64) -> u64 {
+    anim_phase: u64 = low32(anim_and_cursor);
+    packed: u64 = high32(anim_and_cursor);
+    cursor_x: u64 = unpack_cursor_x(packed);
+    cursor_y: u64 = unpack_cursor_y(packed);
+    theme: u64 = unpack_accent_theme(packed);
+
+    # Floating dock: Vista task switching inside a restrained macOS-like
+    # shelf. The compositor still owns the original bottom hit bands.
+    if draw_shadow(display, pack_words(6, 434), pack_words(628, 42),
+                   9, 10, color_shadow()) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(6, 434), pack_words(628, 42),
+                           pack_words(10, 1),
+                           pack_words(Desktop.desktop_color_panel_edge(),
+                                      Desktop.desktop_color_panel()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(7, 435), pack_words(626, 40),
+                       Desktop.desktop_color_panel(), Desktop.desktop_color_top(),
+                       0) != 0 { return 91; }
+    # Aero specular sheen along the top edge of the dock, mirroring the top bar.
+    if draw_gradient_v(display, pack_words(10, 436), pack_words(620, 7),
+                       Desktop.desktop_color_glass_sheen_top(),
+                       Desktop.desktop_color_glass_sheen_bottom(), 0) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                 pack_words(18, 434), pack_words(604, 1),
+                 accent_fill(theme)) != 0 { return 91; }
+
+    # Round Aero orb start button. The click region the compositor tests
+    # (live_x < 112, live_y >= 432) is unchanged; only the drawn shape
+    # inside that box moves from a labeled rectangle to an orb-plus-label.
+    if Desktop.desktop_draw_glass_orb(display, 10, 441, 30, theme) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(14, 445)) != 0 { return 91; }
+    if Desktop.desktop_draw_word_demon(display, request_address, pixel_address,
+                               46, 452, color_title_text()) != 0 { return 108; }
+
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_state(slot) != 0 {
+            task_x: u64 = 116 + slot * 54;
+            task_fill: u64 = Desktop.desktop_color_card();
+            if slot_minimized(slot) == 1 { task_fill = color_task_minimized(); }
+            if slot_id(slot) == focused_window and slot_visible(slot) == 1 {
+                task_fill = accent_task_focused(theme);
+            }
+            if cursor_x >= task_x and cursor_x < task_x + 48 and
+               cursor_y >= 440 and cursor_y < 472 {
+                task_fill = Desktop.desktop_color_card_hover();
+            }
+            if draw_rounded_border(display, pack_words(task_x, 440),
+                                   pack_words(48, 32), pack_words(6, 1),
+                                   pack_words(Desktop.desktop_color_panel_edge(), task_fill),
+                                   0) != 0 { return 91; }
+            if slot_id(slot) == 7 {
+                if Desktop.desktop_draw_terminal(display, request_address, pixel_address,
+                                         task_x + 12, 445,
+                                         Desktop.desktop_color_terminal()) != 0 { return 91; }
+            } else if slot_app_kind(slot) == app_kind_browser() {
+                if draw_shell_icon(display, pack_words(task_x + 13, 445), 2) != 0 { return 91; }
+            } else {
+                if draw_shell_icon(display, pack_words(task_x + 13, 445), 3) != 0 { return 91; }
+            }
+            indicator: u64 = color_indicator_normal();
+            if slot_id(slot) == focused_window {
+                indicator = argb_lighten(accent_fill(theme),
+                                         anim_pulse(anim_phase, 40, 18));
+            }
+            if draw_rounded_rect(display, pack_words(task_x + 7, 469),
+                                 pack_words(34, 2), 1, indicator, 0) != 0 { return 91; }
+        }
+        slot = slot + 1;
+    }
+
+    # Settings remains at the established compositor hit target.
+    if draw_rounded_border(display, pack_words(558, 440), pack_words(48, 32),
+                           pack_words(6, 1), pack_words(Desktop.desktop_color_panel_edge(),
+                           Desktop.desktop_color_card()), 0) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(571, 445), 4) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_launcher(display: u64, request_address: u64,
+                         pixel_address: u64, cursor_packed: u64,
+                         theme: u64) -> u64 {
+    # Vista-like Start surface with macOS-like spacing. The five application
+    # rows deliberately use the compositor's exact 38-pixel input bands:
+    # 238..275, 276..313, 314..351, 352..389 and 390..427.
+    if draw_shadow(display, pack_words(8, 190), pack_words(226, 276),
+                   7, 14, color_shadow()) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(8, 190), pack_words(226, 276),
+                           pack_words(7, 1), pack_words(accent_border_bright(theme),
+                           Desktop.desktop_color_panel()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(10, 192), pack_words(222, 40),
+                       accent_fill(theme), accent_titlebar_bottom(theme), 0) != 0 { return 91; }
+    # Aero sheen across the header's top edge.
+    if draw_gradient_v(display, pack_words(10, 192), pack_words(222, 12),
+                       Desktop.desktop_color_glass_sheen_top(),
+                       Desktop.desktop_color_glass_sheen_bottom(), 0) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(20, 201)) != 0 { return 91; }
+    if Desktop.desktop_draw_word_demon(display, request_address, pixel_address,
+                               55, 208, color_title_text()) != 0 { return 108; }
+
+    # Pale inner application sheet separates content from the translucent
+    # outer glass without introducing another full-window surface.
+    if draw_rounded_rect(display, pack_words(16, 232), pack_words(210, 202),
+                         9, 3925276917, 0) != 0 { return 91; } # #E9F6F8F5
+    row: u64 = 0;
+    while row < 5 {
+        row_y: u64 = 238 + row * 38;
+        fill: u64 = 4026531839; # #EFFFFFFF
+        cx: u64 = unpack_cursor_x(cursor_packed);
+        cy: u64 = unpack_cursor_y(cursor_packed);
+        if cx >= 20 and cx < 220 and cy >= row_y and cy < row_y + 38 {
+            fill = 3919042544; # #E997D7F0
+        }
+        if draw_rounded_rect(display, pack_words(20, row_y),
+                             pack_words(200, 34), 7, fill, 0) != 0 { return 91; }
+        # Narrow accent rail makes the hovered row unmistakable without
+        # flooding the entire menu with the active theme color.
+        if cx >= 20 and cx < 220 and cy >= row_y and cy < row_y + 38 {
+            if draw_rounded_rect(display, pack_words(20, row_y + 5),
+                                 pack_words(3, 24), 2,
+                                 accent_fill(theme), 0) != 0 { return 91; }
+        }
+        row = row + 1;
+    }
+    if Desktop.desktop_draw_terminal(display, request_address, pixel_address,
+                             30, 246, Desktop.desktop_color_terminal()) != 0 { return 91; }
+    if Desktop.desktop_draw_folder(display, request_address, pixel_address,
+                           30, 284, Desktop.desktop_color_folder()) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(30, 322), 2) != 0 { return 91; }
+    # ede-calc (Wave 1 of the EDE port): reuses the "settings" atlas icon --
+    # there is no dedicated calculator/science icon in the embedded Fluent
+    # atlas -- disambiguated from the actual Settings target (which stays at
+    # its own established taskbar hit target) by the "E" glyph below.
+    if draw_shell_icon(display, pack_words(30, 360), 4) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(30, 398), 3) != 0 { return 91; }
+
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 251), glyph_t(), color_terminal_bg()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 289), glyph_c(), color_terminal_bg()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 327), glyph_w(), color_terminal_bg()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 365), glyph_e(), color_terminal_bg()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 403), glyph_s(), color_terminal_bg()) != 0 { return 108; }
+
+    # Search/status footer: visual groundwork for launcher filtering. It is
+    # intentionally non-interactive until text input is wired to shell state.
+    if draw_rounded_border(display, pack_words(20, 438), pack_words(146, 20),
+                           pack_words(6, 1),
+                           pack_words(Desktop.desktop_color_panel_edge(),
+                                      3238861600), 0) != 0 { return 91; } # #C10D1B20
+    if draw_rounded_rect(display, pack_words(178, 438), pack_words(42, 20),
+                         6, accent_fill(theme), 0) != 0 { return 91; }
+    return 0;
+}

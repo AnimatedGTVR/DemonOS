@@ -1,0 +1,14 @@
+#
+# $Id: Jamfile 2498 2009-02-20 16:27:25Z karijes $
+#
+# Part of Equinox Desktop Environment (EDE).
+# Copyright (c) 2009 EDE Authors.
+#
+# This program is licensed under terms of the 
+# GNU General Public License version 2 or newer.
+# See COPYING for details.
+
+SubDir TOP evoke splash-themes scape ;
+
+DATA = [ Wildcard *.png ] ;
+InstallData [ FDirName $(EDE_THEMES_DIR) splash-themes scape ] : $(DATA) ;

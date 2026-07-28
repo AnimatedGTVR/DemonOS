@@ -43,7 +43,12 @@ struct demon_window_message {
     uint8_t payload[24];
 };
 
+#ifdef __cplusplus
+static_assert(sizeof(struct demon_window_message) == 64u,
+    "window protocol packet must fit one IPC message");
+#else
 _Static_assert(sizeof(struct demon_window_message) == 64u,
     "window protocol packet must fit one IPC message");
+#endif
 
 #endif

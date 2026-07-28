@@ -169,3 +169,15 @@ fn display_submit_effect(display: u64, request: u64) -> u64 {
 fn boot_test_mode() -> u64 {
     return abi_syscall0(34);
 }
+
+# Reads the body of the most recently completed kernel HTTP transaction.
+# Requires a NETWORK capability handle and writes at most capacity bytes.
+fn network_http_receive(network: u64, destination: u64, capacity: u64) -> u64 {
+    return abi_syscall3(35, network, destination, capacity);
+}
+
+# Performs a bounded plain-HTTP GET for an address-bar URL.
+fn network_http_get(network: u64, url: u64, url_length: u64,
+                    destination: u64, capacity: u64) -> u64 {
+    return abi_syscall5(36, network, url, url_length, destination, capacity);
+}

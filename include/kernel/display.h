@@ -48,9 +48,11 @@ enum display_effect_kind {
        by arg1) at 1:1 scale, no upscaling -- unlike the wallpaper these are
        already screen-resolution UI glyphs. radius/arg2/arg3 are unused. */
     DISPLAY_EFFECT_UI_ICON        = 5u,
-    /* Blit the start-button diamond logo (demon_start_logo_pixels) at 1:1
+    /* Blit the Fluent start-here logo (demon_start_logo_pixels) at 1:1
        scale. radius/arg1-3 are unused. */
     DISPLAY_EFFECT_START_LOGO     = 6u,
+    /* Blit one 22x22 Fluent desktop/application icon selected by arg1. */
+    DISPLAY_EFFECT_SHELL_ICON     = 7u,
 };
 
 struct display_user_effect {
