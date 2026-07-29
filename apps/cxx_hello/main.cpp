@@ -8,8 +8,20 @@
 // scratch per component.
 #include <demon/c_app.h>
 #include <demon/cxx_runtime.h>
+#include <vector>
+#include <string>
 
 namespace {
+
+void write_u64(uint64_t value) {
+    char digits[21];
+    int index = 21;
+    do {
+        digits[--index] = static_cast<char>('0' + value % 10u);
+        value /= 10u;
+    } while (value != 0u);
+    demon_write(&digits[index], static_cast<uint64_t>(21 - index));
+}
 
 class Greeter {
    public:
@@ -17,18 +29,7 @@ class Greeter {
     virtual ~Greeter() = default;
     virtual void Announce() const {
         demon_write("CXX_RUNTIME_HELLO pid=", 22u);
-        // demon_write() only takes raw bytes, no formatting helper exists
-        // in demon/c_app.h yet -- print the PID digit-by-digit rather than
-        // pull in a formatting dependency this proof-of-concept doesn't
-        // need.
-        char digits[21];
-        int index = 21;
-        uint64_t value = pid_;
-        do {
-            digits[--index] = static_cast<char>('0' + value % 10u);
-            value /= 10u;
-        } while (value != 0u);
-        demon_write(&digits[index], static_cast<uint64_t>(21 - index));
+        write_u64(pid_);
         demon_write("\n", 1u);
     }
 
@@ -45,16 +46,50 @@ extern "C" uint64_t cxx_hello_main(void) {
     Greeter *greeter = new Greeter(pid);
     greeter->Announce();
     demon_write("CXX_RUNTIME_ARENA_REMAINING=", 29u);
-    char digits[21];
-    int index = 21;
-    uint64_t remaining = cxx_runtime_arena_remaining();
-    do {
-        digits[--index] = static_cast<char>('0' + remaining % 10u);
-        remaining /= 10u;
-    } while (remaining != 0u);
-    demon_write(&digits[index], static_cast<uint64_t>(21 - index));
+    write_u64(cxx_runtime_arena_remaining());
     demon_write("\n", 1u);
     delete greeter;
     demon_write("CXX_RUNTIME_OK\n", 16u);
+
+    // Real delete/free (Wave 0 revisit, at the user's request to firm up
+    // C++ support before attempting a real port of ede-panel's C++
+    // source): allocate and free a Greeter again to prove the arena
+    // actually reclaims the block rather than just growing forever. A
+    // mismatch here is a real regression, not a cosmetic detail, so it's
+    // an exit-code assertion (see kernel.c's scheduler_reap check on this
+    // process) exactly like every other MAKO-ABI self-test in this
+    // codebase, not just a printed line nothing checks.
+    const uint64_t before_reuse = cxx_runtime_arena_remaining();
+    Greeter *throwaway = new Greeter(pid);
+    delete throwaway;
+    const uint64_t after_reuse = cxx_runtime_arena_remaining();
+    if (before_reuse != after_reuse) return 121u;
+    demon_write("CXX_RUNTIME_FREE_REUSE_OK\n", 27u);
+
+    // std::vector<int> and std::string (this project's own freestanding
+    // shims -- include/vector, include/string -- real libstdc++'s headers
+    // don't build under -ffreestanding -fno-exceptions -nostdlib).
+    std::vector<int> numbers;
+    for (int i = 1; i <= 5; ++i) numbers.push_back(i * i);
+    int sum = 0;
+    for (size_t i = 0; i < numbers.size(); ++i) sum += numbers[i];
+    if (sum != 55) return 122u;  // 1+4+9+16+25
+    demon_write("CXX_STL_VECTOR_SUM=", 20u);
+    write_u64(static_cast<uint64_t>(sum));
+    demon_write("\n", 1u);
+
+    std::string text = "Equinox";
+    text += " Desktop";
+    text += " DemonOS";
+    text += " Environment";
+    if (text != "Equinox Desktop DemonOS Environment") return 123u;
+    demon_write("CXX_STL_STRING_LENGTH=", 23u);
+    write_u64(text.size());
+    demon_write("\n", 1u);
+    demon_write("CXX_STL_STRING_TEXT=", 21u);
+    demon_write(text.c_str(), text.size());
+    demon_write("\n", 1u);
+    demon_write("CXX_STL_OK\n", 11u);
+
     return 0u;
 }

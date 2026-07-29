@@ -22,7 +22,7 @@ use "../Desktop/desktop_edde.mko";
 # addressed via vptr offset arithmetic, the same trick already used to pack
 # x/y/width/height into u64 words. WINDOW_TABLE_BASE sits past every other
 # scratch buffer in the process heap (request/pixel scratch tops out around
-# 0x328078; the table starts at 0x328100 and uses 640 bytes). These
+# 0x330078; the table starts at 0x330100 and uses 640 bytes). These
 # addresses shifted by 0x6000 (24576) when USERSPACE_CODE_PAGES grew from 24
 # to 30 pages to fit the compositor's loading/login screens and taskbar
 # text, then by another 0x4000 (16384) when it grew again from 30 to 34
@@ -34,7 +34,7 @@ use "../Desktop/desktop_edde.mko";
 # when it widened again to 10 words to fit an app_kind tag (word9, see
 # slot_app_kind); shift EFFECT_REQUEST_BASE (see effect_request_ptr())
 # forward with it if the stride or slot count ever changes again.
-# EFFECT_REQUEST_BASE sits right after the table at 0x32C380 (3326848) and
+# EFFECT_REQUEST_BASE sits right after the table at 0x334380 (3359616) and
 # uses 80 bytes, well inside the heap still free before USER_STACK_PAGE
 # begins.
 #
@@ -160,6 +160,14 @@ fn unpack_settings_open(packed: u64) -> u64 {
 fn unpack_launcher_open(packed: u64) -> u64 {
     field: u64 = packed / 8388608;
     return field - (field / 2) * 2;
+}
+
+# task_menu_slot (0..8, WINDOW_LIMIT used as the "closed" sentinel) packed
+# at 2^24 (16777216), clear of launcher_open's 2^23 stride below it, for
+# the same 6-parameter-ceiling reason as unpack_launcher_open.
+fn unpack_task_menu_slot(packed: u64) -> u64 {
+    field: u64 = packed / 16777216;
+    return field - (field / 16) * 16;
 }
 
 fn unpack_cursor_x(packed: u64) -> u64 {
@@ -460,12 +468,12 @@ fn send_window_event(name_scratch: u64, packet_scratch: u64, window_id: u64,
 }
 
 # Scratch buffer for spawn()'s path argument, right after
-# EFFECT_REQUEST_BASE (3326848 + 80 bytes = 3326928), well inside the free
+# EFFECT_REQUEST_BASE (3359616 + 80 bytes = 3359696), well inside the free
 # heap before USER_STACK_PAGE (see the header comment's memory-layout
 # notes). spawn() caps path length at 127 bytes; the paths actually used
 # here are 29-31 bytes.
 fn spawn_path_ptr() -> vptr<u64> {
-    return vptr_from_u64(3326928);
+    return vptr_from_u64(3359696);
 }
 
 # Launch a real new window by spawning one of five RAMFS-seeded clients
@@ -532,6 +540,15 @@ fn spawn_app(kind: u64) -> u64 {
         vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 761619557));
         vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1718513507, 1718379822));
         length = 24;
+    } else if kind == 5 {
+        # "/system/bin/ede-timedate.elf" -- real EDE's Clock applet
+        # (applets/clock/Clock.cpp) launches "ede-timedate" on FL_RELEASE;
+        # EDDE's clock does the same real thing on click. word1 is
+        # identical to kind 4's ("bin/ede-"), reused verbatim.
+        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 761619557));
+        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1701669236, 1702125924));
+        vptr_write_u64(vptr_offset_u64(path, 3), 1718379822);
+        length = 28;
     } else {
         vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 1668047203));
         vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1952541813, 1697542767));
@@ -540,7 +557,7 @@ fn spawn_app(kind: u64) -> u64 {
     }
     service_mask: u64 = 576;
     if kind == 2 { service_mask = 1616; }
-    return MakoAbi.spawn(3326928, length, service_mask);
+    return MakoAbi.spawn(3359696, length, service_mask);
 }
 
 fn draw_glyph(display: u64, request_address: u64, pixel_address: u64,
@@ -620,7 +637,7 @@ fn draw_rect(display: u64, request_address: u64, pixel_address: u64,
 # flags is always 0-1 (DISPLAY_SUBMIT_PRESENT), so packing them costs
 # nothing.
 fn effect_request_ptr() -> vptr<u64> {
-    return vptr_from_u64(3326848);
+    return vptr_from_u64(3359616);
 }
 
 fn submit_effect(display: u64, kind_flags: u64, position: u64, size: u64,
@@ -636,7 +653,7 @@ fn submit_effect(display: u64, kind_flags: u64, position: u64, size: u64,
     vptr_write_u64(vptr_offset_u64(request, 7), low32(arg2_arg3));
     vptr_write_u64(vptr_offset_u64(request, 8), high32(arg2_arg3));
     vptr_write_u64(vptr_offset_u64(request, 9), high32(kind_flags));
-    return MakoAbi.display_submit_effect(display, 3326848);
+    return MakoAbi.display_submit_effect(display, 3359616);
 }
 
 # radius fits comfortably in 32 bits (well under the 4096-pixel display
@@ -753,7 +770,7 @@ fn slot_word_offset(slot: u64, word: u64) -> u64 {
 }
 
 fn table_ptr() -> vptr<u64> {
-    return vptr_from_u64(3326208);
+    return vptr_from_u64(3358976);
 }
 
 fn slot_state(slot: u64) -> u64 {
@@ -1775,6 +1792,13 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
         panel_extra);
     if taskbar_status != 0 { return taskbar_status; }
 
+    scene_task_menu_slot: u64 = unpack_task_menu_slot(high32(anim_and_cursor));
+    if scene_task_menu_slot != 8 {
+        task_menu_status: u64 = Desktop.desktop_draw_task_menu(
+            display, request_address, pixel_address, scene_task_menu_slot);
+        if task_menu_status != 0 { return task_menu_status; }
+    }
+
     if scene_launcher_open == 1 {
         launcher_status: u64 = Desktop.desktop_draw_launcher(
             display, request_address, pixel_address, packed_cursor,
@@ -1802,8 +1826,8 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
 }
 
 fn compositor_main(service_name: u64) -> u64 {
-    request_address: u64 = 3309632;
-    pixel_address: u64 = 3309696;
+    request_address: u64 = 3342400;
+    pixel_address: u64 = 3342464;
     event_address: u64 = pixel_address + 64;
     server: u64 = MakoAbi.channel_create(service_name, 18);
 
@@ -1873,6 +1897,12 @@ fn compositor_main(service_name: u64) -> u64 {
     # (see pow256's comment). Both reset whenever the launcher opens.
     search_length: u64 = 0;
     search_query: u64 = 0;
+    # Taskbar right-click context menu (real EDE: TaskButton::display_menu(),
+    # a popup with Restore/Minimize/Maximize/Close -- see
+    # Desktop.desktop_draw_task_menu). task_menu_slot is 8 (WINDOW_LIMIT,
+    # the same "no slot" sentinel find_slot()/find_free_slot() use)
+    # whenever the menu is closed.
+    task_menu_slot: u64 = 8;
     super_chord: u64 = 0;
     # Set right before spawn_app() fires (see its own comment for why this
     # is safe) and consumed by the CREATE handler for whichever slot the
@@ -2036,6 +2066,14 @@ fn compositor_main(service_name: u64) -> u64 {
             live_x: u64 = high32(live_word);
             live_y_word: u64 = vptr_read_u64(vptr_offset_u64(live_event, 2));
             live_y: u64 = low32(live_y_word);
+            # Button/scancode field, computed unconditionally here (not
+            # just inside the keydown branch below, which has its own
+            # differently-scoped `live_code`) since the right-click
+            # taskbar context menu needs it for live_type==4 click events
+            # too -- the kernel packs .type/.code into the same word for
+            # every input_event kind, mouse clicks included.
+            live_button_code: u64 = low32(live_word) / 65536;
+            live_button_code = live_button_code - (live_button_code / 65536) * 65536;
             if live_type >= 3 {
                 cursor_x = live_x;
                 cursor_y = live_y;
@@ -2315,7 +2353,11 @@ fn compositor_main(service_name: u64) -> u64 {
                 }
             } else if live_type == 4 and launcher_open == 1 and
                       live_x >= 28 and live_x < 210 and
-                      live_y >= 238 and live_y < 466 {
+                      live_y >= 218 and live_y < 446 {
+                # Row band shifted 20px up from DemonOS's original 238..466
+                # so it no longer overlaps EDDE's taskbar (y>=450) -- see
+                # Desktop.desktop_draw_launcher's comment for the real
+                # click-testing bug this fixes.
                 # The first five launcher rows spawn a real new process (see
                 # spawn_app); the sixth is a show-desktop action. A launch
                 # only asks the kernel to spawn -- it does not itself
@@ -2330,22 +2372,22 @@ fn compositor_main(service_name: u64) -> u64 {
                 # CREATE handler should tag the resulting slot with once the
                 # spawned client's own CREATE message arrives (see the
                 # word9/app_kind_* comments in the window-table layout notes).
-                if live_y < 276 {
+                if live_y < 256 {
                     pending_spawn_kind = app_kind_terminal();
                     if find_free_slot() != 8 { spawn_app(0); }
-                } else if live_y < 314 {
+                } else if live_y < 294 {
                     pending_spawn_kind = app_kind_generic();
                     if find_free_slot() != 8 { spawn_app(1); }
-                } else if live_y < 352 {
+                } else if live_y < 332 {
                     pending_spawn_kind = app_kind_browser();
                     if find_free_slot() != 8 { spawn_app(2); }
-                } else if live_y < 390 {
+                } else if live_y < 370 {
                     # ede-calc (Wave 1 of the EDE port, apps/ede_calc) --
                     # classified as a generic app like the calculator row,
                     # since it uses the same plain-window titlebar chrome.
                     pending_spawn_kind = app_kind_generic();
                     if find_free_slot() != 8 { spawn_app(3); }
-                } else if live_y < 428 {
+                } else if live_y < 408 {
                     # ede-conf (Wave 5): the control panel that itself
                     # launches ede-about/ede-tip/ede-preferred/ede-autostart
                     # via demon_spawn(), making the rest of the EDE port
@@ -2364,19 +2406,61 @@ fn compositor_main(service_name: u64) -> u64 {
                 if launcher_open == 0 { launcher_open = 1; search_length = 0; search_query = 0; }
                 else { launcher_open = 0; }
                 repaint = 1;
+            } else if live_type == 4 and task_menu_slot != 8 {
+                # Context menu dispatch, 3 rows (Minimize/Maximize/Close --
+                # see Desktop.desktop_draw_task_menu for why Restore is
+                # dropped from real EDE's 4-row menu_[] array). Any click
+                # while the menu is open either hits one of the 3 rows or
+                # dismisses it without acting, the same as a real FLTK
+                # popup menu closing on any outside click.
+                menu_left: u64 = 64 + task_menu_slot * 34;
+                if live_x >= menu_left and live_x < menu_left + 96 and
+                   live_y >= 378 and live_y < 450 {
+                    menu_row: u64 = (live_y - 378) / 24;
+                    if menu_row == 0 {
+                        # Minimize: real EDE's minimize_cb
+                        # (wm_window_set_state, WM_WINDOW_STATE_ICONIC).
+                        if slot_minimized(task_menu_slot) == 0 {
+                            slot_set_state(task_menu_slot, slot_state(task_menu_slot) + 1);
+                            if focused_window == slot_id(task_menu_slot) {
+                                new_top: u64 = find_top_slot();
+                                if new_top == 8 { focused_window = 0; }
+                                else { focused_window = slot_id(new_top); }
+                            }
+                        }
+                    } else if menu_row == 1 {
+                        # Maximize: real EDE's maximize_cb toggles
+                        # NETWM_STATE_MAXIMIZED -- snap_slot(..., 3) is this
+                        # compositor's own maximize-toggle, already used by
+                        # the titlebar's maximize button.
+                        snap_slot(task_menu_slot, 3);
+                        focused_window = slot_id(task_menu_slot);
+                    } else if menu_row == 2 {
+                        # Close: real EDE's close_cb (netwm_window_close).
+                        focused_window = close_slot(task_menu_slot, anim_phase);
+                    }
+                }
+                task_menu_slot = 8;
+                repaint = 1;
             } else if live_type == 4 and live_x >= 64 and live_x < 336 and
                       live_y >= 450 {
                 # A taskbar button is tied directly to its window-table slot.
-                # Clicking a minimized window restores it; clicking the
-                # focused visible window minimizes it; any other click raises
-                # and focuses that window. Stride/x0 match
-                # Desktop.desktop_draw_task_panel's real EDE-style slim
-                # (30px) taskbar layout, matched against a real EDE
-                # screenshot rather than the generic FLTK-default look the
-                # first EDDE pass used.
+                # Stride/x0 match Desktop.desktop_draw_task_panel's real
+                # EDE-style slim (30px) taskbar layout. Right-click opens
+                # the real context menu (TaskButton::display_menu() in real
+                # EDE, Restore/Minimize/Maximize/Close -- see task_menu_slot
+                # handling above); any other button cycles it like real
+                # EDE's Taskbar::activate_window(): clicking a minimized
+                # window restores it, clicking the focused visible window
+                # minimizes it, any other click raises and focuses it.
                 task_slot: u64 = (live_x - 64) / 34;
                 task_x: u64 = 64 + task_slot * 34;
                 if task_slot < 8 and live_x < task_x + 30 and
+                   slot_state(task_slot) != 0 and live_button_code == 2 {
+                    task_menu_slot = task_slot;
+                    launcher_open = 0;
+                    repaint = 1;
+                } else if task_slot < 8 and live_x < task_x + 30 and
                    slot_state(task_slot) != 0 {
                     task_state: u64 = slot_state(task_slot);
                     task_id: u64 = slot_id(task_slot);
@@ -2398,13 +2482,24 @@ fn compositor_main(service_name: u64) -> u64 {
                     launcher_open = 0;
                     repaint = 1;
                 }
-            } else if live_type == 4 and live_x >= 616 and live_x < 636 and
+            } else if live_type == 4 and live_x >= 587 and live_x < 635 and
+                      live_y >= 450 {
+                # Clock applet click (real EDE: Clock::handle()'s
+                # FL_RELEASE case calls run_async("ede-timedate") -- same
+                # real action here, via the same spawn path every launcher
+                # row already uses).
+                pending_spawn_kind = app_kind_generic();
+                if find_free_slot() != 8 { spawn_app(5); }
+                launcher_open = 0;
+                repaint = 1;
+            } else if live_type == 4 and live_x >= 512 and live_x < 532 and
                       live_y >= 450 {
                 # Gear button (see Desktop.desktop_draw_task_panel) toggles
                 # the settings popover the same way the Start button toggles
-                # the launcher. x-range matches its real EDE-style position
-                # at the slim panel's far right, past the taskbar/clock/
-                # battery/activity applets.
+                # the launcher. Not a real EDE applet -- positioned leftmost
+                # of the real right-aligned cluster (clock/battery/cpu-
+                # monitor), per that function's do_layout()-derived
+                # comment, rather than disturbing their real order.
                 if settings_open == 0 { settings_open = 1; }
                 else { settings_open = 0; }
                 launcher_open = 0;
@@ -2691,7 +2786,8 @@ fn compositor_main(service_name: u64) -> u64 {
                                               focused_window,
                                               pack_words(anim_phase, pack_cursor_theme_and_settings(
                                                   cursor_x, cursor_y, accent_theme, settings_open) +
-                                                  launcher_open * 8388608),
+                                                  launcher_open * 8388608 +
+                                                  task_menu_slot * 16777216),
                                               search_query);
             }
             # A failed draw call inside a repaint (a single bad

@@ -31,7 +31,7 @@ fn send_request(channel: u64, packet_address: u64, packet: vptr<u64>,
 }
 
 fn demonx_client_main(service_name: u64, reply_name: u64) -> u64 {
-    packet_address: u64 = 3309568;
+    packet_address: u64 = 3342336;
     packet: vptr<u64> = vptr_from_u64(packet_address);
     reply_channel: u64 = MakoAbi.channel_create(reply_name, 14);
     server: u64 = MakoAbi.channel_connect(service_name, 16);

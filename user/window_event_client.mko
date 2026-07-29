@@ -8,7 +8,7 @@ use "sdk.mko";
 # test harness (window_event_client.S) only ever launches it for one fixed
 # window per boot run.
 fn window_event_client_main(event_name: u64, delivery_marker: u64, window_id: u64) -> u64 {
-    packet_address: u64 = 3309568;
+    packet_address: u64 = 3342336;
     server: u64 = MakoAbi.channel_create(event_name, 12);
     delivered: u64 = 0;
     while true {

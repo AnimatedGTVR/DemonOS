@@ -478,12 +478,17 @@ $(CALCULATOR_ELF): $(BUILD)/calculator_entry.o $(BUILD)/calculator.o user/linker
 # freestanding C++ target needs: -fno-exceptions (no unwind-table runtime
 # support here) and -fno-rtti (no __cxa_type_match/typeinfo runtime either).
 # Every EDE-derived .cpp in later waves builds with this same flag set.
+# -nostdinc++ forces #include <vector>/<string> to resolve to this
+# project's own freestanding shims (include/vector, include/string) via
+# -Iinclude instead of g++'s bundled libstdc++ headers, which don't build
+# under -ffreestanding -fno-exceptions -nostdlib (they assume __cxa_throw,
+# a real allocator, etc. exist).
 CXXFLAGS := -std=c++17 -Os -g -Wall -Wextra -Werror \
 	-ffreestanding -fno-builtin -fno-exceptions -fno-rtti \
 	-fno-stack-protector -fno-pie -fno-pic \
 	-ffunction-sections -fdata-sections \
 	-m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -msoft-float \
-	-Iinclude
+	-nostdinc++ -Iinclude
 
 $(BUILD)/cxx_runtime.o: src/cxx_runtime.cpp include/demon/cxx_runtime.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -519,7 +524,7 @@ FLOAT_CXXFLAGS := -std=c++17 -Os -g -Wall -Wextra -Werror \
 	-fno-stack-protector -fno-pie -fno-pic \
 	-ffunction-sections -fdata-sections \
 	-m64 -mno-red-zone \
-	-Iinclude
+	-nostdinc++ -Iinclude
 
 $(BUILD)/libm_freestanding.o: src/libm_freestanding.c include/demon/libm_freestanding.h | $(BUILD)
 	$(CC) $(FLOAT_CFLAGS) -c $< -o $@
@@ -792,8 +797,8 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /docs/demonx.md -type f 2>/dev/null | grep -q demonx.md
 	@test $$(wc -c < user/sdk.mko) -le 8192
 	@test $$(wc -c < $(PORTABLE_ELF)) -le 8192
-	@test $$(wc -c < $(COMPOSITOR_ELF)) -le 163840
-	@test $$(wc -c < $(EDDE_COMPOSITOR_ELF)) -le 163840
+	@test $$(wc -c < $(COMPOSITOR_ELF)) -le 196608
+	@test $$(wc -c < $(EDDE_COMPOSITOR_ELF)) -le 196608
 	@test $$(wc -c < $(WINDOW_CLIENT_ELF)) -le 12288
 	@test $$(wc -c < $(WINDOW_MOVE_CLIENT_ELF)) -le 8192
 	@test $$(wc -c < $(WINDOW_EVENT_CLIENT_ELF)) -le 12288
@@ -908,7 +913,7 @@ smoke: $(ISO)
 	@grep -q "files: 26" $(BUILD)/serial.log
 	@grep -q "USERSPACE_SYSCALLS_OK" $(BUILD)/serial.log
 	@grep -q "ELF64_MKO_LOAD_OK" $(BUILD)/serial.log
-	@grep -q "USERSPACE_CODE_POOLS_OK pages=96 max=40 heap=0x328000" $(BUILD)/serial.log
+	@grep -q "USERSPACE_CODE_POOLS_OK pages=104 max=48 heap=0x330000" $(BUILD)/serial.log
 	@grep -q "PROCESS_ISOLATION_OK" $(BUILD)/serial.log
 	@grep -q "DYNAMIC_SPAWN_OK pid=3 status=0" $(BUILD)/serial.log
 	@grep -q "PROCESS_WAIT_CLEANUP_OK" $(BUILD)/serial.log

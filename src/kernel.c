@@ -1001,12 +1001,12 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             boot_fatal("Dynamic process frame-pool allocation failed");
         code_page_total += code_pages;
     }
-    if (code_page_total != 96u)
+    if (code_page_total != 104u)
         boot_fatal("Userspace executable pool budget changed unexpectedly");
     serial_write("USERSPACE_CODE_POOLS_OK pages=");
     serial_write_u64(code_page_total);
     serial_write(" max="); serial_write_u64(USERSPACE_CODE_PAGES);
-    serial_write(" heap=0x328000\n");
+    serial_write(" heap=0x330000\n");
     size_t surface_capacity = 0u;
     const uint64_t surface_arena = allocate_contiguous(SURFACE_ARENA_BYTES,
                                                         &surface_capacity);

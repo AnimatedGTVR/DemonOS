@@ -11,7 +11,7 @@ use "../Desktop/desktop.mko";
 # addressed via vptr offset arithmetic, the same trick already used to pack
 # x/y/width/height into u64 words. WINDOW_TABLE_BASE sits past every other
 # scratch buffer in the process heap (request/pixel scratch tops out around
-# 0x328078; the table starts at 0x328100 and uses 640 bytes). These
+# 0x330078; the table starts at 0x330100 and uses 640 bytes). These
 # addresses shifted by 0x6000 (24576) when USERSPACE_CODE_PAGES grew from 24
 # to 30 pages to fit the compositor's loading/login screens and taskbar
 # text, then by another 0x4000 (16384) when it grew again from 30 to 34
@@ -23,7 +23,7 @@ use "../Desktop/desktop.mko";
 # when it widened again to 10 words to fit an app_kind tag (word9, see
 # slot_app_kind); shift EFFECT_REQUEST_BASE (see effect_request_ptr())
 # forward with it if the stride or slot count ever changes again.
-# EFFECT_REQUEST_BASE sits right after the table at 0x32C380 (3326848) and
+# EFFECT_REQUEST_BASE sits right after the table at 0x334380 (3359616) and
 # uses 80 bytes, well inside the heap still free before USER_STACK_PAGE
 # begins.
 #
@@ -449,12 +449,12 @@ fn send_window_event(name_scratch: u64, packet_scratch: u64, window_id: u64,
 }
 
 # Scratch buffer for spawn()'s path argument, right after
-# EFFECT_REQUEST_BASE (3326848 + 80 bytes = 3326928), well inside the free
+# EFFECT_REQUEST_BASE (3359616 + 80 bytes = 3359696), well inside the free
 # heap before USER_STACK_PAGE (see the header comment's memory-layout
 # notes). spawn() caps path length at 127 bytes; the paths actually used
 # here are 29-31 bytes.
 fn spawn_path_ptr() -> vptr<u64> {
-    return vptr_from_u64(3326928);
+    return vptr_from_u64(3359696);
 }
 
 # Launch a real new window by spawning one of five RAMFS-seeded clients
@@ -529,7 +529,7 @@ fn spawn_app(kind: u64) -> u64 {
     }
     service_mask: u64 = 576;
     if kind == 2 { service_mask = 1616; }
-    return MakoAbi.spawn(3326928, length, service_mask);
+    return MakoAbi.spawn(3359696, length, service_mask);
 }
 
 fn draw_glyph(display: u64, request_address: u64, pixel_address: u64,
@@ -609,7 +609,7 @@ fn draw_rect(display: u64, request_address: u64, pixel_address: u64,
 # flags is always 0-1 (DISPLAY_SUBMIT_PRESENT), so packing them costs
 # nothing.
 fn effect_request_ptr() -> vptr<u64> {
-    return vptr_from_u64(3326848);
+    return vptr_from_u64(3359616);
 }
 
 fn submit_effect(display: u64, kind_flags: u64, position: u64, size: u64,
@@ -625,7 +625,7 @@ fn submit_effect(display: u64, kind_flags: u64, position: u64, size: u64,
     vptr_write_u64(vptr_offset_u64(request, 7), low32(arg2_arg3));
     vptr_write_u64(vptr_offset_u64(request, 8), high32(arg2_arg3));
     vptr_write_u64(vptr_offset_u64(request, 9), high32(kind_flags));
-    return MakoAbi.display_submit_effect(display, 3326848);
+    return MakoAbi.display_submit_effect(display, 3359616);
 }
 
 # radius fits comfortably in 32 bits (well under the 4096-pixel display
@@ -742,7 +742,7 @@ fn slot_word_offset(slot: u64, word: u64) -> u64 {
 }
 
 fn table_ptr() -> vptr<u64> {
-    return vptr_from_u64(3326208);
+    return vptr_from_u64(3358976);
 }
 
 fn slot_state(slot: u64) -> u64 {
@@ -1789,8 +1789,8 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
 }
 
 fn compositor_main(service_name: u64) -> u64 {
-    request_address: u64 = 3309632;
-    pixel_address: u64 = 3309696;
+    request_address: u64 = 3342400;
+    pixel_address: u64 = 3342464;
     event_address: u64 = pixel_address + 64;
     server: u64 = MakoAbi.channel_create(service_name, 18);
 

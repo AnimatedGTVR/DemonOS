@@ -12,7 +12,7 @@
    actual per-process code-page allocation budget the compositor also has
    to fit under); both must be raised together if the compositor grows
    past either. */
-#define RAMFS_DATA_MAX 163840u
+#define RAMFS_DATA_MAX 196608u
 /* The seeded binaries, native document browser, and graphical C apps
    (including 8 waves of small EDE-port utilities by this point) occupy
    just over 304 KiB. Keep a bounded 384 KiB arena with app-growth headroom;

@@ -23,10 +23,10 @@ fn user_fail() -> u64 {
 # execute this exact code and use identical virtual scratch addresses, but the
 # kernel maps each stack page to a different physical frame.
 fn user_main(pid: u64, message: u64, project_name: u64, project_data: u64, ipc_name: u64, ipc_message: u64) -> u64 {
-    # The executable window ends at 0x324000. Physical code pages are assigned
+    # The executable window ends at 0x330000. Physical code pages are assigned
     # per process, while writable scratch always begins at this stable heap.
-    isolation: vptr<u64> = vptr_from_u64(3309568);
-    file_buffer: u64 = 3309824;
+    isolation: vptr<u64> = vptr_from_u64(3342336);
+    file_buffer: u64 = 3342592;
     vptr_write_u64(isolation, pid);
 
     process: u64 = MakoAbi.service_open(3);

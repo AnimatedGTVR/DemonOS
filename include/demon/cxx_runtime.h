@@ -4,10 +4,12 @@
 /* Wave 0 of the EDE port: the minimum a freestanding C++ MAKO-ABI app needs
    to link at all. There is no MAKO-ABI heap syscall (no brk/mmap
    equivalent, see docs/c-apps.md's "Current C runtime boundary") -- so
-   operator new/delete here are backed by a small static bump arena baked
-   into each app's own .bss, not a real allocator. Fine for the small,
-   short-lived UI objects an EDE app allocates; not a general-purpose heap
-   (never reclaims individual blocks; operator delete is a no-op).
+   operator new/delete here are backed by a small static arena baked into
+   each app's own .bss, managed by a real first-fit free-list allocator
+   with boundary-tag coalescing (see src/cxx_runtime.cpp) rather than a
+   bump allocator. operator delete actually reclaims memory, so an app
+   that allocates and frees repeatedly (opening/closing dialogs, etc.)
+   does not simply exhaust the arena over time.
 
    include this header (or just link cxx_runtime.o) from any C++ MAKO-ABI
    app that uses `new`/`delete` or classes with virtual destructors. */

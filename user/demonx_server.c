@@ -10,11 +10,12 @@
 #define SYSCALL_HANDLE_CLOSE 8u
 #define SYSCALL_FAILURE UINT64_MAX
 
-/* USER_HEAP moved from 0x318000 to 0x31E000, then to 0x322000, and now to
-   0x328000 (40 code pages) for the native session loading/login work. */
-#define incoming (*(struct demonx_transport *)(uintptr_t)0x328000u)
-#define outgoing (*(struct demonx_transport *)(uintptr_t)0x328040u)
-#define windows ((struct demonx_window *)(uintptr_t)0x328080u)
+/* USER_HEAP moved from 0x318000 to 0x31E000, to 0x322000, to 0x328000
+   (40 code pages) for the native session loading/login work, and now to
+   0x330000 (48 code pages) for EDDE's real-ported taskbar context menu. */
+#define incoming (*(struct demonx_transport *)(uintptr_t)0x330000u)
+#define outgoing (*(struct demonx_transport *)(uintptr_t)0x330040u)
+#define windows ((struct demonx_window *)(uintptr_t)0x330080u)
 
 static uint64_t syscall1(uint64_t number, uint64_t first) {
     register uint64_t rax __asm__("rax") = number;

@@ -229,7 +229,7 @@ fn redraw(surface: u64, pixel_address: u64,
 }
 
 fn terminal_client_main(compositor_name: u64) -> u64 {
-    packet_address: u64 = 3309568;
+    packet_address: u64 = 3342336;
     pixel_address: u64 = packet_address + 128;
     name_address: u64 = pixel_address + 16384;
     text_address: u64 = name_address + 16;

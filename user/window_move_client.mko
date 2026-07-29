@@ -5,7 +5,7 @@ use "sdk.mko";
 # immediate, not a rodata address) so this same client can move any live
 # window the caller names, matching the compositor's dynamic window table.
 fn window_move_client_main(service_name: u64, window_id: u64) -> u64 {
-    packet_address: u64 = 3309568;
+    packet_address: u64 = 3342336;
     packet: vptr<u64> = vptr_from_u64(packet_address);
     word: u64 = 0;
     while word < 8 {

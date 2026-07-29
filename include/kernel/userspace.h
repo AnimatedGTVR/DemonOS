@@ -6,14 +6,15 @@
 #include <stddef.h>
 #include <kernel/scheduler.h>
 
-/* The virtual executable window is 160 KiB, ending at the fixed 0x328000
-   heap (raised from 144 KiB / 0x324000 for the EDE port's ede-conf 4th
-   launcher slot, Wave 9 -- two earlier same-day attempts at this exact
-   raise both broke boot in different ways because the dependent list below
-   was incomplete; this list was rebuilt from a full-tree scan, not the
-   earlier ad hoc greps, and is believed complete as of Wave 9). Earlier
-   stages: 136 KiB / 0x322000 (native session loading/credential gate/lock
-   screen), 120 KiB / 0x31E000, 96 KiB / 0x318000.
+/* The virtual executable window is 192 KiB, ending at the fixed 0x330000
+   heap (raised from 160 KiB / 0x328000 for EDDE's real-ported taskbar
+   context menu, which the shared 160 KiB budget had no room left for --
+   verified via the same full-tree numeric-range scan used for the Wave 9
+   raise below, not ad hoc greps, since two same-day attempts at THAT
+   raise both broke boot in different ways from an incomplete dependent
+   list). Earlier stages: 144 KiB / 0x324000 (EDE port's ede-conf 4th
+   launcher slot, Wave 9), 136 KiB / 0x322000 (native session loading/
+   credential gate/lock screen), 120 KiB / 0x31E000, 96 KiB / 0x318000.
 
    Every one of the following hardcodes an absolute address derived from
    this heap base instead of deriving it live, and ALL of them must move by
@@ -44,7 +45,7 @@
    per scheduler slot rather than at this maximum for every process:
    bootstrap tasks get 16 KiB, the persistent system slot gets the full
    window, and ordinary application slots get 48 KiB. */
-#define USERSPACE_CODE_PAGES 40u
+#define USERSPACE_CODE_PAGES 48u
 #define USERSPACE_HEAP_PAGES 5u
 /* The dynamic window-table compositor's call chain (compositor_main ->
    render_scene -> draw_rect/draw_cursor/draw_glyph) needs more stack than
