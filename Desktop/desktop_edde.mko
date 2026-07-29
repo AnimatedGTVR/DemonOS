@@ -1,0 +1,391 @@
+namespace Desktop;
+
+# EDDE (Equinox Desktop DemonOS Environment) fork of desktop.mko -- see
+# compositor_edde.mko's header comment for why this is a separate file
+# instead of an in-place edit. The namespace stays "Desktop" on purpose:
+# this file is only ever compiled together with compositor_edde.mko (via
+# its own `use` graph), never alongside the original desktop.mko in the
+# same compile, so there is no symbol collision despite the shared name.
+
+# Visual language: a real redesign toward the actual Equinox Desktop
+# Environment 2.1 (vendored source at Desktop/EDE/ede-2.1), not a reskin of
+# DemonOS's Vista/Aero glass look. Researched directly from ede-panel's
+# source rather than guessed:
+#   - ede-panel/Panel.h, Panel.cpp: single panel, DEFAULT_PANEL_H=35,
+#     DEFAULT_SPACING=5, default applet order left-to-right is start_menu,
+#     quick_launch, clock, taskbar, battery_monitor, cpu_monitor (this
+#     kernel's own window-count "activity bars" telemetry stands in for
+#     cpu/mem_monitor -- there is no /proc here, same reasoning DemonOS
+#     already used), system_tray (skipped: no real tray protocol exists).
+#   - applets/taskbar/TaskButton.cpp: `box(FL_UP_BOX)`, pressed state uses
+#     `fl_down(box())` -- classic FLTK 3D-bevel buttons, not gradients.
+#   - data/pekwm/themes/default/theme: focused titlebar text #ffffff,
+#     unfocused #4b6983 (a muted steel blue) -- reused here as the accent.
+# This kernel keeps its own dock geometry (y=434, 42px tall, close to but
+# not identical to the real 35px) to avoid re-deriving every window-resize
+# hit band from scratch; only the drawn style and internal layout change.
+
+fn bevel_light() -> u64 { return 4294967295; }  # #FFFFFFFF raised-edge highlight
+fn bevel_dark() -> u64 { return 4285690519; }   # #FF565C64 raised-edge shadow
+fn panel_face() -> u64 { return 4291348924; }   # #FFCED3D7 GTK2-era panel gray
+fn well_face() -> u64 { return 4288848280; }    # #FFC0C6CB sunken well (clock/search)
+fn accent_blue() -> u64 { return 4283580803; }  # #FF4B6983 real EDE unfocused-titlebar blue
+fn text_dark() -> u64 { return 4281545523; }    # #FF1A2733
+fn text_focused() -> u64 { return 4294967295; } # #FFFFFFFF real EDE focused-titlebar white
+
+fn desktop_color_muted() -> u64 { return 4288848280; } # alias of well_face, kept for callers
+
+# Packs a fill color and a raised/sunken flag into one word (raised=1,
+# sunken=0) so draw_bevel stays at MKO's 6-parameter ceiling.
+fn pack_bevel(face: u64, raised: u64) -> u64 { return face * 2 + raised; }
+
+# Classic Motif/FLTK FL_UP_BOX (raised) / fl_down(box()) (sunken) 3D bevel:
+# a flat fill plus a 1px light edge on two sides and a 1px dark edge on the
+# other two, swapped for the sunken look. This is the one drawing primitive
+# nearly every EDE-styled widget below is built from, replacing DemonOS's
+# rounded-rect-plus-gradient glass look entirely.
+fn draw_bevel(display: u64, request_address: u64, pixel_address: u64,
+             position: u64, size: u64, face_and_raised: u64) -> u64 {
+    raised: u64 = face_and_raised - (face_and_raised / 2) * 2;
+    face: u64 = face_and_raised / 2;
+    x: u64 = low32(position);
+    y: u64 = high32(position);
+    w: u64 = low32(size);
+    h: u64 = high32(size);
+    top_color: u64 = Desktop.bevel_dark();
+    bottom_color: u64 = Desktop.bevel_light();
+    if raised == 1 { top_color = Desktop.bevel_light(); bottom_color = Desktop.bevel_dark(); }
+    if draw_rounded_rect(display, position, size, 0, face, 0) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                position, pack_words(w, 1), top_color) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                position, pack_words(1, h), top_color) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                pack_words(x, y + h - 1), pack_words(w, 1), bottom_color) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                pack_words(x + w - 1, y), pack_words(1, h), bottom_color) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_word_demon(display: u64, request_address: u64,
+                           pixel_address: u64, x: u64, y: u64,
+                           foreground: u64) -> u64 {
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x, y), glyph_d(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 8, y), glyph_e(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 16, y), glyph_m(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 24, y), glyph_o(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(x + 32, y), glyph_n(), foreground) != 0 { return 108; }
+    return 0;
+}
+
+fn desktop_draw_folder(display: u64, request_address: u64,
+                       pixel_address: u64, x: u64, y: u64,
+                       color: u64) -> u64 {
+    if draw_shell_icon(display, pack_words(x, y), 1) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_terminal(display: u64, request_address: u64,
+                         pixel_address: u64, x: u64, y: u64,
+                         color: u64) -> u64 {
+    if draw_shell_icon(display, pack_words(x, y), 0) != 0 { return 91; }
+    return 0;
+}
+
+# No top bar in this layout (real EDE ships one panel, not two) -- just the
+# wallpaper. Desktop icons (desktop_draw_shortcuts) and the single bottom
+# panel (desktop_draw_task_panel) carry everything the old top glass bar
+# used to.
+fn desktop_draw_background(display: u64, request_address: u64,
+                           pixel_address: u64, cursor_and_theme: u64) -> u64 {
+    if draw_wallpaper(display, 0, pack_words(640, 480)) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_shortcuts(display: u64, request_address: u64,
+                          pixel_address: u64, cursor_packed: u64) -> u64 {
+    cursor_x: u64 = unpack_cursor_x(cursor_packed);
+    cursor_y: u64 = unpack_cursor_y(cursor_packed);
+    tile1_raised: u64 = 1;
+    if cursor_x >= 12 and cursor_x < 84 and cursor_y >= 48 and cursor_y < 126 {
+        tile1_raised = 0;
+    }
+    # Position/size are the compositor's real hit box for opening the
+    # launcher -- left exactly where DemonOS had it.
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(12, 48), pack_words(72, 78),
+                 Desktop.pack_bevel(Desktop.panel_face(), tile1_raised)) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(37, 59)) != 0 { return 91; }
+    if Desktop.desktop_draw_word_demon(display, request_address, pixel_address,
+                               27, 92, Desktop.text_dark()) != 0 { return 108; }
+
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(12, 136), pack_words(72, 78),
+                 Desktop.pack_bevel(Desktop.panel_face(), 1)) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(36, 151), 5) != 0 { return 91; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(28, 184), glyph_h(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(36, 184), glyph_o(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(44, 184), glyph_m(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(52, 184), glyph_e(), Desktop.text_dark()) != 0 { return 108; }
+    return 0;
+}
+
+# The single EDE-style panel: start menu, quick-launch, clock, taskbar,
+# battery, activity (cpu/mem-monitor analog). packed_extra folds in the
+# three small values render_scene would otherwise need as separate
+# parameters past the 6-argument ceiling: day_seconds (0..86399, a clock
+# that wraps daily -- there is no RTC, same as DemonOS's uptime clock),
+# window_count (0..8), and battery_present (0/1).
+#   packed_extra = day_seconds + window_count * 100000 + battery_present * 1000000
+fn desktop_draw_task_panel(display: u64, request_address: u64,
+                           pixel_address: u64, focused_window: u64,
+                           anim_and_cursor: u64, packed_extra: u64) -> u64 {
+    anim_phase: u64 = low32(anim_and_cursor);
+    packed: u64 = high32(anim_and_cursor);
+    cursor_x: u64 = unpack_cursor_x(packed);
+    cursor_y: u64 = unpack_cursor_y(packed);
+    day_seconds: u64 = packed_extra - (packed_extra / 100000) * 100000;
+    window_count: u64 = (packed_extra / 100000) - (packed_extra / 1000000) * 10;
+    battery_present: u64 = packed_extra / 1000000;
+
+    if draw_shadow(display, pack_words(6, 434), pack_words(628, 42),
+                   2, 6, color_shadow()) != 0 { return 91; }
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(6, 434), pack_words(628, 42),
+                 Desktop.pack_bevel(Desktop.panel_face(), 1)) != 0 { return 91; }
+
+    # Start menu button (real EDE: StartMenu.cpp, a bold-label popup-menu
+    # button). Click region is the compositor's established live_x<112.
+    start_raised: u64 = 1;
+    if cursor_x >= 8 and cursor_x < 108 and cursor_y >= 436 and cursor_y < 474 {
+        start_raised = 0;
+    }
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(8, 436), pack_words(100, 38),
+                 Desktop.pack_bevel(Desktop.panel_face(), start_raised)) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(12, 444)) != 0 { return 91; }
+    if Desktop.desktop_draw_word_demon(display, request_address, pixel_address,
+                               42, 450, Desktop.text_dark()) != 0 { return 108; }
+
+    # Quick-launch applet: terminal / files / web, each its own small
+    # sunken well (real EDE's quick-launch buttons sit flush, not raised,
+    # since they're single-click launchers rather than toggles).
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(114, 440), pack_words(24, 30),
+                 Desktop.pack_bevel(Desktop.well_face(), 0)) != 0 { return 91; }
+    if Desktop.desktop_draw_terminal(display, request_address, pixel_address,
+                             117, 444, Desktop.text_dark()) != 0 { return 91; }
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(140, 440), pack_words(24, 30),
+                 Desktop.pack_bevel(Desktop.well_face(), 0)) != 0 { return 91; }
+    if Desktop.desktop_draw_folder(display, request_address, pixel_address,
+                          143, 444, Desktop.text_dark()) != 0 { return 91; }
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(166, 440), pack_words(24, 30),
+                 Desktop.pack_bevel(Desktop.well_face(), 0)) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(169, 444), 2) != 0 { return 91; }
+
+    # Clock applet (real EDE: applets/clock/Clock.cpp), an LCD-style sunken
+    # well around the digits rather than bare glass text.
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(196, 440), pack_words(54, 30),
+                 Desktop.pack_bevel(Desktop.well_face(), 0)) != 0 { return 91; }
+    hours: u64 = (day_seconds / 3600) - (day_seconds / 3600 / 100) * 100;
+    minutes: u64 = (day_seconds / 60) - (day_seconds / 3600) * 60;
+    seconds: u64 = day_seconds - (day_seconds / 60) * 60;
+    if draw_glyph(display, request_address, pixel_address, pack_words(200, 449), digit_glyph(hours / 10), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(206, 449), digit_glyph(hours - (hours / 10) * 10), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(212, 449), glyph_colon(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(218, 449), digit_glyph(minutes / 10), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(224, 449), digit_glyph(minutes - (minutes / 10) * 10), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(230, 449), glyph_colon(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(236, 449), digit_glyph(seconds / 10), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(242, 449), digit_glyph(seconds - (seconds / 10) * 10), Desktop.text_dark()) != 0 { return 108; }
+
+    # Taskbar applet: real EDE TaskButton.cpp uses FL_UP_BOX/fl_down(box())
+    # for normal/pressed -- pressed here means "this is the focused window",
+    # matching the up/down toggle-button semantics a real taskbar button has.
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_state(slot) != 0 {
+            task_x: u64 = 254 + slot * 34;
+            task_raised: u64 = 1;
+            if slot_id(slot) == focused_window and slot_visible(slot) == 1 {
+                task_raised = 0;
+            }
+            task_face: u64 = Desktop.panel_face();
+            if slot_minimized(slot) == 1 { task_face = color_task_minimized(); }
+            if cursor_x >= task_x and cursor_x < task_x + 30 and
+               cursor_y >= 436 and cursor_y < 474 {
+                task_face = Desktop.well_face();
+            }
+            if Desktop.draw_bevel(display, request_address, pixel_address,
+                         pack_words(task_x, 436), pack_words(30, 38),
+                         Desktop.pack_bevel(task_face, task_raised)) != 0 { return 91; }
+            if slot_id(slot) == 7 {
+                if Desktop.desktop_draw_terminal(display, request_address, pixel_address,
+                                         task_x + 4, 447,
+                                         Desktop.text_dark()) != 0 { return 91; }
+            } else if slot_app_kind(slot) == app_kind_browser() {
+                if draw_shell_icon(display, pack_words(task_x + 4, 447), 2) != 0 { return 91; }
+            } else {
+                if draw_shell_icon(display, pack_words(task_x + 4, 447), 3) != 0 { return 91; }
+            }
+            if slot_id(slot) == focused_window {
+                indicator: u64 = argb_lighten(Desktop.accent_blue(), anim_pulse(anim_phase, 40, 18));
+                if draw_rounded_rect(display, pack_words(task_x + 4, 470),
+                                     pack_words(22, 2), 1, indicator, 0) != 0 { return 91; }
+            }
+        }
+        slot = slot + 1;
+    }
+
+    # Battery applet (real EDE: applets/battery-monitor): real ACPI
+    # presence (MakoAbi.battery_present(), see src/acpi.c's RSDP/RSDT/
+    # FADT/DSDT walk for the PNP0C0A Control Method Battery ID) lights the
+    # glyph the accent blue when a battery device is actually declared in
+    # the firmware's ACPI namespace; stays the neutral dark outline
+    # otherwise. No AML interpreter exists to read a real charge level, so
+    # this is presence-only, never a fabricated percentage or fill amount.
+    battery_color: u64 = Desktop.text_dark();
+    if battery_present == 1 { battery_color = Desktop.accent_blue(); }
+    if draw_rounded_rect(display, pack_words(534, 449), pack_words(15, 9), 1,
+                         battery_color, 0) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                 pack_words(549, 452), pack_words(2, 3),
+                 battery_color) != 0 { return 91; }
+
+    # CPU/mem-monitor applet analog: real live window count (0..8), the
+    # same telemetry substitution DemonOS's activity bars used, since
+    # there is no /proc here to read real CPU/memory load from.
+    bar1: u64 = Desktop.well_face();
+    if window_count >= 1 { bar1 = Desktop.accent_blue(); }
+    bar2: u64 = Desktop.well_face();
+    if window_count >= 3 { bar2 = Desktop.accent_blue(); }
+    bar3: u64 = Desktop.well_face();
+    if window_count >= 5 { bar3 = Desktop.accent_blue(); }
+    if draw_rounded_rect(display, pack_words(562, 458), pack_words(4, 7), 0,
+                         bar1, 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(570, 455), pack_words(4, 10), 0,
+                         bar2, 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(578, 452), pack_words(4, 13), 0,
+                         bar3, 0) != 0 { return 91; }
+
+    # Settings gear stays reachable at the panel's far right, click region
+    # matching the compositor's own live_x>=590,<628 test.
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(590, 436), pack_words(38, 38),
+                 Desktop.pack_bevel(Desktop.panel_face(), 1)) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(597, 440), 4) != 0 { return 91; }
+    return 0;
+}
+
+fn desktop_draw_launcher(display: u64, request_address: u64,
+                         pixel_address: u64, cursor_packed: u64,
+                         theme: u64, search_query: u64) -> u64 {
+    # search_length is derived from search_query (scan for the first unset
+    # byte; typed letters are always nonzero ASCII and every byte past the
+    # typed prefix is 0) rather than threaded as its own parameter, since
+    # this function is already at MKO's 6-parameter ceiling.
+    search_length: u64 = 0;
+    length_scan_done: u64 = 0;
+    length_scan: u64 = 0;
+    while length_scan < 8 and length_scan_done == 0 {
+        scan_place: u64 = pow256(length_scan);
+        scan_byte: u64 = (search_query / scan_place) - (search_query / (scan_place * 256)) * 256;
+        if scan_byte == 0 { length_scan_done = 1; }
+        else { search_length = length_scan + 1; length_scan = length_scan + 1; }
+    }
+    # Real EDE's start menu (applets/start-menu/StartMenu.cpp) is a plain
+    # FLTK popup menu -- a flat bevel panel with a bold-label header, not
+    # glass. Row bands (238..465, six 38px rows) are unchanged from
+    # DemonOS's layout so the compositor's launcher hit-test needs no
+    # edits, only the drawn style changes.
+    if draw_shadow(display, pack_words(8, 190), pack_words(226, 314),
+                   2, 6, color_shadow()) != 0 { return 91; }
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(8, 190), pack_words(226, 314),
+                 Desktop.pack_bevel(Desktop.panel_face(), 1)) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address,
+                pack_words(10, 192), pack_words(222, 26), Desktop.accent_blue()) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(20, 195)) != 0 { return 91; }
+    if Desktop.desktop_draw_word_demon(display, request_address, pixel_address,
+                               55, 202, Desktop.text_focused()) != 0 { return 108; }
+
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(16, 232), pack_words(210, 240),
+                 Desktop.pack_bevel(Desktop.well_face(), 0)) != 0 { return 91; }
+    row: u64 = 0;
+    while row < 6 {
+        row_y: u64 = 238 + row * 38;
+        row_raised: u64 = 1;
+        cx: u64 = unpack_cursor_x(cursor_packed);
+        cy: u64 = unpack_cursor_y(cursor_packed);
+        if cx >= 20 and cx < 220 and cy >= row_y and cy < row_y + 38 {
+            row_raised = 0;
+        }
+        if Desktop.draw_bevel(display, request_address, pixel_address,
+                     pack_words(20, row_y), pack_words(200, 34),
+                     Desktop.pack_bevel(Desktop.panel_face(), row_raised)) != 0 { return 91; }
+        row = row + 1;
+    }
+    if Desktop.desktop_draw_terminal(display, request_address, pixel_address,
+                             30, 246, Desktop.text_dark()) != 0 { return 91; }
+    if Desktop.desktop_draw_folder(display, request_address, pixel_address,
+                          30, 284, Desktop.text_dark()) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(30, 322), 2) != 0 { return 91; }
+    # ede-calc (Wave 1 of the EDE port): reuses the "settings" atlas icon --
+    # there is no dedicated calculator/science icon in the embedded Fluent
+    # atlas -- disambiguated from the actual Settings target (which stays at
+    # its own established taskbar hit target) by the "E" glyph below.
+    if draw_shell_icon(display, pack_words(30, 360), 4) != 0 { return 91; }
+    # ede-conf (Wave 5): the control panel that spawns the rest of the EDE
+    # apps. Reuses the "home" atlas icon (index 5) -- no dedicated
+    # control-panel icon exists -- disambiguated by the "O" glyph below.
+    if draw_shell_icon(display, pack_words(30, 398), 5) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(30, 436), 3) != 0 { return 91; }
+
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 251), glyph_t(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 289), glyph_c(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 327), glyph_w(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 365), glyph_e(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 403), glyph_o(), Desktop.text_dark()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 441), glyph_s(), Desktop.text_dark()) != 0 { return 108; }
+
+    # Search box (Wave 12 of the EDE port): real keyboard capture, drawn as
+    # a sunken text-entry well matching the rest of this bevel style. Real
+    # EDE's own start menu has no search field (a pure category-tree popup
+    # menu per StartMenu.cpp/XdgMenuReader.cpp), so this stays DemonOS's
+    # addition rather than something ported from upstream.
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(20, 476), pack_words(146, 20),
+                 Desktop.pack_bevel(Desktop.well_face(), 0)) != 0 { return 91; }
+    query_index: u64 = 0;
+    while query_index < search_length {
+        place: u64 = pow256(query_index);
+        typed: u64 = (search_query / place) - (search_query / (place * 256)) * 256;
+        if draw_glyph(display, request_address, pixel_address,
+                     pack_words(24 + query_index * 6, 483),
+                     letter_glyph(typed), Desktop.text_dark()) != 0 { return 108; }
+        query_index = query_index + 1;
+    }
+    if Desktop.draw_bevel(display, request_address, pixel_address,
+                 pack_words(178, 476), pack_words(42, 20),
+                 Desktop.pack_bevel(Desktop.accent_blue(), 1)) != 0 { return 91; }
+    return 0;
+}

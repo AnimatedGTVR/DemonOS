@@ -6,10 +6,10 @@
 #define BOARD_WIDTH 10
 #define BOARD_HEIGHT 20
 /* USER_HEAP moved from 0x318000 to 0x31E000, then to 0x322000, and now to
-   0x324000 (36 code pages) for the native session loading/login work. */
-#define EVENT_ADDRESS ((struct input_event *)(uintptr_t)0x324000u)
-#define BOARD ((uint8_t *)(uintptr_t)0x324100u)
-#define OUTPUT ((char *)(uintptr_t)0x324400u)
+   0x328000 (40 code pages) for the native session loading/login work. */
+#define EVENT_ADDRESS ((struct input_event *)(uintptr_t)0x328000u)
+#define BOARD ((uint8_t *)(uintptr_t)0x328100u)
+#define OUTPUT ((char *)(uintptr_t)0x328400u)
 
 static const uint16_t pieces[7] = {
     0x00f0u, /* I */ 0x0660u, /* O */ 0x0270u, /* T */ 0x0710u,

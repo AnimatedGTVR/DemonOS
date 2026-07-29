@@ -1,4 +1,5 @@
 #include <kernel/userspace.h>
+#include <kernel/acpi.h>
 #include <kernel/capability.h>
 #include <kernel/elf64.h>
 #include <kernel/display.h>
@@ -842,6 +843,14 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
         frame->rax = amount != 0u &&
             userspace_copy_to(scheduler_current_pid(), frame->r10,
                               response, amount) ? amount : UINT64_MAX;
+        return frame_address;
+    }
+    if (number == 37u) {
+        /* Read-only, no capability gate, same reasoning as boot_test_mode
+           (syscall 34): whether the firmware's ACPI namespace declares a
+           battery device carries no sensitive state. See acpi.c -- this is
+           real table-walked presence, never a fabricated charge level. */
+        frame->rax = acpi_battery_present() ? 1u : 0u;
         return frame_address;
     }
     frame->rax = (uint64_t)-1;

@@ -111,4 +111,27 @@ static inline uint64_t demon_surface_damage(uint64_t surface, uint64_t x,
     return rax;
 }
 
+/* Syscalls 6/9/10/11/12 already exist and are used by browser_client.mko
+   (file_open/handle_read, service_open(4)==storage) and compositor.mko
+   (spawn/wait) -- these are the missing C wrappers for the same ABI, added
+   for Wave 5 of the EDE port (apps/ede_conf) so a plain C app can open a
+   RAMFS file or launch another app the same way MKO apps already do. */
+static inline uint64_t demon_handle_write(uint64_t handle, const void *bytes,
+                                          uint64_t length) {
+    return demon_syscall3(6u, handle, (uint64_t)(uintptr_t)bytes, length);
+}
+static inline uint64_t demon_file_open(uint64_t storage, const char *name,
+                                       uint64_t length, uint64_t create) {
+    return demon_syscall4(9u, storage, (uint64_t)(uintptr_t)name, length, create);
+}
+static inline uint64_t demon_handle_read(uint64_t handle, void *bytes,
+                                         uint64_t capacity) {
+    return demon_syscall3(10u, handle, (uint64_t)(uintptr_t)bytes, capacity);
+}
+static inline uint64_t demon_spawn(const char *path, uint64_t length,
+                                   uint64_t service_mask) {
+    return demon_syscall3(11u, (uint64_t)(uintptr_t)path, length, service_mask);
+}
+static inline uint64_t demon_wait(uint64_t pid) { return demon_syscall1(12u, pid); }
+
 #endif

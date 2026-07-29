@@ -25,8 +25,8 @@ fn user_fail() -> u64 {
 fn user_main(pid: u64, message: u64, project_name: u64, project_data: u64, ipc_name: u64, ipc_message: u64) -> u64 {
     # The executable window ends at 0x324000. Physical code pages are assigned
     # per process, while writable scratch always begins at this stable heap.
-    isolation: vptr<u64> = vptr_from_u64(3293184);
-    file_buffer: u64 = 3293440;
+    isolation: vptr<u64> = vptr_from_u64(3309568);
+    file_buffer: u64 = 3309824;
     vptr_write_u64(isolation, pid);
 
     process: u64 = MakoAbi.service_open(3);

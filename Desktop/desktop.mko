@@ -80,7 +80,8 @@ fn desktop_draw_glass_orb(display: u64, x: u64, y: u64, diameter: u64,
 }
 
 fn desktop_draw_background(display: u64, request_address: u64,
-                           pixel_address: u64, cursor_and_theme: u64) -> u64 {
+                           pixel_address: u64, cursor_and_theme: u64,
+                           window_count: u64, battery_present: u64) -> u64 {
     theme: u64 = unpack_accent_theme(cursor_and_theme);
     if draw_wallpaper(display, 0, pack_words(640, 480)) != 0 { return 91; }
 
@@ -123,17 +124,69 @@ fn desktop_draw_background(display: u64, request_address: u64,
     if draw_rounded_border(display, pack_words(522, 6), pack_words(106, 18),
                            pack_words(5, 1), pack_words(Desktop.desktop_color_panel_edge(),
                            Desktop.desktop_color_card()), 0) != 0 { return 91; }
+    # Activity bars (Wave 10): real live window count instead of decoration
+    # -- bar 1 lights at >=1 open window, bar 2 at >=3, bar 3 at >=5 (out of
+    # WINDOW_LIMIT=8), the same "how busy is the desktop" idea as
+    # ede-panel's CpuMonitor applet, using telemetry this kernel actually
+    # has (the window table) instead of a fake CPU percentage.
+    bar1_color: u64 = Desktop.desktop_color_muted();
+    if window_count >= 1 { bar1_color = accent_fill(theme); }
+    bar2_color: u64 = Desktop.desktop_color_muted();
+    if window_count >= 3 { bar2_color = accent_fill(theme); }
+    bar3_color: u64 = Desktop.desktop_color_muted();
+    if window_count >= 5 { bar3_color = accent_fill(theme); }
     if draw_rounded_rect(display, pack_words(538, 13), pack_words(4, 7), 1,
-                         accent_fill(theme), 0) != 0 { return 91; }
+                         bar1_color, 0) != 0 { return 91; }
     if draw_rounded_rect(display, pack_words(546, 10), pack_words(4, 10), 1,
-                         accent_fill(theme), 0) != 0 { return 91; }
+                         bar2_color, 0) != 0 { return 91; }
     if draw_rounded_rect(display, pack_words(554, 7), pack_words(4, 13), 1,
-                         accent_fill(theme), 0) != 0 { return 91; }
+                         bar3_color, 0) != 0 { return 91; }
+    # Battery glyph: real ACPI presence (MakoAbi.battery_present(), see
+    # src/acpi.c's RSDP/RSDT/FADT/DSDT walk for the PNP0C0A Control Method
+    # Battery ID) lights the body the same accent color as the activity
+    # bars above when a battery device is actually declared in the
+    # firmware's ACPI namespace; stays the same muted gray as every other
+    # absent/inactive indicator otherwise. There is no AML interpreter to
+    # read a real charge level, so this can only ever be present/absent,
+    # never a fabricated percentage or fill amount.
+    battery_color: u64 = Desktop.desktop_color_muted();
+    if battery_present == 1 { battery_color = accent_fill(theme); }
     if draw_rounded_rect(display, pack_words(578, 9), pack_words(15, 9), 2,
-                         Desktop.desktop_color_muted(), 0) != 0 { return 91; }
+                         battery_color, 0) != 0 { return 91; }
     if draw_rect(display, request_address, pixel_address,
                  pack_words(593, 12), pack_words(2, 3),
-                 Desktop.desktop_color_muted()) != 0 { return 91; }
+                 battery_color) != 0 { return 91; }
+    return 0;
+}
+
+# Menu-bar uptime clock (Wave 10 of the EDE port): a native port of
+# ede-panel's Clock applet. The original reads the real wall clock; this
+# reads MakoAbi.ticks() (the only time source this kernel has) via the
+# total_seconds parameter render_scene computes and passes in, so this
+# function itself stays free of MakoAbi calls like every other Desktop-
+# namespace function. Sits in the otherwise-empty glass between the
+# quick-launch icons (ending ~x206) and the system status cluster
+# (starting x522), 8 glyphs at 5px + 1px gap = 48px wide.
+fn desktop_draw_clock(display: u64, request_address: u64,
+                      pixel_address: u64, total_seconds: u64,
+                      foreground: u64) -> u64 {
+    hours: u64 = (total_seconds / 3600) - (total_seconds / 3600 / 100) * 100;
+    minutes: u64 = (total_seconds / 60) - (total_seconds / 3600) * 60;
+    seconds: u64 = total_seconds - (total_seconds / 60) * 60;
+    h_tens: u64 = hours / 10;
+    h_ones: u64 = hours - h_tens * 10;
+    m_tens: u64 = minutes / 10;
+    m_ones: u64 = minutes - m_tens * 10;
+    s_tens: u64 = seconds / 10;
+    s_ones: u64 = seconds - s_tens * 10;
+    if draw_glyph(display, request_address, pixel_address, pack_words(320, 10), digit_glyph(h_tens), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(326, 10), digit_glyph(h_ones), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(332, 10), glyph_colon(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(338, 10), digit_glyph(m_tens), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(344, 10), digit_glyph(m_ones), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(350, 10), glyph_colon(), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(356, 10), digit_glyph(s_tens), foreground) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, pack_words(362, 10), digit_glyph(s_ones), foreground) != 0 { return 108; }
     return 0;
 }
 
@@ -255,13 +308,26 @@ fn desktop_draw_task_panel(display: u64, request_address: u64,
 
 fn desktop_draw_launcher(display: u64, request_address: u64,
                          pixel_address: u64, cursor_packed: u64,
-                         theme: u64) -> u64 {
-    # Vista-like Start surface with macOS-like spacing. The five application
+                         theme: u64, search_query: u64) -> u64 {
+    # search_length is derived from search_query (scan for the first unset
+    # byte; typed letters are always nonzero ASCII and every byte past the
+    # typed prefix is 0) rather than threaded as its own parameter, since
+    # this function is already at MKO's 6-parameter ceiling.
+    search_length: u64 = 0;
+    length_scan_done: u64 = 0;
+    length_scan: u64 = 0;
+    while length_scan < 8 and length_scan_done == 0 {
+        scan_place: u64 = pow256(length_scan);
+        scan_byte: u64 = (search_query / scan_place) - (search_query / (scan_place * 256)) * 256;
+        if scan_byte == 0 { length_scan_done = 1; }
+        else { search_length = length_scan + 1; length_scan = length_scan + 1; }
+    }
+    # Vista-like Start surface with macOS-like spacing. The six application
     # rows deliberately use the compositor's exact 38-pixel input bands:
-    # 238..275, 276..313, 314..351, 352..389 and 390..427.
-    if draw_shadow(display, pack_words(8, 190), pack_words(226, 276),
+    # 238..275, 276..313, 314..351, 352..389, 390..427 and 428..465.
+    if draw_shadow(display, pack_words(8, 190), pack_words(226, 314),
                    7, 14, color_shadow()) != 0 { return 91; }
-    if draw_rounded_border(display, pack_words(8, 190), pack_words(226, 276),
+    if draw_rounded_border(display, pack_words(8, 190), pack_words(226, 314),
                            pack_words(7, 1), pack_words(accent_border_bright(theme),
                            Desktop.desktop_color_panel()), 0) != 0 { return 91; }
     if draw_gradient_v(display, pack_words(10, 192), pack_words(222, 40),
@@ -276,10 +342,10 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
 
     # Pale inner application sheet separates content from the translucent
     # outer glass without introducing another full-window surface.
-    if draw_rounded_rect(display, pack_words(16, 232), pack_words(210, 202),
+    if draw_rounded_rect(display, pack_words(16, 232), pack_words(210, 240),
                          9, 3925276917, 0) != 0 { return 91; } # #E9F6F8F5
     row: u64 = 0;
-    while row < 5 {
+    while row < 6 {
         row_y: u64 = 238 + row * 38;
         fill: u64 = 4026531839; # #EFFFFFFF
         cx: u64 = unpack_cursor_x(cursor_packed);
@@ -308,7 +374,11 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
     # atlas -- disambiguated from the actual Settings target (which stays at
     # its own established taskbar hit target) by the "E" glyph below.
     if draw_shell_icon(display, pack_words(30, 360), 4) != 0 { return 91; }
-    if draw_shell_icon(display, pack_words(30, 398), 3) != 0 { return 91; }
+    # ede-conf (Wave 5): the control panel that spawns the rest of the EDE
+    # apps. Reuses the "home" atlas icon (index 5) -- no dedicated
+    # control-panel icon exists -- disambiguated by the "O" glyph below.
+    if draw_shell_icon(display, pack_words(30, 398), 5) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(30, 436), 3) != 0 { return 91; }
 
     if draw_glyph(display, request_address, pixel_address,
                   pack_words(68, 251), glyph_t(), color_terminal_bg()) != 0 { return 108; }
@@ -319,15 +389,33 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
     if draw_glyph(display, request_address, pixel_address,
                   pack_words(68, 365), glyph_e(), color_terminal_bg()) != 0 { return 108; }
     if draw_glyph(display, request_address, pixel_address,
-                  pack_words(68, 403), glyph_s(), color_terminal_bg()) != 0 { return 108; }
+                  pack_words(68, 403), glyph_o(), color_terminal_bg()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(68, 441), glyph_s(), color_terminal_bg()) != 0 { return 108; }
 
-    # Search/status footer: visual groundwork for launcher filtering. It is
-    # intentionally non-interactive until text input is wired to shell state.
-    if draw_rounded_border(display, pack_words(20, 438), pack_words(146, 20),
+    # Search box (Wave 12 of the EDE port, native port of ede-panel
+    # StartMenu's search field): real keyboard capture now -- see
+    # compositor.mko's launcher_open==1 keydown branch for the typed-buffer
+    # logic and pow256's comment for the byte-packing scheme search_query
+    # uses. Matching is by first typed character against each row's
+    # mnemonic letter (Enter activates it), so this only draws the typed
+    # text back, not a filtered/highlighted row list -- see the keydown
+    # branch's comment for why full substring matching against row names
+    # is future work.
+    if draw_rounded_border(display, pack_words(20, 476), pack_words(146, 20),
                            pack_words(6, 1),
                            pack_words(Desktop.desktop_color_panel_edge(),
                                       3238861600), 0) != 0 { return 91; } # #C10D1B20
-    if draw_rounded_rect(display, pack_words(178, 438), pack_words(42, 20),
+    query_index: u64 = 0;
+    while query_index < search_length {
+        place: u64 = pow256(query_index);
+        typed: u64 = (search_query / place) - (search_query / (place * 256)) * 256;
+        if draw_glyph(display, request_address, pixel_address,
+                     pack_words(24 + query_index * 6, 483),
+                     letter_glyph(typed), color_title_text()) != 0 { return 108; }
+        query_index = query_index + 1;
+    }
+    if draw_rounded_rect(display, pack_words(178, 476), pack_words(42, 20),
                          6, accent_fill(theme), 0) != 0 { return 91; }
     return 0;
 }

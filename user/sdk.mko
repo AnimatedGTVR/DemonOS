@@ -181,3 +181,14 @@ fn network_http_get(network: u64, url: u64, url_length: u64,
                     destination: u64, capacity: u64) -> u64 {
     return abi_syscall5(36, network, url, url_length, destination, capacity);
 }
+
+# Real ACPI presence: true only if the kernel's boot-time table walk
+# (RSDP -> RSDT/XSDT -> FADT -> DSDT/SSDT, see src/acpi.c) found the
+# standard PNP0C0A Control Method Battery device ID encoded in the
+# firmware's ACPI namespace. This is never fabricated -- there is no
+# AML interpreter to read a real charge level, so it can only report
+# whether a battery device exists, not its state. No capability gate,
+# same reasoning as boot_test_mode: carries no sensitive data.
+fn battery_present() -> u64 {
+    return abi_syscall0(37);
+}

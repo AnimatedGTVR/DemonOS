@@ -1,7 +1,13 @@
 #include <kernel/apps.h>
 #include <kernel/ramfs.h>
 
-#define APP_LIMIT 16u
+// Raised from 16: by Wave 7 of the EDE port there are 20 .elf files seeded
+// into RAMFS (see grub/grub.cfg's module2 list), and apps_init()'s scan
+// silently stops cataloging once it hits this limit -- ede-autostart (the
+// 17th .elf entry) was landing past the old cutoff and "apps launch
+// ede-autostart" failed with "launch target unavailable" despite the file
+// being right there in RAMFS. Headroom added for further growth.
+#define APP_LIMIT 32u
 
 struct app_record {
     const char *name;
@@ -29,6 +35,12 @@ static const char *app_name_for_path(const char *path) {
     if (equal(path, "/system/bin/tetris.elf")) return "tetris";
     if (equal(path, "/system/bin/calculator.elf")) return "calculator";
     if (equal(path, "/system/bin/ede-calc.elf")) return "ede-calc";
+    if (equal(path, "/system/bin/ede-about.elf")) return "ede-about";
+    if (equal(path, "/system/bin/ede-tip.elf")) return "ede-tip";
+    if (equal(path, "/system/bin/ede-preferred.elf")) return "ede-preferred";
+    if (equal(path, "/system/bin/ede-conf.elf")) return "ede-conf";
+    if (equal(path, "/system/bin/ede-autostart.elf")) return "ede-autostart";
+    if (equal(path, "/system/bin/ede-timedate.elf")) return "ede-timedate";
     return path;
 }
 

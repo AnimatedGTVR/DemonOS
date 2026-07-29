@@ -372,7 +372,7 @@ fn redraw(surface: u64, pixel_address: u64, location_address: u64,
 }
 
 fn browser_client_main(compositor_name: u64) -> u64 {
-    packet_address: u64 = 3293184;
+    packet_address: u64 = 3309568;
     pixel_address: u64 = packet_address + 128;
     name_address: u64 = pixel_address + 16384;
     location_address: u64 = name_address + 16;

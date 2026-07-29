@@ -24,6 +24,11 @@ RUN_ISO := $(BUILD)/kernel-run.iso
 USER_ELF := $(BUILD)/user_program.elf
 PORTABLE_ELF := $(BUILD)/portable_hello.elf
 COMPOSITOR_ELF := $(BUILD)/compositor.elf
+# EDDE (Equinox Desktop DemonOS Environment): a separately-buildable fork of
+# the compositor/desktop shell (user/compositor_edde.mko, Desktop/desktop_edde.mko),
+# selectable as its own GRUB boot entry. See compositor_edde.mko's header
+# comment for why it's a fork rather than an in-place edit.
+EDDE_COMPOSITOR_ELF := $(BUILD)/compositor_edde.elf
 WINDOW_CLIENT_ELF := $(BUILD)/window_client.elf
 WINDOW_MOVE_CLIENT_ELF := $(BUILD)/window_move_client.elf
 WINDOW_EVENT_CLIENT_ELF := $(BUILD)/window_event_client.elf
@@ -50,6 +55,27 @@ CXX_HELLO_ELF := $(BUILD)/cxx_hello.elf
 # incompatible, not just slower), so anything using real floats needs SSE2
 # actually enabled instead.
 EDE_CALC_ELF := $(BUILD)/ede_calc.elf
+# Wave 2 of the EDE port: ede-about (apps/ede_about) -- a static credits/
+# about window, no floating point anywhere in it, so unlike ede-calc it
+# builds with the kernel's normal CFLAGS/ASFLAGS, not FLOAT_CFLAGS.
+EDE_ABOUT_ELF := $(BUILD)/ede_about.elf
+# Wave 3 of the EDE port: ede-tip (apps/ede_tip) -- prev/next/close tip
+# cycler. Also plain C, no floating point.
+EDE_TIP_ELF := $(BUILD)/ede_tip.elf
+# Wave 4 of the EDE port: ede-preferred-applications (apps/ede_preferred) --
+# a basic-vs-scientific calculator picker, the one role this OS actually
+# has two installed alternatives for. Plain C, no floating point.
+EDE_PREFERRED_ELF := $(BUILD)/ede_preferred.elf
+# Wave 5 of the EDE port: ede-conf (apps/ede_conf) -- a real control panel
+# that spawns other apps via the newly-added demon_spawn() wrapper.
+EDE_CONF_ELF := $(BUILD)/ede_conf.elf
+# Wave 7 of the EDE port: ede-autostart (apps/ede_autostart) -- toggle
+# checklist with real RAMFS persistence, launched from ede-conf's 4th slot.
+EDE_AUTOSTART_ELF := $(BUILD)/ede_autostart.elf
+# Wave 8 of the EDE port: ede-timedate (apps/ede_timedate) -- scaled down to
+# a real system-uptime readout (demon_ticks()), since no RTC/timezone/NTP
+# backend exists for the original's full clock+calendar dialog.
+EDE_TIMEDATE_ELF := $(BUILD)/ede_timedate.elf
 MAKO_REPO := ../MAKO
 MAKO_SOURCE_ARCHIVE := $(BUILD)/MAKO-source.tar.zst
 MAKO_MANIFEST := $(BUILD)/mako-manifest.txt
@@ -69,10 +95,10 @@ OBJECTS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/serial.o $(BUILD)/terminal
 OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/capability.o \
 	$(BUILD)/ipc.o $(BUILD)/display.o $(BUILD)/surface.o $(BUILD)/network.o $(BUILD)/http.o $(BUILD)/e1000.o $(BUILD)/ahci.o $(BUILD)/init.o $(BUILD)/runas.o $(BUILD)/apps.o $(BUILD)/git.o \
-	$(BUILD)/ramfs.o \
+	$(BUILD)/ramfs.o $(BUILD)/acpi.o \
 	$(BUILD)/user_program_blob.o
 
-.PHONY: all iso iso-check project run run-wayland run-sdl run-vnc smoke framebuffer-smoke framebuffer-fallback-smoke keyboard-smoke desktop-shortcut-smoke terminal-smoke mouse-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
+.PHONY: all iso iso-check project qemu run run-wayland run-sdl run-vnc smoke framebuffer-smoke framebuffer-fallback-smoke keyboard-smoke desktop-shortcut-smoke terminal-smoke mouse-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
 
 all: $(KERNEL)
 
@@ -84,7 +110,7 @@ $(BUILD):
 $(BUILD)/boot.o: src/arch/x86_64/boot.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
-$(BUILD)/kernel.o: src/kernel.c include/demon/graphics.h include/demon/input.h include/kernel/multiboot2.h include/kernel/framebuffer.h include/kernel/display.h include/kernel/surface.h include/kernel/network.h include/kernel/http.h include/kernel/pci.h include/kernel/e1000.h include/kernel/capability.h include/kernel/apps.h include/kernel/git.h include/kernel/init.h include/kernel/ipc.h include/kernel/runas.h include/kernel/ramfs.h include/kernel/serial.h include/kernel/terminal.h include/kernel/scheduler.h include/kernel/userspace.h | $(BUILD)
+$(BUILD)/kernel.o: src/kernel.c include/demon/graphics.h include/demon/input.h include/kernel/multiboot2.h include/kernel/framebuffer.h include/kernel/display.h include/kernel/surface.h include/kernel/network.h include/kernel/http.h include/kernel/pci.h include/kernel/e1000.h include/kernel/capability.h include/kernel/apps.h include/kernel/git.h include/kernel/init.h include/kernel/ipc.h include/kernel/runas.h include/kernel/ramfs.h include/kernel/serial.h include/kernel/terminal.h include/kernel/scheduler.h include/kernel/userspace.h include/kernel/acpi.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/serial.o: src/arch/x86_64/serial.c include/kernel/serial.h | $(BUILD)
@@ -116,6 +142,14 @@ $(BUILD)/e1000.o: src/e1000.c include/kernel/e1000.h include/kernel/network.h in
 
 $(BUILD)/ahci.o: src/ahci.c include/kernel/ahci.h include/kernel/pci.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# -Wno-array-bounds: acpi.c deliberately dereferences small constant
+# physical addresses (e.g. the EBDA segment pointer at 0x40E) through the
+# 1 GiB identity map; GCC's array-bounds pass mistakes those literal
+# addresses for null-pointer-adjacent array indexing and refuses to build
+# under -Werror otherwise.
+$(BUILD)/acpi.o: src/acpi.c include/kernel/acpi.h include/kernel/serial.h | $(BUILD)
+	$(CC) $(CFLAGS) -Wno-array-bounds -c $< -o $@
 
 $(BUILD)/graphics.o: libs/graphics/graphics.c include/demon/graphics.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -245,7 +279,7 @@ $(BUILD)/makobox.o: src/makobox.c include/kernel/makobox.h include/kernel/apps.h
 $(BUILD)/scheduler.o: src/scheduler.c include/kernel/scheduler.h include/kernel/interrupt_frame.h include/kernel/userspace.h include/kernel/ipc.h include/demon/input.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/userspace.o: src/arch/x86_64/userspace.c include/kernel/userspace.h include/kernel/capability.h include/kernel/display.h include/kernel/surface.h include/kernel/elf64.h include/kernel/interrupt_frame.h include/kernel/interrupts.h include/kernel/ipc.h include/kernel/ramfs.h include/kernel/scheduler.h include/kernel/serial.h include/kernel/terminal.h | $(BUILD)
+$(BUILD)/userspace.o: src/arch/x86_64/userspace.c include/kernel/userspace.h include/kernel/acpi.h include/kernel/capability.h include/kernel/display.h include/kernel/surface.h include/kernel/elf64.h include/kernel/interrupt_frame.h include/kernel/interrupts.h include/kernel/ipc.h include/kernel/ramfs.h include/kernel/scheduler.h include/kernel/serial.h include/kernel/terminal.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/elf64.o: src/elf64.c include/kernel/elf64.h | $(BUILD)
@@ -321,6 +355,20 @@ $(BUILD)/compositor_mko.o: $(BUILD)/compositor_mko.S
 $(COMPOSITOR_ELF): $(BUILD)/compositor_entry.o $(BUILD)/compositor_mko.o user/linker.ld
 	$(LD) $(USER_LDFLAGS) \
 		$(BUILD)/compositor_entry.o $(BUILD)/compositor_mko.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/compositor_edde_mko.S: user/compositor_edde.mko user/sdk.mko Desktop/desktop_edde.mko | $(BUILD)
+	dotnet run --project ../MAKO/src/Mako -- native $< --kernel -o $@
+
+$(BUILD)/compositor_edde_mko.o: $(BUILD)/compositor_edde_mko.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+# Reuses compositor_entry.o (user/compositor.S) unmodified -- the entry
+# stub is generic, it just calls compositor_main, and EDDE_COMPOSITOR_ELF
+# links in compositor_edde.mko's own definition of that symbol.
+$(EDDE_COMPOSITOR_ELF): $(BUILD)/compositor_entry.o $(BUILD)/compositor_edde_mko.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) \
+		$(BUILD)/compositor_entry.o $(BUILD)/compositor_edde_mko.o -o $@
 	$(STRIP) -s $@
 
 $(BUILD)/window_client_entry.o: user/window_client.S | $(BUILD)
@@ -500,6 +548,72 @@ $(EDE_CALC_ELF): $(BUILD)/ede_calc_entry.o $(BUILD)/ede_calc_main.o $(BUILD)/ede
 		$(BUILD)/libm_freestanding.o $(BUILD)/graphics_user.o $(BUILD)/cxx_runtime.o -o $@
 	$(STRIP) -s $@
 
+$(BUILD)/ede_about_entry.o: apps/ede_about/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/ede_about_main.o: apps/ede_about/main.c include/demon/c_app.h include/demon/window.h include/demon/graphics.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(EDE_ABOUT_ELF): $(BUILD)/ede_about_entry.o $(BUILD)/ede_about_main.o $(BUILD)/graphics_user.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) --gc-sections \
+		$(BUILD)/ede_about_entry.o $(BUILD)/ede_about_main.o $(BUILD)/graphics_user.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/ede_tip_entry.o: apps/ede_tip/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/ede_tip_main.o: apps/ede_tip/main.c include/demon/c_app.h include/demon/window.h include/demon/graphics.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(EDE_TIP_ELF): $(BUILD)/ede_tip_entry.o $(BUILD)/ede_tip_main.o $(BUILD)/graphics_user.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) --gc-sections \
+		$(BUILD)/ede_tip_entry.o $(BUILD)/ede_tip_main.o $(BUILD)/graphics_user.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/ede_preferred_entry.o: apps/ede_preferred/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/ede_preferred_main.o: apps/ede_preferred/main.c include/demon/c_app.h include/demon/window.h include/demon/graphics.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(EDE_PREFERRED_ELF): $(BUILD)/ede_preferred_entry.o $(BUILD)/ede_preferred_main.o $(BUILD)/graphics_user.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) --gc-sections \
+		$(BUILD)/ede_preferred_entry.o $(BUILD)/ede_preferred_main.o $(BUILD)/graphics_user.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/ede_conf_entry.o: apps/ede_conf/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/ede_conf_main.o: apps/ede_conf/main.c include/demon/c_app.h include/demon/window.h include/demon/graphics.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(EDE_CONF_ELF): $(BUILD)/ede_conf_entry.o $(BUILD)/ede_conf_main.o $(BUILD)/graphics_user.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) --gc-sections \
+		$(BUILD)/ede_conf_entry.o $(BUILD)/ede_conf_main.o $(BUILD)/graphics_user.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/ede_autostart_entry.o: apps/ede_autostart/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/ede_autostart_main.o: apps/ede_autostart/main.c include/demon/c_app.h include/demon/window.h include/demon/graphics.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(EDE_AUTOSTART_ELF): $(BUILD)/ede_autostart_entry.o $(BUILD)/ede_autostart_main.o $(BUILD)/graphics_user.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) --gc-sections \
+		$(BUILD)/ede_autostart_entry.o $(BUILD)/ede_autostart_main.o $(BUILD)/graphics_user.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/ede_timedate_entry.o: apps/ede_timedate/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/ede_timedate_main.o: apps/ede_timedate/main.c include/demon/c_app.h include/demon/window.h include/demon/graphics.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(EDE_TIMEDATE_ELF): $(BUILD)/ede_timedate_entry.o $(BUILD)/ede_timedate_main.o $(BUILD)/graphics_user.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) --gc-sections \
+		$(BUILD)/ede_timedate_entry.o $(BUILD)/ede_timedate_main.o $(BUILD)/graphics_user.o -o $@
+	$(STRIP) -s $@
+
 $(BUILD)/terminal_client_entry.o: user/terminal_client.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
@@ -559,7 +673,7 @@ $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) &: tools/package-mako-source.sh FORCE | 
 
 iso: $(ISO) iso-check
 
-$(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(DEMONX_ELF) $(DEMONX_CLIENT_ELF) $(TETRIS_ELF) $(CALCULATOR_ELF) $(TERMINAL_CLIENT_ELF) $(COUNTER_CLIENT_ELF) $(BROWSER_CLIENT_ELF) $(CXX_HELLO_ELF) $(EDE_CALC_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/desktop-iso-roadmap.md docs/init-system.md docs/apps-and-git.md docs/c-apps.md docs/freedoom-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/compositor-stage6.md docs/demonx.md docs/network-stage7.md grub/grub-test.cfg
+$(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(EDDE_COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(DEMONX_ELF) $(DEMONX_CLIENT_ELF) $(TETRIS_ELF) $(CALCULATOR_ELF) $(TERMINAL_CLIENT_ELF) $(COUNTER_CLIENT_ELF) $(BROWSER_CLIENT_ELF) $(CXX_HELLO_ELF) $(EDE_CALC_ELF) $(EDE_ABOUT_ELF) $(EDE_TIP_ELF) $(EDE_PREFERRED_ELF) $(EDE_CONF_ELF) $(EDE_AUTOSTART_ELF) $(EDE_TIMEDATE_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/desktop-iso-roadmap.md docs/init-system.md docs/apps-and-git.md docs/c-apps.md docs/freedoom-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/compositor-stage6.md docs/demonx.md docs/network-stage7.md grub/grub-test.cfg
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/grub $(ISO_ROOT)/boot/mako $(ISO_ROOT)/system/mako $(ISO_ROOT)/docs
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
@@ -567,6 +681,7 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDO
 	cp projects/hello/main.mko $(ISO_ROOT)/boot/mako/hello.mko
 	cp $(PORTABLE_ELF) $(ISO_ROOT)/boot/mako/hello.elf
 	cp $(COMPOSITOR_ELF) $(ISO_ROOT)/boot/mako/compositor.elf
+	cp $(EDDE_COMPOSITOR_ELF) $(ISO_ROOT)/boot/mako/compositor-edde.elf
 	cp $(WINDOW_CLIENT_ELF) $(ISO_ROOT)/boot/mako/window-client.elf
 	cp $(WINDOW_MOVE_CLIENT_ELF) $(ISO_ROOT)/boot/mako/window-move-client.elf
 	cp $(WINDOW_EVENT_CLIENT_ELF) $(ISO_ROOT)/boot/mako/window-event-client.elf
@@ -577,6 +692,12 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDO
 	cp $(CALCULATOR_ELF) $(ISO_ROOT)/boot/mako/calculator.elf
 	cp $(CXX_HELLO_ELF) $(ISO_ROOT)/boot/mako/cxx-hello.elf
 	cp $(EDE_CALC_ELF) $(ISO_ROOT)/boot/mako/ede-calc.elf
+	cp $(EDE_ABOUT_ELF) $(ISO_ROOT)/boot/mako/ede-about.elf
+	cp $(EDE_TIP_ELF) $(ISO_ROOT)/boot/mako/ede-tip.elf
+	cp $(EDE_PREFERRED_ELF) $(ISO_ROOT)/boot/mako/ede-preferred.elf
+	cp $(EDE_CONF_ELF) $(ISO_ROOT)/boot/mako/ede-conf.elf
+	cp $(EDE_AUTOSTART_ELF) $(ISO_ROOT)/boot/mako/ede-autostart.elf
+	cp $(EDE_TIMEDATE_ELF) $(ISO_ROOT)/boot/mako/ede-timedate.elf
 	cp $(TERMINAL_CLIENT_ELF) $(ISO_ROOT)/boot/mako/terminal-client.elf
 	cp $(COUNTER_CLIENT_ELF) $(ISO_ROOT)/boot/mako/counter-client.elf
 	cp $(BROWSER_CLIENT_ELF) $(ISO_ROOT)/boot/mako/browser-client.elf
@@ -629,6 +750,7 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/mako/hello.mko -type f 2>/dev/null | grep -q hello.mko
 	@xorriso -indev $(ISO) -find /boot/mako/hello.elf -type f 2>/dev/null | grep -q hello.elf
 	@xorriso -indev $(ISO) -find /boot/mako/compositor.elf -type f 2>/dev/null | grep -q compositor.elf
+	@xorriso -indev $(ISO) -find /boot/mako/compositor-edde.elf -type f 2>/dev/null | grep -q compositor-edde.elf
 	@xorriso -indev $(ISO) -find /boot/mako/window-client.elf -type f 2>/dev/null | grep -q window-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/window-move-client.elf -type f 2>/dev/null | grep -q window-move-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/window-event-client.elf -type f 2>/dev/null | grep -q window-event-client.elf
@@ -640,6 +762,12 @@ iso-check: $(ISO)
 	@test $$(wc -c < $(CALCULATOR_ELF)) -le 49152
 	@test $$(wc -c < $(CXX_HELLO_ELF)) -le 16384
 	@test $$(wc -c < $(EDE_CALC_ELF)) -le 32768
+	@test $$(wc -c < $(EDE_ABOUT_ELF)) -le 16384
+	@test $$(wc -c < $(EDE_TIP_ELF)) -le 16384
+	@test $$(wc -c < $(EDE_PREFERRED_ELF)) -le 16384
+	@test $$(wc -c < $(EDE_CONF_ELF)) -le 16384
+	@test $$(wc -c < $(EDE_AUTOSTART_ELF)) -le 16384
+	@test $$(wc -c < $(EDE_TIMEDATE_ELF)) -le 16384
 	@xorriso -indev $(ISO) -find /boot/mako/terminal-client.elf -type f 2>/dev/null | grep -q terminal-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/counter-client.elf -type f 2>/dev/null | grep -q counter-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/browser-client.elf -type f 2>/dev/null | grep -q browser-client.elf
@@ -664,7 +792,8 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /docs/demonx.md -type f 2>/dev/null | grep -q demonx.md
 	@test $$(wc -c < user/sdk.mko) -le 8192
 	@test $$(wc -c < $(PORTABLE_ELF)) -le 8192
-	@test $$(wc -c < $(COMPOSITOR_ELF)) -le 147456
+	@test $$(wc -c < $(COMPOSITOR_ELF)) -le 163840
+	@test $$(wc -c < $(EDDE_COMPOSITOR_ELF)) -le 163840
 	@test $$(wc -c < $(WINDOW_CLIENT_ELF)) -le 12288
 	@test $$(wc -c < $(WINDOW_MOVE_CLIENT_ELF)) -le 8192
 	@test $$(wc -c < $(WINDOW_EVENT_CLIENT_ELF)) -le 12288
@@ -682,6 +811,8 @@ iso-check: $(ISO)
 	@grep -Eq '^origin=https://github.com/AnimatedGTVR/MAKO([.]git)?$$' $(MAKO_MANIFEST)
 	@grep -q '^archive_sha256=' $(MAKO_MANIFEST)
 	@echo "MAKO ISO contents verified"
+
+qemu: run
 
 run: $(RUN_ISO)
 	@echo "Mouse: using the reliable XWayland QEMU backend; Ctrl+Alt+G releases it"
@@ -773,11 +904,11 @@ smoke: $(ISO)
 	@grep -q "MKO system environment:" $(BUILD)/serial.log
 	@grep -q "repository: AnimatedGTVR/MAKO" $(BUILD)/serial.log
 	@grep -q "ISO source: /system/mako/MAKO-source.tar.zst" $(BUILD)/serial.log
-	@grep -q "ISO-provided assets: 19" $(BUILD)/serial.log
-	@grep -q "files: 20" $(BUILD)/serial.log
+	@grep -q "ISO-provided assets: 25" $(BUILD)/serial.log
+	@grep -q "files: 26" $(BUILD)/serial.log
 	@grep -q "USERSPACE_SYSCALLS_OK" $(BUILD)/serial.log
 	@grep -q "ELF64_MKO_LOAD_OK" $(BUILD)/serial.log
-	@grep -q "USERSPACE_CODE_POOLS_OK pages=92 max=36 heap=0x324000" $(BUILD)/serial.log
+	@grep -q "USERSPACE_CODE_POOLS_OK pages=96 max=40 heap=0x328000" $(BUILD)/serial.log
 	@grep -q "PROCESS_ISOLATION_OK" $(BUILD)/serial.log
 	@grep -q "DYNAMIC_SPAWN_OK pid=3 status=0" $(BUILD)/serial.log
 	@grep -q "PROCESS_WAIT_CLEANUP_OK" $(BUILD)/serial.log
@@ -1109,11 +1240,12 @@ vfs-smoke: $(ISO)
 	@grep -q "  mako/" $(BUILD)/vfs.log
 	@echo "Kernel VFS path/directory-listing smoke test passed"
 
-mako-check: $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(BROWSER_CLIENT_ELF)
+mako-check: $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(EDDE_COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(BROWSER_CLIENT_ELF)
 	dotnet run --project ../MAKO/src/Mako -- check mako/kernel_probe.mko --kernel
 	dotnet run --project ../MAKO/src/Mako -- check mako/abi_probe.mko --kernel
 	dotnet run --project ../MAKO/src/Mako -- check user/init.mko --kernel
 	dotnet run --project ../MAKO/src/Mako -- check user/compositor.mko --kernel
+	dotnet run --project ../MAKO/src/Mako -- check user/compositor_edde.mko --kernel
 	dotnet run --project ../MAKO/src/Mako -- check user/window_client.mko --kernel
 	dotnet run --project ../MAKO/src/Mako -- check user/window_move_client.mko --kernel
 	dotnet run --project ../MAKO/src/Mako -- check user/window_event_client.mko --kernel

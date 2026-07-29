@@ -6,20 +6,45 @@
 #include <stddef.h>
 #include <kernel/scheduler.h>
 
-/* The virtual executable window is 144 KiB, ending at the fixed 0x324000
-   heap. It was raised from 136 KiB / 0x322000 for the native session
-   loading, credential gate, and lock screen; earlier stages used 120 KiB /
-   0x31E000 and 96 KiB / 0x318000. Every
-   hardcoded heap-scratch literal elsewhere (window_client.mko,
-   window_move_client.mko, window_event_client.mko,
-   window_crash_client.mko, terminal_client.mko, demonx_client.mko,
-   init.mko, demonx_server.c, apps/tetris/main.c, and kernel.c's own
-   boot-log line) had to move with it, since they all assume a fixed
-   literal address rather than deriving it from this value. Physical frames
-   are allocated per scheduler slot rather than at this maximum for every
-   process: bootstrap tasks get 16 KiB, the persistent system slot gets the
-   full window, and ordinary application slots get 48 KiB. */
-#define USERSPACE_CODE_PAGES 36u
+/* The virtual executable window is 160 KiB, ending at the fixed 0x328000
+   heap (raised from 144 KiB / 0x324000 for the EDE port's ede-conf 4th
+   launcher slot, Wave 9 -- two earlier same-day attempts at this exact
+   raise both broke boot in different ways because the dependent list below
+   was incomplete; this list was rebuilt from a full-tree scan, not the
+   earlier ad hoc greps, and is believed complete as of Wave 9). Earlier
+   stages: 136 KiB / 0x322000 (native session loading/credential gate/lock
+   screen), 120 KiB / 0x31E000, 96 KiB / 0x318000.
+
+   Every one of the following hardcodes an absolute address derived from
+   this heap base instead of deriving it live, and ALL of them must move by
+   the same delta whenever this constant changes:
+     +0      packet_address / isolation / incoming / EVENT_ADDRESS:
+             window_client.mko, window_move_client.mko,
+             window_event_client.mko, window_crash_client.mko,
+             terminal_client.mko, demonx_client.mko, browser_client.mko,
+             counter_client.mko (all: `packet_address: u64 = <heap>;`),
+             init.mko (`isolation`), demonx_server.c (`incoming`),
+             apps/tetris/main.c (`EVENT_ADDRESS`)
+     +0x40   request_address (compositor.mko), outgoing (demonx_server.c)
+     +0x80   pixel_address (compositor.mko), windows (demonx_server.c)
+     +0x100  file_buffer (init.mko), BOARD (apps/tetris/main.c)
+     +0x400  OUTPUT (apps/tetris/main.c)
+     +0x4100 table_ptr() in compositor.mko (the live window table)
+     +0x4380 EFFECT_REQUEST_BASE in compositor.mko (2 call sites + 2
+             comments referencing the literal value)
+     +0x43D0 spawn_path_ptr() in compositor.mko (2 call sites + 1 comment)
+   kernel.c's own boot-log line ("heap=0x...") also hardcodes it, for
+   humans reading the serial log, not for correctness.
+   To verify this list is still complete before the next raise: grep the
+   whole tree (not just these files) for both the hex prefix (0x32 followed
+   by a byte in the current heap-to-heap+0x5000 range) and the decimal
+   equivalent of every offset above -- a plain grep for the single old
+   literal is not enough, since several of these are heap+non-zero-offset
+   values that look unrelated at a glance. Physical frames are allocated
+   per scheduler slot rather than at this maximum for every process:
+   bootstrap tasks get 16 KiB, the persistent system slot gets the full
+   window, and ordinary application slots get 48 KiB. */
+#define USERSPACE_CODE_PAGES 40u
 #define USERSPACE_HEAP_PAGES 5u
 /* The dynamic window-table compositor's call chain (compositor_main ->
    render_scene -> draw_rect/draw_cursor/draw_glyph) needs more stack than

@@ -1,4 +1,5 @@
 #include <kernel/multiboot2.h>
+#include <kernel/acpi.h>
 #include <kernel/ahci.h>
 #include <kernel/capability.h>
 #include <kernel/apps.h>
@@ -597,6 +598,14 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write_hex(read_cr3());
     serial_write("\nMKO_VIRTUAL_MEMORY_OK\n");
     boot_status("Virtual memory", "MKO 4 KiB tables active, 1 GiB mapped");
+    /* Real ACPI table walk (RSDP -> RSDT/XSDT -> FADT -> DSDT/SSDT byte scan
+       for the PNP0C0A Control Method Battery ID) -- needs the 1 GiB identity
+       map active since firmware tables can live well past the first 4 MiB. */
+    (void)acpi_init();
+    boot_status("ACPI", acpi_present() ?
+        (acpi_battery_present() ? "tables parsed, battery device declared" :
+                                   "tables parsed, no battery device declared") :
+        "not present");
     if (framebuffer_backbuffer_bytes() != 0u) {
         if (framebuffer_pd == 0u || backbuffer_address == 0u ||
             backbuffer_address + backbuffer_capacity > 0x40000000u ||
@@ -962,7 +971,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write("PCI_AHCI_UNAVAILABLE\n");
         boot_status("AHCI", "no SATA/AHCI controller exposed");
     }
-    if (install_multiboot_projects(multiboot_info) != 19u)
+    if (install_multiboot_projects(multiboot_info) != 25u)
         boot_fatal("MKO repository/SDK/starter modules are missing from the ISO");
     serial_write("MKO_SYSTEM_PREINSTALLED\n");
     boot_status("MKO system", "MAKO manifest + SDK + starter installed from ISO");
@@ -992,12 +1001,12 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             boot_fatal("Dynamic process frame-pool allocation failed");
         code_page_total += code_pages;
     }
-    if (code_page_total != 92u)
+    if (code_page_total != 96u)
         boot_fatal("Userspace executable pool budget changed unexpectedly");
     serial_write("USERSPACE_CODE_POOLS_OK pages=");
     serial_write_u64(code_page_total);
     serial_write(" max="); serial_write_u64(USERSPACE_CODE_PAGES);
-    serial_write(" heap=0x324000\n");
+    serial_write(" heap=0x328000\n");
     size_t surface_capacity = 0u;
     const uint64_t surface_arena = allocate_contiguous(SURFACE_ARENA_BYTES,
                                                         &surface_capacity);
