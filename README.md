@@ -4,7 +4,7 @@ An x86_64 freestanding kernel and portable project runtime. Applications
 target MAKO-ABI instead of Windows or Linux APIs, and kernel/user components
 can be compiled from native MKO as the MAKO compiler matures.
 
-**Issues!**: If you find any issues I would love it if you could please report it, if you wamnt to fix them look at - [Contributing](#Contributing)
+**Issues!**: If you find any issues I would love it if you could please report it, if you want to fix them look at - [Contributing](#Contributing)
 
 ## Table of contents
 
