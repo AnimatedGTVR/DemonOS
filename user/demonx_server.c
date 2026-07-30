@@ -54,6 +54,14 @@
 #define DEMONX_FALLBACK_SURFACE UINT32_MAX
 #define DEMONX_FALLBACK_WIDTH 56u
 #define DEMONX_FALLBACK_HEIGHT 56u
+/* Mirrors the kernel's own SURFACE_MAX_WIDTH/SURFACE_MAX_HEIGHT
+   (include/kernel/surface.h) -- the real cap on a window's live pixel
+   surface enforced by surface_create() in ring 0. Kept as a duplicated
+   constant across the syscall boundary rather than a shared header,
+   matching this codebase's existing convention for other kernel/userspace
+   ABI constants. */
+#define DEMONX_WINDOW_MAX_WIDTH 640u
+#define DEMONX_WINDOW_MAX_HEIGHT 480u
 
 static uint64_t syscall1(uint64_t number, uint64_t first) {
     register uint64_t rax __asm__("rax") = number;
@@ -283,9 +291,9 @@ static int create_window_surface(struct demonx_window *window) {
         return 1;
     }
     const uint32_t surface_width =
-        window->width > 256u ? 256u : window->width;
+        window->width > DEMONX_WINDOW_MAX_WIDTH ? DEMONX_WINDOW_MAX_WIDTH : window->width;
     const uint32_t surface_height =
-        window->height > 64u ? 64u : window->height;
+        window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height;
     const uint64_t surface = syscall3(SYSCALL_SURFACE_CREATE,
         surface_factory_handle, surface_width, surface_height);
     if (surface == SYSCALL_FAILURE || surface > UINT32_MAX) {
@@ -318,26 +326,80 @@ static int publish_window(struct demonx_window *window) {
     if (!create_window_surface(window) || !ensure_desktop_handles()) return 0;
     if (window->surface_handle == DEMONX_FALLBACK_SURFACE) return 0;
     const uint32_t surface_width =
-        window->width > 256u ? 256u : window->width;
+        window->width > DEMONX_WINDOW_MAX_WIDTH ? DEMONX_WINDOW_MAX_WIDTH : window->width;
     const uint32_t surface_height =
-        window->height > 64u ? 64u : window->height;
+        window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height;
     if (window->compositor_surface == 0u) {
         const uint64_t shared = syscall2(SYSCALL_SURFACE_SHARE,
             window->surface_handle, compositor_handle);
         if (shared == SYSCALL_FAILURE || shared > UINT32_MAX) return 0;
         window->compositor_surface = (uint32_t)shared;
     }
+    int32_t desktop_x = window->x;
+    int32_t desktop_y = window->y;
+    uint32_t parent = window->parent;
+    /*
+     * X child coordinates are relative to their parent, while the native
+     * compositor protocol uses desktop coordinates.  Walk the bounded
+     * DemonX hierarchy so reparented PekWM clients stay inside their frames.
+     */
+    for (uint32_t depth = 0u;
+         parent != DEMONX_ROOT_WINDOW && depth < 16u; ++depth) {
+        struct demonx_window *ancestor = find_window(parent);
+        if (ancestor == NULL) break;
+        desktop_x += ancestor->x;
+        desktop_y += ancestor->y;
+        parent = ancestor->parent;
+    }
     struct demon_window_message message = {
         .version = DEMON_WINDOW_PROTOCOL_VERSION,
         .opcode = DEMON_WINDOW_CREATE,
         .serial = ++compositor_serial,
         .window_id = window->id,
-        .x = window->x, .y = window->y,
+        .x = desktop_x, .y = desktop_y,
         .width = surface_width, .height = surface_height,
         .surface_id = window->compositor_surface,
     };
     return syscall3(SYSCALL_CHANNEL_SEND, compositor_handle,
         (uint64_t)(uintptr_t)&message, sizeof(message)) == sizeof(message);
+}
+
+static void move_published_window(struct demonx_window *window) {
+    if (window->mapped == 0u || window->compositor_surface == 0u ||
+        !ensure_desktop_handles())
+        return;
+    int32_t desktop_x = window->x;
+    int32_t desktop_y = window->y;
+    uint32_t parent = window->parent;
+    for (uint32_t depth = 0u;
+         parent != DEMONX_ROOT_WINDOW && depth < 16u; ++depth) {
+        struct demonx_window *ancestor = find_window(parent);
+        if (ancestor == NULL) break;
+        desktop_x += ancestor->x;
+        desktop_y += ancestor->y;
+        parent = ancestor->parent;
+    }
+    struct demon_window_message message = {
+        .version = DEMON_WINDOW_PROTOCOL_VERSION,
+        .opcode = DEMON_WINDOW_MOVE,
+        .serial = ++compositor_serial,
+        .window_id = window->id,
+        .x = desktop_x,
+        .y = desktop_y,
+        .width = window->width > DEMONX_WINDOW_MAX_WIDTH ? DEMONX_WINDOW_MAX_WIDTH : window->width,
+        .height = window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height,
+    };
+    (void)syscall3(SYSCALL_CHANNEL_SEND, compositor_handle,
+        (uint64_t)(uintptr_t)&message, sizeof(message));
+}
+
+static void move_published_descendants(uint32_t parent) {
+    for (size_t index = 0u; index < 16u; ++index) {
+        if (windows[index].used == 0u || windows[index].parent != parent)
+            continue;
+        move_published_window(&windows[index]);
+        move_published_descendants(windows[index].id);
+    }
 }
 
 static void close_published_window(struct demonx_window *window) {
@@ -371,12 +433,12 @@ static int fill_rectangle(struct demonx_window *window,
         window->surface_handle == DEMONX_FALLBACK_SURFACE ?
         (window->width > DEMONX_FALLBACK_WIDTH ?
          DEMONX_FALLBACK_WIDTH : window->width) :
-        (window->width > 256u ? 256u : window->width);
+        (window->width > DEMONX_WINDOW_MAX_WIDTH ? DEMONX_WINDOW_MAX_WIDTH : window->width);
     const uint32_t surface_height =
         window->surface_handle == DEMONX_FALLBACK_SURFACE ?
         (window->height > DEMONX_FALLBACK_HEIGHT ?
          DEMONX_FALLBACK_HEIGHT : window->height) :
-        (window->height > 64u ? 64u : window->height);
+        (window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height);
     if (right > (int32_t)surface_width) right = (int32_t)surface_width;
     if (bottom > (int32_t)surface_height) bottom = (int32_t)surface_height;
     if (left >= right || top >= bottom) return 1;
@@ -453,8 +515,8 @@ static int put_image(uint32_t drawable_id, int16_t x, int16_t y,
             window->surface_handle == DEMONX_FALLBACK_SURFACE)
             return -1;
         surface = window->surface_handle;
-        stride = window->width > 256u ? 256u : window->width;
-        drawable_height = window->height > 64u ? 64u : window->height;
+        stride = window->width > DEMONX_WINDOW_MAX_WIDTH ? DEMONX_WINDOW_MAX_WIDTH : window->width;
+        drawable_height = window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height;
     } else {
         return -4;
     }
@@ -506,8 +568,8 @@ static int drawable_surface(uint32_t drawable_id, uint32_t *surface,
         window->surface_handle == DEMONX_FALLBACK_SURFACE)
         return 0;
     *surface = window->surface_handle;
-    *width = window->width > 256u ? 256u : window->width;
-    *height = window->height > 64u ? 64u : window->height;
+    *width = window->width > DEMONX_WINDOW_MAX_WIDTH ? DEMONX_WINDOW_MAX_WIDTH : window->width;
+    *height = window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height;
     *window_out = window;
     return 1;
 }
@@ -608,14 +670,14 @@ static int clear_background(struct demonx_window *window,
     const uint64_t mapped =
         syscall1(SYSCALL_SURFACE_MAP, background->surface_handle);
     if (mapped == SYSCALL_FAILURE) return -2;
-    const uint32_t stride = window->width > 256u ? 256u : window->width;
+    const uint32_t stride = window->width > DEMONX_WINDOW_MAX_WIDTH ? DEMONX_WINDOW_MAX_WIDTH : window->width;
     int32_t left = x < 0 ? 0 : x;
     int32_t top = y < 0 ? 0 : y;
     int32_t right = (int32_t)x + clear_width;
     int32_t bottom = (int32_t)y + clear_height;
     if (right > (int32_t)stride) right = stride;
-    if (bottom > (int32_t)(window->height > 64u ? 64u : window->height))
-        bottom = window->height > 64u ? 64u : window->height;
+    if (bottom > (int32_t)(window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height))
+        bottom = window->height > DEMONX_WINDOW_MAX_HEIGHT ? DEMONX_WINDOW_MAX_HEIGHT : window->height;
     if (left >= right || top >= bottom) {
         (void)syscall1(SYSCALL_SURFACE_UNMAP, background->surface_handle);
         return 1;
@@ -1486,7 +1548,7 @@ static int parse_request(const char *reply_name) {
         const uint16_t height = read16(&incoming.payload[14]);
         const uint8_t depth = incoming.payload[1];
         if ((drawable != DEMONX_ROOT_WINDOW && !valid_drawable(drawable)) ||
-            width == 0u || height == 0u || width > 256u || height > 64u ||
+            width == 0u || height == 0u || width > DEMONX_WINDOW_MAX_WIDTH || height > DEMONX_WINDOW_MAX_HEIGHT ||
             (depth != 1u && depth != 24u && depth != 32u)) {
             protocol_error(2u, opcode, id);
             return 1;
@@ -1921,6 +1983,8 @@ static int parse_request(const char *reply_name) {
             return 1;
         }
         apply_configure(window, mask);
+        move_published_window(window);
+        move_published_descendants(window->id);
         if ((window->event_mask & DEMONX_STRUCTURE_NOTIFY_MASK) != 0u) {
             configure_notify(window);
             return 1;
@@ -1948,6 +2012,8 @@ static int parse_request(const char *reply_name) {
         window->parent = parent;
         window->x = (int16_t)read16(&incoming.payload[12]);
         window->y = (int16_t)read16(&incoming.payload[14]);
+        move_published_window(window);
+        move_published_descendants(window->id);
         if ((window->event_mask & DEMONX_STRUCTURE_NOTIFY_MASK) != 0u) {
             reparent_notify(window);
             return 1;

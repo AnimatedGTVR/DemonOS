@@ -85,5 +85,6 @@ uint64_t userspace_exit_code(void);
 uint64_t userspace_yield_count(void);
 void userspace_set_kernel_stack(uintptr_t stack_top);
 void userspace_set_boot_test_mode(bool test_mode);
+void userspace_set_demonwm_mode(bool enabled);
 
 #endif

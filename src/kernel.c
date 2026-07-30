@@ -459,6 +459,10 @@ static bool multiboot_cli_mode(uintptr_t info_address) {
     return multiboot_cmdline_has(info_address, "cli");
 }
 
+static bool multiboot_demonwm_mode(uintptr_t info_address) {
+    return multiboot_cmdline_has(info_address, "demonwm");
+}
+
 static uint64_t report_multiboot(uintptr_t info_address, uintptr_t allocation_floor) {
     const struct multiboot2_info *info = (const struct multiboot2_info *)info_address;
     serial_write("multiboot info: ");
@@ -538,6 +542,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     boot_status("Boot protocol", "Multiboot2 validated");
     const bool test_mode = multiboot_test_mode(multiboot_info);
     userspace_set_boot_test_mode(test_mode);
+    userspace_set_demonwm_mode(multiboot_demonwm_mode(multiboot_info));
     const bool cli_mode = multiboot_cli_mode(multiboot_info);
 
     const struct multiboot2_info *boot_info =
@@ -971,7 +976,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write("PCI_AHCI_UNAVAILABLE\n");
         boot_status("AHCI", "no SATA/AHCI controller exposed");
     }
-    if (install_multiboot_projects(multiboot_info) != 25u)
+    if (install_multiboot_projects(multiboot_info) != 19u)
         boot_fatal("MKO repository/SDK/starter modules are missing from the ISO");
     serial_write("MKO_SYSTEM_PREINSTALLED\n");
     boot_status("MKO system", "MAKO manifest + SDK + starter installed from ISO");
@@ -1123,6 +1128,51 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         if (compositor_pid == 0u)
             boot_fatal("Ring-3 compositor launch failed");
         (void)userspace_run_init();
+        /* Interactive sessions run the native DemonX service as an ordinary
+           ring-3 process. Starting it only after the compositor has
+           registered its channel gives DemonX a live presentation target. */
+        const uint32_t demonx_pid = userspace_spawn_path(0u,
+            "/system/bin/demonx.elf", 22u, "demonx",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+        if (demonx_pid == 0u)
+            boot_fatal("Interactive DemonX server launch failed");
+        (void)userspace_run_init();
+        struct scheduler_task_snapshot demonx_interactive_state;
+        if (!scheduler_snapshot(demonx_pid, &demonx_interactive_state) ||
+            demonx_interactive_state.state != SCHEDULER_TASK_BLOCKED) {
+            serial_write("DEMONX_INTERACTIVE_FAILED state=");
+            serial_write(scheduler_state_name(demonx_interactive_state.state));
+            serial_write(" exit=");
+            serial_write_u64(demonx_interactive_state.exit_code);
+            serial_write("\n");
+            boot_fatal("Interactive DemonX server did not become ready");
+        }
+        const uint32_t demonwm_pid = userspace_spawn_path(0u,
+            "/system/bin/demonwm.elf", 23u, "demonwm",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC));
+        if (demonwm_pid == 0u)
+            boot_fatal("Interactive DemonWM launch failed");
+        (void)userspace_run_init();
+        struct scheduler_task_snapshot demonwm_state;
+        if (!scheduler_snapshot(demonwm_pid, &demonwm_state))
+            boot_fatal("DemonWM process disappeared during startup");
+        if (demonwm_state.state != SCHEDULER_TASK_BLOCKED) {
+            (void)scheduler_snapshot(demonx_pid, &demonx_interactive_state);
+            serial_write("DEMONWM_STARTUP_FAILED state=");
+            serial_write(scheduler_state_name(demonwm_state.state));
+            serial_write(" exit=");
+            serial_write_u64(demonwm_state.exit_code);
+            serial_write(" demonx_state=");
+            serial_write(scheduler_state_name(demonx_interactive_state.state));
+            serial_write(" demonx_exit=");
+            serial_write_u64(demonx_interactive_state.exit_code);
+            serial_write("\n");
+            boot_fatal("DemonWM did not claim DemonX and enter its event loop");
+        }
+        serial_write("DEMONWM_SESSION_READY pid=");
+        serial_write_u64(demonwm_pid);
+        serial_write(" display=:2 wm=click-focus,raise,drag\n");
         desktop_session_loop(compositor_pid);
     }
     if (framebuffer_available() && test_mode) {

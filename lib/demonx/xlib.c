@@ -136,15 +136,25 @@ static int send_packet(Display *display) {
 }
 
 static int receive_packet(Display *display, int nonblocking) {
+    /*
+     * Mutable C statics live in the executable image with today's compact
+     * one-segment loader. IPC correctly refuses to write into that range.
+     * Receive into the process heap, then copy into Xlib's Display object.
+     */
+    struct demonx_transport *receive_wire =
+        (struct demonx_transport *)(uintptr_t)0x334f00u;
     uint16_t total = 0u;
     uint16_t flags = 0u;
     uint32_t client_id = 0u;
     uint32_t sequence = 0u;
     do {
-        if (demon_channel_receive(display->replies, &display->wire,
-                                  sizeof(display->wire),
+        if (demon_channel_receive(display->replies, receive_wire,
+                                  sizeof(*receive_wire),
                                   (uint64_t)nonblocking) !=
-            sizeof(display->wire) ||
+            sizeof(*receive_wire))
+            return 0;
+        display->wire = *receive_wire;
+        if (
             display->wire.magic != DEMONX_TRANSPORT_MAGIC ||
             display->wire.payload_length > DEMONX_PAYLOAD_BYTES ||
             (uint32_t)total + display->wire.payload_length >

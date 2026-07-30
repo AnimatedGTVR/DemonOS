@@ -1,6 +1,6 @@
 #include <kernel/ramfs.h>
 
-#define RAMFS_FILES 26u
+#define RAMFS_FILES 28u
 #define RAMFS_NAME_MAX 63u
 /* Raised from 96 KiB to 128 KiB to fit the compositor executable after its
    loading/login screens and taskbar text grew it past the old cap, then to
@@ -15,11 +15,11 @@
 #define RAMFS_DATA_MAX 196608u
 /* The seeded binaries, native document browser, graphical C apps, and the
    compact DemonX compatibility service now sit just above the original
-   384 KiB bound. Three additional pages keep the arena tightly bounded while
-   accommodating DemonX's implemented Xlib surface; large game data still
-   belongs in a streamed read-only boot filesystem rather than permanent
+   384 KiB bound. Nine additional pages keep the arena tightly bounded while
+   accommodating DemonX and the 22 KiB native PekWM bootstrap; large game data
+   still belongs in a streamed read-only boot filesystem rather than permanent
    kernel BSS. */
-#define RAMFS_STORAGE_MAX 405504u
+#define RAMFS_STORAGE_MAX 430080u
 
 struct ramfs_file {
     bool used;
@@ -189,7 +189,7 @@ bool ramfs_view(uint32_t object_id, const uint8_t **data, size_t *length) {
 bool ramfs_self_test(void) {
     static const char expected_name[] = "project.mko";
     static const uint8_t expected_data[] = "PORTABLE-PROJECT";
-    if (ramfs_file_count() != seeded_count + 1u || seeded_count != 25u ||
+    if (ramfs_file_count() != seeded_count + 1u || seeded_count != 19u ||
         ramfs_bytes_used() <= 16u || read_count != 1u || write_count != 1u)
         return false;
     uint32_t object_id;

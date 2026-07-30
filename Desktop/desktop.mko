@@ -322,12 +322,12 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
         if scan_byte == 0 { length_scan_done = 1; }
         else { search_length = length_scan + 1; length_scan = length_scan + 1; }
     }
-    # Vista-like Start surface with macOS-like spacing. The six application
+    # Vista-like Start surface with macOS-like spacing. The four application
     # rows deliberately use the compositor's exact 38-pixel input bands:
-    # 238..275, 276..313, 314..351, 352..389, 390..427 and 428..465.
-    if draw_shadow(display, pack_words(8, 190), pack_words(226, 314),
+    # 238..275, 276..313, 314..351 and 352..389.
+    if draw_shadow(display, pack_words(8, 190), pack_words(226, 238),
                    7, 14, color_shadow()) != 0 { return 91; }
-    if draw_rounded_border(display, pack_words(8, 190), pack_words(226, 314),
+    if draw_rounded_border(display, pack_words(8, 190), pack_words(226, 238),
                            pack_words(7, 1), pack_words(accent_border_bright(theme),
                            Desktop.desktop_color_panel()), 0) != 0 { return 91; }
     if draw_gradient_v(display, pack_words(10, 192), pack_words(222, 40),
@@ -342,10 +342,10 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
 
     # Pale inner application sheet separates content from the translucent
     # outer glass without introducing another full-window surface.
-    if draw_rounded_rect(display, pack_words(16, 232), pack_words(210, 240),
+    if draw_rounded_rect(display, pack_words(16, 232), pack_words(210, 164),
                          9, 3925276917, 0) != 0 { return 91; } # #E9F6F8F5
     row: u64 = 0;
-    while row < 6 {
+    while row < 4 {
         row_y: u64 = 238 + row * 38;
         fill: u64 = 4026531839; # #EFFFFFFF
         cx: u64 = unpack_cursor_x(cursor_packed);
@@ -369,16 +369,7 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
     if Desktop.desktop_draw_folder(display, request_address, pixel_address,
                            30, 284, Desktop.desktop_color_folder()) != 0 { return 91; }
     if draw_shell_icon(display, pack_words(30, 322), 2) != 0 { return 91; }
-    # ede-calc (Wave 1 of the EDE port): reuses the "settings" atlas icon --
-    # there is no dedicated calculator/science icon in the embedded Fluent
-    # atlas -- disambiguated from the actual Settings target (which stays at
-    # its own established taskbar hit target) by the "E" glyph below.
-    if draw_shell_icon(display, pack_words(30, 360), 4) != 0 { return 91; }
-    # ede-conf (Wave 5): the control panel that spawns the rest of the EDE
-    # apps. Reuses the "home" atlas icon (index 5) -- no dedicated
-    # control-panel icon exists -- disambiguated by the "O" glyph below.
-    if draw_shell_icon(display, pack_words(30, 398), 5) != 0 { return 91; }
-    if draw_shell_icon(display, pack_words(30, 436), 3) != 0 { return 91; }
+    if draw_shell_icon(display, pack_words(30, 360), 3) != 0 { return 91; }
 
     if draw_glyph(display, request_address, pixel_address,
                   pack_words(68, 251), glyph_t(), color_terminal_bg()) != 0 { return 108; }
@@ -387,22 +378,17 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
     if draw_glyph(display, request_address, pixel_address,
                   pack_words(68, 327), glyph_w(), color_terminal_bg()) != 0 { return 108; }
     if draw_glyph(display, request_address, pixel_address,
-                  pack_words(68, 365), glyph_e(), color_terminal_bg()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address,
-                  pack_words(68, 403), glyph_o(), color_terminal_bg()) != 0 { return 108; }
-    if draw_glyph(display, request_address, pixel_address,
-                  pack_words(68, 441), glyph_s(), color_terminal_bg()) != 0 { return 108; }
+                  pack_words(68, 365), glyph_s(), color_terminal_bg()) != 0 { return 108; }
 
-    # Search box (Wave 12 of the EDE port, native port of ede-panel
-    # StartMenu's search field): real keyboard capture now -- see
-    # compositor.mko's launcher_open==1 keydown branch for the typed-buffer
-    # logic and pow256's comment for the byte-packing scheme search_query
-    # uses. Matching is by first typed character against each row's
-    # mnemonic letter (Enter activates it), so this only draws the typed
-    # text back, not a filtered/highlighted row list -- see the keydown
-    # branch's comment for why full substring matching against row names
-    # is future work.
-    if draw_rounded_border(display, pack_words(20, 476), pack_words(146, 20),
+    # Search box: real keyboard capture -- see compositor.mko's
+    # launcher_open==1 keydown branch for the typed-buffer logic and
+    # pow256's comment for the byte-packing scheme search_query uses.
+    # Matching is by first typed character against each row's mnemonic
+    # letter (Enter activates it), so this only draws the typed text back,
+    # not a filtered/highlighted row list -- see the keydown branch's
+    # comment for why full substring matching against row names is future
+    # work.
+    if draw_rounded_border(display, pack_words(20, 400), pack_words(146, 20),
                            pack_words(6, 1),
                            pack_words(Desktop.desktop_color_panel_edge(),
                                       3238861600), 0) != 0 { return 91; } # #C10D1B20
@@ -411,11 +397,11 @@ fn desktop_draw_launcher(display: u64, request_address: u64,
         place: u64 = pow256(query_index);
         typed: u64 = (search_query / place) - (search_query / (place * 256)) * 256;
         if draw_glyph(display, request_address, pixel_address,
-                     pack_words(24 + query_index * 6, 483),
+                     pack_words(24 + query_index * 6, 407),
                      letter_glyph(typed), color_title_text()) != 0 { return 108; }
         query_index = query_index + 1;
     }
-    if draw_rounded_rect(display, pack_words(178, 476), pack_words(42, 20),
+    if draw_rounded_rect(display, pack_words(178, 400), pack_words(42, 20),
                          6, accent_fill(theme), 0) != 0 { return 91; }
     return 0;
 }

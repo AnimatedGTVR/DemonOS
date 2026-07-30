@@ -5,7 +5,15 @@
 #include <demon/input.h>
 
 #define IPC_CHANNEL_LIMIT 16u
-#define IPC_QUEUE_DEPTH 8u
+/* 8 was too tight for a real client doing several one-way Xlib calls back
+   to back before the receiving process (e.g. demonx_server) gets scheduled
+   to drain any of them -- a window-manager panel's own setup burst
+   (CreateWindow, SelectInput, CreateGC, several Fill/DrawString calls,
+   Raise, Map) alone is a dozen-plus messages with no reply/yield between
+   them, and ipc_send drops silently once the queue is full. 32 gives real
+   headroom for that without meaningfully growing the fixed channel table
+   (16 channels * 32 slots * ~72 bytes/message is still under 40 KiB). */
+#define IPC_QUEUE_DEPTH 32u
 
 struct ipc_message { uint32_t sender; uint8_t length; uint8_t data[IPC_MESSAGE_MAX]; };
 struct ipc_waiter { uint32_t pid; uint64_t address; size_t capacity; bool active, multiplex; };

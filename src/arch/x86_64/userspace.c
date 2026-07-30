@@ -27,6 +27,18 @@
 #define USER_STACK_SIZE (USERSPACE_STACK_PAGES * 4096u)
 #define USER_ADDRESS_END (USER_STACK_PAGE + USER_STACK_SIZE)
 #define USER_SURFACE_MAP 0x380000u
+/* 16 pages (64 KiB) matches the old 256x64 SURFACE_MAX_WIDTH/HEIGHT
+   ceiling (see include/kernel/surface.h). Raising SURFACE_MAX_WIDTH/HEIGHT
+   to 640x480 means a window wider than what 16 pages can hold (anything
+   over 256x64, e.g. a full-width panel) still gets a real surface and a
+   real compositor-side share, but map_surface_readonly's page_count check
+   here rejects mapping it into this process's own address space, so the
+   compositor falls back to a flat placeholder for it. Tried raising this
+   to fit larger windows (24, 32 pages) and got back a corrupted frame
+   both times -- something about this constant's relationship to the rest
+   of the process's single low page table isn't What the surrounding
+   comments assume, and needs real investigation, not another guess, before
+   moving it again. Left at the known-safe value pending that follow-up. */
 #define USER_SURFACE_MAP_PAGES 16u
 #define USER_SURFACE_MAP_SIZE (USER_SURFACE_MAP_PAGES * 4096u)
 /* Multiple simultaneous windows each need their own mapped client surface.
@@ -74,6 +86,7 @@ static uintptr_t kernel_address_space;
    where a human needs several real seconds to read the loading/login
    screens) -- see compositor.mko's boot_test_mode/deadline setup. */
 static bool boot_test_mode;
+static bool demonwm_mode;
 /* Display pixels originate in the caller's address space, while the physical
    framebuffer backbuffer is intentionally accessed through the kernel's
    identity map.  Never let framebuffer code dereference that low physical
@@ -109,6 +122,10 @@ void userspace_set_kernel_stack(uintptr_t stack_top) {
 
 void userspace_set_boot_test_mode(bool test_mode) {
     boot_test_mode = test_mode;
+}
+
+void userspace_set_demonwm_mode(bool enabled) {
+    demonwm_mode = enabled;
 }
 
 static bool any_surface_mapped(uint32_t pid) {
@@ -851,6 +868,10 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
            battery device carries no sensitive state. See acpi.c -- this is
            real table-walked presence, never a fabricated charge level. */
         frame->rax = acpi_battery_present() ? 1u : 0u;
+        return frame_address;
+    }
+    if (number == 38u) {
+        frame->rax = demonwm_mode ? 1u : 0u;
         return frame_address;
     }
     frame->rax = (uint64_t)-1;

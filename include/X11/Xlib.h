@@ -11,6 +11,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct _XDisplay Display;
 typedef uint32_t XID;
 typedef XID Window;
@@ -28,7 +32,11 @@ typedef int Bool;
 typedef int Status;
 typedef struct _XVisual {
     XID visualid;
+#ifdef __cplusplus
+    int c_class;
+#else
     int class;
+#endif
     unsigned long red_mask, green_mask, blue_mask;
     int bits_per_rgb;
     int map_entries;
@@ -36,7 +44,12 @@ typedef struct _XVisual {
 typedef struct {
     Visual *visual;
     XID visualid;
-    int screen, depth, class;
+    int screen, depth;
+#ifdef __cplusplus
+    int c_class;
+#else
+    int class;
+#endif
     unsigned long red_mask, green_mask, blue_mask;
     int colormap_size, bits_per_rgb;
 } XVisualInfo;
@@ -133,6 +146,7 @@ typedef int (*XAfterFunction)(Display *);
 #define ButtonPressMask (1L << 2)
 #define ButtonReleaseMask (1L << 3)
 #define PointerMotionMask (1L << 6)
+#define ExposureMask (1L << 15)
 #define FocusChangeMask (1L << 21)
 #define SubstructureNotifyMask (1L << 19)
 #define SubstructureRedirectMask (1L << 20)
@@ -314,7 +328,11 @@ typedef struct {
     int depth;
     Visual *visual;
     Window root;
+#ifdef __cplusplus
+    int c_class;
+#else
     int class;
+#endif
     int bit_gravity, win_gravity;
     int backing_store;
     unsigned long backing_planes, backing_pixel;
@@ -692,5 +710,9 @@ XVisualInfo *XGetVisualInfo(Display *display, long mask,
 
 /* DemonX uses explicit client slots instead of Unix-domain display sockets.
  * NULL and ":1" select slot 1; ":2" through ":8" select independent slots. */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

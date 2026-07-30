@@ -471,10 +471,9 @@ fn spawn_path_ptr() -> vptr<u64> {
     return vptr_from_u64(3359696);
 }
 
-# Launch a real new window by spawning one of five RAMFS-seeded clients
+# Launch a real new window by spawning one of three RAMFS-seeded clients
 # (see grub/grub-test.cfg and grub/grub.cfg): kind 0 is the terminal,
-# kind 1 is the native C calculator, kind 2 is Demon Web, kind 3 is
-# ede-calc (Wave 1 of the EDE port), and kind 4 is ede-conf (Wave 5). All need IPC (bit
+# kind 1 is the native C calculator, kind 2 is Demon Web. All need IPC (bit
 # 6) and SURFACE (bit 9) capabilities to create a window and share a drawn
 # surface with the compositor, matching exactly what the kernel boot test
 # grants the same two binaries (CAPABILITY_SERVICE_IPC |
@@ -522,19 +521,6 @@ fn spawn_app(kind: u64) -> u64 {
         vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 2003792482));
         vptr_write_u64(vptr_offset_u64(path, 2), pack_words(762471795, 1701407843));
         vptr_write_u64(vptr_offset_u64(path, 3), pack_words(1697543278, 26220));
-    } else if kind == 3 {
-        # "/system/bin/ede-calc.elf" -- Wave 1 of the EDE port
-        # (apps/ede_calc). 24 bytes, exactly three 8-byte words, no
-        # trailing partial word needed.
-        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 761619557));
-        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1668047203, 1718379822));
-        length = 24;
-    } else if kind == 4 {
-        # "/system/bin/ede-conf.elf" -- Wave 5's control panel. Also 24
-        # bytes; only word2's low32 ("conf" vs "calc") differs from kind 3.
-        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 761619557));
-        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1718513507, 1718379822));
-        length = 24;
     } else {
         vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 1668047203));
         vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1952541813, 1697542767));
@@ -1696,6 +1682,79 @@ fn render_login(display: u64, request_address: u64, pixel_address: u64,
 }
 
 # Render every live window back-to-front by z-order (selection sort over at
+# DemonWM session renderer. The native compositor remains responsible for
+# scanout, surface ordering, damage, and the hardware cursor, but
+# deliberately contributes no DemonOS panels, shortcuts, titlebars, shadows,
+# or taskbar. Every visible surface is submitted at its protocol geometry in
+# z order; decorations in this mode are ordinary DemonX surfaces created by
+# DemonWM itself.
+fn render_demonwm_backend(display: u64, request_address: u64,
+                          pixel_address: u64) -> u64 {
+    if draw_rect(display, request_address, pixel_address,
+                 pack_words(0, 0), pack_words(640, 480),
+                 4279245080) != 0 { return 91; } # #FF101820
+    drawn_mask: u64 = 0;
+    drawn_count: u64 = 0;
+    live_count: u64 = 0;
+    scan: u64 = 0;
+    while scan < 8 {
+        if slot_visible(scan) == 1 { live_count = live_count + 1; }
+        scan = scan + 1;
+    }
+    while drawn_count < live_count {
+        pick_slot: u64 = 8;
+        pick_z: u64 = 0;
+        slot: u64 = 0;
+        while slot < 8 {
+            if slot_visible(slot) == 1 {
+                mask_bit: u64 = 1;
+                shift: u64 = 0;
+                while shift < slot { mask_bit = mask_bit * 2; shift = shift + 1; }
+                already: u64 = drawn_mask / mask_bit;
+                already = already - (already / 2) * 2;
+                if already == 0 and
+                   (pick_slot == 8 or slot_stack_key(slot) < pick_z) {
+                    pick_slot = slot;
+                    pick_z = slot_stack_key(slot);
+                }
+            }
+            slot = slot + 1;
+        }
+        if pick_slot == 8 { drawn_count = live_count; }
+        else {
+            mapped: u64 = slot_mapped_address(pick_slot);
+            if mapped != 0 {
+                request: vptr<u64> = vptr_from_u64(request_address);
+                vptr_write_u64(request, slot_x(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 1), slot_y(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 2), slot_width(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 3), slot_height(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 4), mapped);
+                vptr_write_u64(vptr_offset_u64(request, 5), 0);
+                if MakoAbi.display_submit(display, request_address) != 0 {
+                    return 107;
+                }
+            } else {
+                if draw_rect(display, request_address, pixel_address,
+                             pack_words(slot_x(pick_slot), slot_y(pick_slot)),
+                             pack_words(slot_width(pick_slot),
+                                        slot_height(pick_slot)),
+                             4280032545) != 0 { return 91; }
+            }
+            mask_bit: u64 = 1;
+            shift: u64 = 0;
+            while shift < pick_slot { mask_bit = mask_bit * 2; shift = shift + 1; }
+            drawn_mask = drawn_mask + mask_bit;
+            drawn_count = drawn_count + 1;
+        }
+    }
+    # Individual surface submissions update the compositor backbuffer. Publish
+    # the completed frame atomically; without this final commit, scanout keeps
+    # a mixture of stale loading-screen tiles and newly drawn DemonWM surfaces.
+    return startup_frame_commit(display, request_address, pixel_address);
+}
+
+# Render every live window back-to-front by z-order (selection sort over at
 # most 8 slots is simple and fast enough for this table size), decorations
 # first, then each window's own real zero-copy client surface if it has one
 # mapped, else flat placeholder content instead of forged pixels. Per-window
@@ -1859,9 +1918,15 @@ fn compositor_main(service_name: u64) -> u64 {
     # interactive boot, loading lasts about 1.5 seconds and login remains until
     # the correct password is submitted.
     is_test_boot: u64 = MakoAbi.boot_test_mode();
+    is_demonwm_boot: u64 = MakoAbi.demonwm_mode();
     loading_span: u64 = 150;
     login_span: u64 = 0;
     if is_test_boot == 1 { loading_span = 0; login_span = 0; }
+    # DemonWM is the session shell in this boot mode. Do not expose the
+    # legacy DemonOS compositor-owned loading/login artwork in front of it:
+    # bring up the neutral backend immediately and let DemonWM own every
+    # visible desktop element from its first mapped panel onward.
+    if is_demonwm_boot == 1 { loading_span = 0; login_span = 0; }
     boot_phase: u64 = 0;
     loading_deadline: u64 = MakoAbi.ticks() + loading_span;
     login_deadline: u64 = loading_deadline + login_span;
@@ -1909,7 +1974,9 @@ fn compositor_main(service_name: u64) -> u64 {
     }
     drag_offset_x: u64 = 0;
     drag_offset_y: u64 = 0;
-    dirty: u64 = 0;
+    # Always publish one initial frame, so the display is never left blank
+    # before the compositor's first real repaint.
+    dirty: u64 = 1;
     # Keep a low-cost 20 Hz desktop heartbeat. Input and IPC still wake the
     # compositor immediately, but an idle timeout guarantees the displayed
     # scene cannot become permanently stale after boot. The same heartbeat
@@ -1954,7 +2021,9 @@ fn compositor_main(service_name: u64) -> u64 {
                     sizing: u64 = vptr_read_u64(vptr_offset_u64(update, 3));
                     win_width: u64 = low32(sizing);
                     win_height: u64 = high32(sizing);
-                    if win_width >= 32 and win_height >= 32 and
+                    minimum_window: u64 = 32;
+                    if win_width >= minimum_window and
+                       win_height >= minimum_window and
                        win_width <= 640 and win_height <= 480 and
                        win_x + win_width <= 640 and win_y + win_height <= 480 {
                         slot_set_state(free_slot, 1);
@@ -2031,7 +2100,10 @@ fn compositor_main(service_name: u64) -> u64 {
                     update_size: u64 = vptr_read_u64(vptr_offset_u64(update, 3));
                     new_width: u64 = low32(update_size);
                     new_height: u64 = high32(update_size);
-                    if new_width >= 160 and new_height >= 120 and
+                    minimum_move_width: u64 = 160;
+                    minimum_move_height: u64 = 120;
+                    if new_width >= minimum_move_width and
+                       new_height >= minimum_move_height and
                        new_x + new_width <= 640 and new_y + new_height <= 480 {
                         slot_set_position(target_slot, new_x, new_y);
                         slot_set_size(target_slot, new_width, new_height);
@@ -2220,7 +2292,7 @@ fn compositor_main(service_name: u64) -> u64 {
                     # (high32 of word3); typed letters pack into
                     # search_query (see pow256's comment). Matching is by
                     # the first typed character only, against each row's
-                    # already-visible mnemonic letter (T/C/W/E/O/S) -- a
+                    # already-visible mnemonic letter (T/C/W/S) -- a
                     # real, working search, just scoped to what these rows
                     # are actually distinguishable by today; multi-character
                     # substring matching against full app names is future
@@ -2253,12 +2325,6 @@ fn compositor_main(service_name: u64) -> u64 {
                         } else if first_char == 119 {
                             pending_spawn_kind = app_kind_browser();
                             if find_free_slot() != 8 { spawn_app(2); }
-                        } else if first_char == 101 {
-                            pending_spawn_kind = app_kind_generic();
-                            if find_free_slot() != 8 { spawn_app(3); }
-                        } else if first_char == 111 {
-                            pending_spawn_kind = app_kind_generic();
-                            if find_free_slot() != 8 { spawn_app(4); }
                         } else if first_char == 115 {
                             focused_window = toggle_show_desktop();
                         }
@@ -2359,11 +2425,21 @@ fn compositor_main(service_name: u64) -> u64 {
                                       live_type + live_code * 65536 + live_modifiers * 4294967296,
                                       high32(live_value_word));
                 }
+            } else if live_type == 4 and is_demonwm_boot == 1 and live_y < 32 {
+                # Until DemonWM's retained panel surface is visible, this
+                # strip is its input proxy. Client 2 owns the WM and its
+                # first XID is 0x200001; route the ordinary native click
+                # packet through DemonX so DemonWM itself applies launch
+                # policy across the whole panel width.
+                send_window_event(event_address + 32, pixel_address, 2097153,
+                                  pack_words(720897, 4),
+                                  live_x + live_y * 4294967296, 1);
+                repaint = 1;
             } else if live_type == 4 and launcher_open == 1 and
                       live_x >= 28 and live_x < 210 and
-                      live_y >= 238 and live_y < 466 {
-                # The first five launcher rows spawn a real new process (see
-                # spawn_app); the sixth is a show-desktop action. A launch
+                      live_y >= 238 and live_y < 390 {
+                # The first three launcher rows spawn a real new process (see
+                # spawn_app); the fourth is a show-desktop action. A launch
                 # only asks the kernel to spawn -- it does not itself
                 # create a table slot or change focus, since the spawned
                 # client sends its own real CREATE message once it runs,
@@ -2385,22 +2461,6 @@ fn compositor_main(service_name: u64) -> u64 {
                 } else if live_y < 352 {
                     pending_spawn_kind = app_kind_browser();
                     if find_free_slot() != 8 { spawn_app(2); }
-                } else if live_y < 390 {
-                    # ede-calc (Wave 1 of the EDE port, apps/ede_calc) --
-                    # classified as a generic app like the calculator row,
-                    # since it uses the same plain-window titlebar chrome.
-                    pending_spawn_kind = app_kind_generic();
-                    if find_free_slot() != 8 { spawn_app(3); }
-                } else if live_y < 428 {
-                    # ede-conf (Wave 5): the control panel that itself
-                    # launches ede-about/ede-tip/ede-preferred/ede-autostart
-                    # via demon_spawn(), making the rest of the EDE port
-                    # reachable without typing "apps launch" into a
-                    # terminal. USERSPACE_CODE_PAGES (kernel/userspace.h)
-                    # was raised in Wave 9 specifically to make room for
-                    # this 6th row.
-                    pending_spawn_kind = app_kind_generic();
-                    if find_free_slot() != 8 { spawn_app(4); }
                 } else {
                     focused_window = toggle_show_desktop();
                 }
@@ -2742,6 +2802,9 @@ fn compositor_main(service_name: u64) -> u64 {
                 startup_status = render_login(display, request_address, pixel_address,
                                               login_password_length + login_error * 16,
                                               pack_cursor(cursor_x, cursor_y), anim_phase);
+            } else if is_demonwm_boot == 1 {
+                startup_status = render_demonwm_backend(
+                    display, request_address, pixel_address);
             } else {
                 startup_status = render_scene(display, request_address, pixel_address,
                                               focused_window,

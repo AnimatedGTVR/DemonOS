@@ -192,3 +192,10 @@ fn network_http_get(network: u64, url: u64, url_length: u64,
 fn battery_present() -> u64 {
     return abi_syscall0(37);
 }
+
+# Returns 1 only for the GRUB DemonWM session. In this mode the compositor is
+# a neutral surface/input backend and must not paint the DemonOS shell --
+# DemonWM owns every visible desktop element itself.
+fn demonwm_mode() -> u64 {
+    return abi_syscall0(38);
+}

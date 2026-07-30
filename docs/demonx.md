@@ -108,6 +108,25 @@ cursor move to the compositor. Save-set membership is retained today; rescue
 and reparenting will activate once DemonX receives explicit client-disconnect
 notifications from the transport.
 
+## Native PekWM bootstrap
+
+`Desktop/pekwm/demonos/pekwm_demon.cc` is the first runnable platform entry
+inside the vendored PekWM tree. It replaces upstream `pekwm.cc`'s hosted
+POSIX supervisor for DemonOS, connects through the public DemonX Xlib ABI as
+client `:2`, claims `SubstructureRedirect` on the root, adopts existing
+top-level windows, processes map/configure requests, applies click-to-focus
+and raise policy, and supports pointer-grab window dragging. Interactive
+desktop boots now start the compositor, DemonX, and this PekWM process in
+that dependency order. The binary is installed as
+`/system/bin/pekwm-demon.elf`.
+
+This is a functional native WM core, not yet the complete upstream desktop.
+The remaining port work is the larger hosted layer: PekWM configuration and
+theme parsing, its full decoration/toolkit code, menus, key chains, grouping,
+and the POSIX-dependent launcher/restart utilities. Keeping that boundary
+explicit lets the WM own real DemonX policy now without pretending that
+unsupported libc++ and POSIX calls work.
+
 Active `XGrabPointer` and `XGrabKeyboard` requests now create exclusive
 server-side grab state, reject a competing client with `AlreadyGrabbed`, route
 native compositor input to the grabbing client/window, honor the pointer

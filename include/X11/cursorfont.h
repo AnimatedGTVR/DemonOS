@@ -1,7 +1,7 @@
 #ifndef DEMONOS_X11_CURSORFONT_H
 #define DEMONOS_X11_CURSORFONT_H
 
-/* Glyph indices from the standard X cursor font used by PekWM. */
+/* Glyph indices from the standard X cursor font. */
 #define XC_bottom_left_corner 12
 #define XC_bottom_right_corner 14
 #define XC_bottom_side 16

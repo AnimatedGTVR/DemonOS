@@ -6,12 +6,15 @@
 #include <stdint.h>
 
 #define SURFACE_LIMIT 8u
-#define SURFACE_MAX_WIDTH 256u
-#define SURFACE_MAX_HEIGHT 64u
-/* The arena is suballocated per surface. Terminal and browser each use a
-   256x64 surface, while two ordinary 64x64 apps bring the four-surface
-   maximum to 160 KiB. */
-#define SURFACE_ARENA_BYTES 163840u
+#define SURFACE_MAX_WIDTH 640u
+#define SURFACE_MAX_HEIGHT 480u
+/* The arena is suballocated per surface, sized for a realistic concurrent
+   mix rather than the worst case of SURFACE_LIMIT surfaces all at the
+   maximum size: one full-width panel (640x40) plus several ordinary app
+   windows. Kept under FRAMEBUFFER_BACKBUFFER_MAX (kernel.c's
+   allocate_contiguous shares that ceiling across every contiguous
+   allocation it serves, not just the framebuffer backbuffer itself). */
+#define SURFACE_ARENA_BYTES 1048576u
 
 bool surfaces_init(uint32_t *arena, size_t arena_bytes);
 bool surface_create(uint32_t owner_pid, uint32_t width, uint32_t height,
