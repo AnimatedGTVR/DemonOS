@@ -35,6 +35,7 @@ WINDOW_EVENT_CLIENT_ELF := $(BUILD)/window_event_client.elf
 WINDOW_CRASH_CLIENT_ELF := $(BUILD)/window_crash_client.elf
 DEMONX_ELF := $(BUILD)/demonx.elf
 DEMONX_CLIENT_ELF := $(BUILD)/demonx_client.elf
+DEMONX_XLIB_TEST_ELF := $(BUILD)/demonx-xlib-test.elf
 TETRIS_ELF := $(BUILD)/tetris.elf
 CALCULATOR_ELF := $(BUILD)/calculator.elf
 TERMINAL_CLIENT_ELF := $(BUILD)/terminal_client.elf
@@ -55,6 +56,16 @@ CXX_HELLO_ELF := $(BUILD)/cxx_hello.elf
 # incompatible, not just slower), so anything using real floats needs SSE2
 # actually enabled instead.
 EDE_CALC_ELF := $(BUILD)/ede_calc.elf
+# Dlib (lib/dlib/): an Xlib-API-compatible shim over the real compositor
+# window protocol (window.h's demon_window_message), NOT over demonx_server
+# .c's protocol-conformance test harness (that one never reaches the real
+# display -- see lib/dlib/dlib.h's own header comment). dlib_hello is a
+# real, minimal end-to-end proof: creates an actual on-screen window,
+# draws into it with Xlib-named calls, presents it, and waits for a real
+# close event. First slice only -- window lifecycle plus a minimal GC/
+# drawing subset, a small fraction of the ~158 distinct Xlib functions
+# PekWM's own source calls.
+DLIB_HELLO_ELF := $(BUILD)/dlib_hello.elf
 # Wave 2 of the EDE port: ede-about (apps/ede_about) -- a static credits/
 # about window, no floating point anywhere in it, so unlike ede-calc it
 # builds with the kernel's normal CFLAGS/ASFLAGS, not FLOAT_CFLAGS.
@@ -452,6 +463,25 @@ $(DEMONX_CLIENT_ELF): $(BUILD)/demonx_client_entry.o $(BUILD)/demonx_client_mko.
 		$(BUILD)/demonx_client_entry.o $(BUILD)/demonx_client_mko.o -o $@
 	$(STRIP) -s $@
 
+# First freestanding Xlib compatibility slice.  This test binary is kept
+# separate from the scripted MKO wire client: the latter boot-tests DemonX,
+# while this target proves normal C source can compile and link against the
+# public <X11/Xlib.h> boundary that PekWM will consume.
+$(BUILD)/demonx_xlib.o: lib/demonx/xlib.c include/X11/Xlib.h include/demon/demonx.h include/demon/c_app.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/demonx_xlib_test.o: user/demonx_xlib_test.c include/X11/Xlib.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/demonx_xlib_test_entry.o: user/demonx_xlib_test.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(DEMONX_XLIB_TEST_ELF): $(BUILD)/demonx_xlib_test_entry.o \
+		$(BUILD)/demonx_xlib_test.o $(BUILD)/demonx_xlib.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) $(BUILD)/demonx_xlib_test_entry.o \
+		$(BUILD)/demonx_xlib_test.o $(BUILD)/demonx_xlib.o -o $@
+	$(STRIP) -s $@
+
 $(BUILD)/tetris_entry.o: apps/tetris/entry.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
@@ -803,8 +833,13 @@ iso-check: $(ISO)
 	@test $$(wc -c < $(WINDOW_MOVE_CLIENT_ELF)) -le 8192
 	@test $$(wc -c < $(WINDOW_EVENT_CLIENT_ELF)) -le 12288
 	@test $$(wc -c < $(WINDOW_CRASH_CLIENT_ELF)) -le 12288
-	@test $$(wc -c < $(DEMONX_ELF)) -le 12288
-	@test $$(wc -c < $(DEMONX_CLIENT_ELF)) -le 16384
+	@# Native grabs, cursors, save sets, client teardown, and pointer warp
+	@# remain inside a strict 16 KiB server image budget.
+	@test $$(wc -c < $(DEMONX_ELF)) -le 16384
+	@# Two-client WM redirect and ICCCM atom/property protocol test.
+	@# PropertyNotify, continuation, and the native pixmap/PutImage lifecycle
+	@# bring the freestanding MAKO protocol test to roughly 41 KiB.
+	@test $$(wc -c < $(DEMONX_CLIENT_ELF)) -le 46080
 	@test $$(wc -c < $(TETRIS_ELF)) -le 12288
 	@# Bumped from 32768: echo/uptime/pid/whoami plus the shared
 	@# low24/low48/write_decimal helpers pushed the binary to 33088 bytes.
@@ -956,7 +991,7 @@ smoke: $(ISO)
 	@grep -q "DESKTOP_TARGET_REPAINT_OK frames=" $(BUILD)/serial.log
 	@grep -q "DEMONX_SERVER_READY transport=capability-ipc protocol=X11" $(BUILD)/serial.log
 	@grep -q "DEMONX_SETUP_OK version=11.0 byte_order=little" $(BUILD)/serial.log
-	@grep -q "DEMONX_CORE_REQUESTS_OK create=1 map=1 geometry=1 destroy=1" $(BUILD)/serial.log
+	@grep -q "DEMONX_CORE_REQUESTS_OK clients=2 transport=continuation,max256 create=1 select_input=1 map_request=1 map_notify=1 configure_request=1 configure_notify=1 query_tree=1 unmap_notify=1 atoms=1 properties=change,get,list,delete property_notify=1 client_message=1 gc=foreground,font fill_rectangle=1 pixmap=create,putimage,copyarea,background,getimage,text8,free backing=native,fallback-retained destroy=1" $(BUILD)/serial.log
 	@grep -q "DEMONX_CLIENT_MAKO_OK status=0" $(BUILD)/serial.log
 	@grep -q "C_APP_TETRIS_READY input=keyboard runtime=MAKO-ABI" $(BUILD)/serial.log
 	@grep -q "DESKTOP_DEFAULT_TARGET_OK target=desktop.target" $(BUILD)/serial.log

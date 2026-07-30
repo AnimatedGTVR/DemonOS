@@ -1,0 +1,141 @@
+//
+// PFontXft.cc for pekwm
+// Copyright (C) 2023-2025 Claes Nästén <pekdon@gmail.com>
+//
+// This program is licensed under the GNU GPL.
+// See the LICENSE file for more information.
+//
+
+#include "PFontXft.hh"
+#include "X11.hh"
+
+#ifdef PEKWM_HAVE_XFT
+
+PFontXft::PFontXft(float scale)
+	: PFont(scale),
+	  _draw(XftDrawCreate(X11::getDpy(), X11::getRoot(),
+			      X11::getVisual(), X11::getColormap())),
+	  _font(0)
+{
+}
+
+PFontXft::~PFontXft()
+{
+	PFontXft::unload();
+	XftDrawDestroy(_draw);
+}
+
+/**
+ * Loads the Xft font font_name
+ */
+bool
+PFontXft::load(const PFont::Descr& descr)
+{
+	unload();
+
+	std::string spec = descr.useStr() ? descr.str() : toNativeDescr(descr);
+	_font = XftFontOpenName(X11::getDpy(), X11::getScreenNum(),
+				spec.c_str());
+	if (! _font) {
+		_font = XftFontOpenXlfd(X11::getDpy(), X11::getScreenNum(),
+					spec.c_str());
+	}
+
+	if (_font) {
+		_ascent = _font->ascent;
+		_descent = _font->descent;
+		_height = _font->height;
+
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Unloads font resources
+ */
+void
+PFontXft::unload(void)
+{
+	if (_font) {
+		XftFontClose(X11::getDpy(), _font);
+		_font = 0;
+	}
+}
+
+/**
+ * Gets the width the text would take using this font.
+ */
+uint
+PFontXft::getWidth(const StringView &text)
+{
+	if (! text.size()) {
+		return 0;
+	}
+
+	uint width = 0;
+	if (_font) {
+		XGlyphInfo extents;
+		XftTextExtentsUtf8(X11::getDpy(), _font,
+				   reinterpret_cast<const XftChar8*>(*text),
+				   text.size(), &extents);
+		width = extents.xOff;
+	}
+
+	return (width + _offset_x);
+}
+
+bool
+PFontXft::useAscentDescent(void) const
+{
+	return false;
+}
+
+std::string
+PFontXft::toNativeDescr(const PFont::Descr& descr) const
+{
+	// using the raw string for Xft fonts as the format used is (should
+	// be) compatible with Xft specifications.
+	return descr.str();
+}
+
+/**
+ * Draws the text on dest
+ * @param dest Drawable to draw on
+ * @param chars Max numbers of characthers to print
+ * @param fg Bool, to use foreground or background colors
+ */
+void
+PFontXft::drawText(PSurface *dest, int x, int y, const StringView &text,
+		   bool fg)
+{
+	PXftColor& color = fg ? _color_fg : _color_bg;
+	if (_font && color.isSet()) {
+		XftDrawChange(_draw, dest->getDrawable());
+		XftDrawStringUtf8(_draw, *color, _font, x, y + _ascent,
+				  reinterpret_cast<const XftChar8*>(*text),
+				  text.size());
+	}
+}
+
+/**
+ * Sets the color that should be used when drawing
+ */
+void
+PFontXft::setColor(PFont::Color *color)
+{
+	_color_fg.unset();
+	_color_bg.unset();
+
+	if (color->hasFg()) {
+		_color_fg.set(color->getFg()->red, color->getFg()->green,
+			      color->getFg()->blue, color->getFgAlpha());
+	}
+
+	if (color->hasBg()) {
+		_color_bg.set(color->getBg()->red, color->getBg()->green,
+			      color->getBg()->blue, color->getBgAlpha());
+	}
+}
+
+#endif // PEKWM_HAVE_XFT

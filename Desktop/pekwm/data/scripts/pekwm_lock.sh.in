@@ -1,0 +1,40 @@
+#!@SH@
+#
+# Copyright (C) 2023 Claes Nästén <pekdon@gmail.com>
+#
+# Wrapper script for various screensaver commands, resetting the keyboard
+# layout and then locking the screen.
+#
+
+PEKWM_CTRL_LOCK="pekwm_ctrl Sys ScreenLock"
+
+# reset keyboard layout (for less password input confusion), quiet mode to not
+# pop a dialog if no layouts have been configured.
+LAYOUTS=`pekwm_ctrl --xrm-get 'pekwm*keyboardLayouts'`
+if test "x$LAYOUTS" != "x"; then
+	"$PEKWM_SCRIPT_PATH/pekwm_toggle_kbd_layout.sh" -q first
+fi
+
+cmd=`pekwm_cfg -g Sys.ScreenLockCommand`
+if test "x$cmd" != "x"; then
+	cmd="$PEKWM_CTRL_LOCK"
+else
+	timeout=`pekwm_cfg -g Sys.ScreenLockIdleTime`
+	if test "x$timeout" = "x"; then
+		cmd=`command -v xlock`
+		if test "x$cmd" = "x"; then
+			cmd=`command -v xscreensaver-command`
+			if test "x$cmd" = "x"; then
+				cmd="$PEKWM_CTRL_LOCK"
+			else
+				cmd="$cmd --lock"
+			fi
+		fi
+	else
+		# screen lock idle timeout configured, use pekwm_lock as
+		# lock command.
+		cmd="$PEKWM_CTRL_LOCK"
+	fi
+fi
+
+exec $cmd

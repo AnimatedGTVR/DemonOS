@@ -1,0 +1,116 @@
+[doc]
+Run pekwm_ctrl tests using Xvfb
+
+Start a single Xvfb pekwm_ctrl system tests in one go.
+[enddoc]
+
+[include test.pluxinc]
+
+[function set_title msg title]
+	[shell pekwm_ctrl]
+		[log test pekwm_ctrl ($msg)]
+		!$BIN_DIR/ctrl/pekwm_ctrl -c xterm Set Title $title
+		?_PEKWM_CMD ([0-9]+) Set Title
+		[global window=$1]
+		?SH-PROMPT:
+
+	[shell pekwm]
+		?start action Set wo
+		?end action Set wo
+
+	[shell pekwm_ctrl]
+		[log verify xterm title]
+		!$BIN_DIR/ctrl/pekwm_ctrl -a list
+		# ... is to match a byte order mark that is output on NetBSD
+		# at the time of writing.
+		?$window xterm \((...)?$title\)
+		?SH-PROMPT:
+[endfunction]
+
+[function test-xrm-get]
+	[shell xrdb]
+		[log reset Xresources]
+		[call sh-eval "xrdb pekwm_ctrl.xresources"]
+		!xrdb -q | sort
+		?test\*resource2:\s+initial-value2
+		?test\.resource1:\s+initial-value1
+		[call sh-ok]
+
+	[shell pekwm_ctrl]
+		[log test existing resource get]
+		!$BIN_DIR/ctrl/pekwm_ctrl -g test.resource1
+		?initial-value
+		[call sh-ok]
+
+		[log test missing resource get]
+		!$BIN_DIR/ctrl/pekwm_ctrl -g test.missing
+		[call sh-nok]
+[endfunction]
+
+[function test-xrm-set]
+	[shell xrdb]
+		[log reset Xresources]
+		[call sh-eval "xrdb pekwm_ctrl.xresources"]
+
+	[shell pekwm_ctrl]
+		[log verify initial value]
+		!$BIN_DIR/ctrl/pekwm_ctrl -g test.resource1
+		?initial-value1
+		[call sh-ok]
+
+		[log test overwrite existing resource]
+		[call sh-eval "$BIN_DIR/ctrl/pekwm_ctrl -s test.resource1=updated"]
+
+	[shell xrdb]
+		[log verify Xresources using xrdb]
+		!xrdb -q | sort
+		?test\*resource2:\s+initial-value2
+		?test\.resource1:\s+updated
+		[call sh-ok]
+[endfunction]
+
+[shell Xvfb]
+	[call start-xvfb]
+
+[shell pekwm]
+	[log starting pekwm]
+	!$BIN_DIR/wm/pekwm $PEKWM_OPTIONS --display $DISPLAY
+	?Enter event loop.
+
+[shell xterm]
+	[log starting xterm]
+	!xterm -T xterm -display $DISPLAY /bin/sh
+
+[shell pekwm]
+	?client .* constructed
+
+[shell xrdb]
+	[call sh-eval "export DISPLAY=$DISPLAY"]
+
+[shell pekwm_ctrl]
+	[call sh-eval "export DISPLAY=$DISPLAY"]
+
+	# list clients for debugging purposes
+	-ERROR
+	[call sh-eval "$BIN_DIR/ctrl/pekwm_ctrl -a list"]
+
+	# list tree for debugging purposes
+	-ERROR
+	[call sh-eval "$BIN_DIR/ctrl/pekwm_ctrl -a list-children"]
+
+	# list all clients for end-user purposes
+	!$BIN_DIR/ctrl/pekwm_ctrl -a list-all
+	?window-id frame-id frame-order workspace state title
+	?[0-9]+ 1 0 0 \[\*\] xterm
+	?SH-PROMPT:
+
+	-(ERROR|no client match)
+	[call set_title short short]
+	[call set_title medium message_spans_multiple]
+	[call set_title long really_long_message_that_spans_many_messages]
+
+	[call test-xrm-get]
+	[call test-xrm-set]
+
+[shell Xvfb]
+	[call stop-xvfb]

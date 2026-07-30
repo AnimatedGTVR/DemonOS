@@ -18,6 +18,8 @@ enum demon_window_opcode {
     DEMON_WINDOW_KEY,
     DEMON_WINDOW_CLOSE,
     DEMON_WINDOW_MOVE,
+    DEMON_WINDOW_BUTTON,
+    DEMON_WINDOW_POINTER_WARP,
 };
 
 enum demon_window_flags {

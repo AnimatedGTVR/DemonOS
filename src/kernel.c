@@ -1780,7 +1780,8 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
            exclusively through the same capability IPC used by native apps. */
         const uint32_t demonx_pid = userspace_spawn_path(0u,
             "/system/bin/demonx.elf", 22u, "demonx",
-            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC));
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
         if (demonx_pid == 0u)
             boot_fatal("DemonX server failed to spawn");
         (void)userspace_run_init();
@@ -1821,7 +1822,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             boot_fatal("DemonX X11 protocol contract failed");
         }
         serial_write("DEMONX_SETUP_OK version=11.0 byte_order=little\n");
-        serial_write("DEMONX_CORE_REQUESTS_OK create=1 map=1 geometry=1 destroy=1\n");
+        serial_write("DEMONX_CORE_REQUESTS_OK clients=2 transport=continuation,max256 create=1 select_input=1 map_request=1 map_notify=1 configure_request=1 configure_notify=1 query_tree=1 unmap_notify=1 atoms=1 properties=change,get,list,delete property_notify=1 client_message=1 gc=foreground,font fill_rectangle=1 pixmap=create,putimage,copyarea,background,getimage,text8,free backing=native,fallback-retained destroy=1\n");
         serial_write("DEMONX_CLIENT_MAKO_OK status=0\n");
 
         /* The terminal is a persistent userspace window. It owns a shared

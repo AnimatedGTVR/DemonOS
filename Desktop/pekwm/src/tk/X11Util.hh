@@ -1,0 +1,104 @@
+//
+// X11Util.hh for pekwm
+// Copyright (C) 2021-2023 Claes Nästén <pekdon@gmail.com>
+//
+// This program is licensed under the GNU GPL.
+// See the LICENSE file for more information.
+//
+
+#ifndef _PEKWM_X11UTIL_HH_
+#define _PEKWM_X11UTIL_HH_
+
+#include "config.h"
+
+#include "PWinObj.hh"
+
+class MwmHints {
+public:
+	MwmHints()
+		: flags(0),
+		  functions(0),
+		  decorations(0)
+	{
+	}
+
+	MwmHints(ulong _flags, ulong _functions, ulong _decorations)
+		: flags(_flags),
+		  functions(_functions),
+		  decorations(_decorations)
+	{
+	}
+
+	ulong flags;
+	ulong functions;
+	ulong decorations;
+};
+
+enum {
+	MWM_HINTS_FUNCTIONS = (1L << 0),
+	MWM_HINTS_DECORATIONS = (1L << 1),
+	MWM_HINTS_NUM = 3
+};
+
+enum {
+	MWM_FUNC_ALL = (1L << 0),
+	MWM_FUNC_RESIZE = (1L << 1),
+	MWM_FUNC_MOVE = (1L << 2),
+	MWM_FUNC_ICONIFY = (1L << 3),
+	MWM_FUNC_MAXIMIZE = (1L << 4),
+	MWM_FUNC_CLOSE = (1L << 5)
+};
+
+enum {
+	MWM_DECOR_ALL = (1L << 0),
+	MWM_DECOR_BORDER = (1L << 1),
+	MWM_DECOR_HANDLE = (1L << 2),
+	MWM_DECOR_TITLE = (1L << 3),
+	MWM_DECOR_MENU = (1L << 4),
+	MWM_DECOR_ICONIFY = (1L << 5),
+	MWM_DECOR_MAXIMIZE = (1L << 6)
+};
+
+// Extended Net Hints stuff
+class NetWMStates {
+public:
+	NetWMStates(void);
+	virtual ~NetWMStates(void);
+
+	bool modal;
+	bool sticky;
+	bool max_vert, max_horz;
+	bool shaded;
+	bool skip_taskbar, skip_pager;
+	bool hidden;
+	bool fullscreen;
+	bool above, below;
+	bool demands_attention;
+};
+
+namespace X11Util {
+	Geometry getHeadGeometry(int head);
+	uint getCurrHead(CurrHeadSelector chs);
+	int getNearestHead(const PWinObj& wo, Direction dx, Direction dy);
+	uint getNearestHead(const PWinObj& wo);
+
+	void grabButton(int button, int mod, int mask, Window win, int mode);
+
+	bool readMwmHints(Window win, MwmHints &hints);
+	void setMwmHints(Window win, const MwmHints& hints);
+	bool readEwmhStates(Window win, NetWMStates &win_states);
+
+	void updateXrmResources(void);
+}
+
+#ifndef PEKWM_HAVE_XUTF8
+
+void Xutf8SetWMProperties(Display *dpy, Window win,
+			  const char* window_name, const char* icon_name,
+			  char** argv, int argc,
+			  XSizeHints* normal_hints, XWMHints* wm_hints,
+			  XClassHint* class_hints);
+
+#endif // PEKWM_HAVE_XUTF8
+
+#endif // _PEKWM_X11UTIL_HH_

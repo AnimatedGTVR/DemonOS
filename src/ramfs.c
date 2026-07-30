@@ -13,12 +13,13 @@
    to fit under); both must be raised together if the compositor grows
    past either. */
 #define RAMFS_DATA_MAX 196608u
-/* The seeded binaries, native document browser, and graphical C apps
-   (including 8 waves of small EDE-port utilities by this point) occupy
-   just over 304 KiB. Keep a bounded 384 KiB arena with app-growth headroom;
-   large game data belongs in a streamed read-only boot filesystem rather
-   than permanent kernel BSS. */
-#define RAMFS_STORAGE_MAX 393216u
+/* The seeded binaries, native document browser, graphical C apps, and the
+   compact DemonX compatibility service now sit just above the original
+   384 KiB bound. Three additional pages keep the arena tightly bounded while
+   accommodating DemonX's implemented Xlib surface; large game data still
+   belongs in a streamed read-only boot filesystem rather than permanent
+   kernel BSS. */
+#define RAMFS_STORAGE_MAX 405504u
 
 struct ramfs_file {
     bool used;

@@ -51,6 +51,21 @@ static inline uint64_t demon_syscall4(uint64_t number, uint64_t first,
     return rax;
 }
 
+static inline uint64_t demon_syscall5(uint64_t number, uint64_t first,
+                                      uint64_t second, uint64_t third,
+                                      uint64_t fourth, uint64_t fifth) {
+    register uint64_t rax __asm__("rax") = number;
+    register uint64_t rdi __asm__("rdi") = first;
+    register uint64_t rsi __asm__("rsi") = second;
+    register uint64_t rdx __asm__("rdx") = third;
+    register uint64_t r10 __asm__("r10") = fourth;
+    register uint64_t r8 __asm__("r8") = fifth;
+    __asm__ volatile("int $0x80" : "+a"(rax)
+                     : "D"(rdi), "S"(rsi), "d"(rdx), "r"(r10), "r"(r8)
+                     : "memory", "cc");
+    return rax;
+}
+
 static inline uint64_t demon_write(const void *bytes, uint64_t length) {
     return demon_syscall2(0u, (uint64_t)(uintptr_t)bytes, length);
 }
@@ -133,5 +148,69 @@ static inline uint64_t demon_spawn(const char *path, uint64_t length,
     return demon_syscall3(11u, (uint64_t)(uintptr_t)path, length, service_mask);
 }
 static inline uint64_t demon_wait(uint64_t pid) { return demon_syscall1(12u, pid); }
+
+/* Display/compositor-only syscalls (see user/sdk.mko's display_info,
+   display_submit, etc. for the MKO-side equivalents this mirrors 1:1 --
+   same syscall numbers, same argument order). Added for the C++ EDDE
+   compositor prototype: a process holding the DISPLAY capability is what
+   these gate on, not the language that compiled it (userspace_spawn_path
+   grants capabilities by spawned path, see src/kernel.c), so this is a
+   straight port of the wrapper layer, not new kernel behavior. */
+static inline uint64_t demon_display_info(uint64_t display, void *destination) {
+    return demon_syscall2(18u, display, (uint64_t)(uintptr_t)destination);
+}
+static inline uint64_t demon_display_submit(uint64_t display, const void *request) {
+    return demon_syscall2(19u, display, (uint64_t)(uintptr_t)request);
+}
+static inline uint64_t demon_display_dimensions(uint64_t display) {
+    return demon_syscall1(21u, display);
+}
+/* Blocks until the compositor control channel or unified input becomes
+   ready. Returns 1 for a 64-byte window packet (written to
+   message_destination), 2 for an input event (written to
+   event_destination), or 3 for the timeout_ticks deadline. */
+static inline uint64_t demon_compositor_wait(uint64_t channel, uint64_t input_handle,
+                                             void *message_destination,
+                                             void *event_destination,
+                                             uint64_t timeout_ticks) {
+    return demon_syscall5(26u, channel, input_handle,
+                          (uint64_t)(uintptr_t)message_destination,
+                          (uint64_t)(uintptr_t)event_destination, timeout_ticks);
+}
+/* Maps one retained surface read-only into the caller; the returned
+   address is stable for the process lifetime. */
+static inline uint64_t demon_surface_map(uint64_t surface) {
+    return demon_syscall1(27u, surface);
+}
+static inline uint64_t demon_surface_take_damage(uint64_t surface) {
+    return demon_syscall1(29u, surface);
+}
+static inline uint64_t demon_surface_unmap(uint64_t surface) {
+    return demon_syscall1(30u, surface);
+}
+/* Publishes the live window count/focused id into kernel-side counters a
+   boot test can assert on -- gated on the same DISPLAY write right
+   display_submit needs. No window-manager policy runs in ring 0; the
+   kernel just stores what it's told. */
+static inline uint64_t demon_compositor_report(uint64_t display, uint64_t window_count,
+                                               uint64_t focused_window_id) {
+    return demon_syscall3(31u, display, window_count, focused_window_id);
+}
+/* Moves the compositor-owned scanout cursor overlay. icon follows enum
+   graphics_cursor_icon: 0 is the default arrow, 1-13 select the
+   contextual resize/hand/text/blocked/info pack. */
+static inline uint64_t demon_display_cursor_move(uint64_t display, uint64_t x,
+                                                  uint64_t y, uint64_t icon) {
+    return demon_syscall4(32u, display, x, y, icon);
+}
+/* Draws directly onto the kernel-resident backbuffer via the kernel's own
+   rounded-rect/border/gradient/shadow compositing, selected by the
+   request's "kind" word -- see docs/application-abi.md for the 10-word
+   request layout. */
+static inline uint64_t demon_display_submit_effect(uint64_t display, const void *request) {
+    return demon_syscall2(33u, display, (uint64_t)(uintptr_t)request);
+}
+static inline uint64_t demon_boot_test_mode(void) { return demon_syscall0(34u); }
+static inline uint64_t demon_battery_present(void) { return demon_syscall0(37u); }
 
 #endif

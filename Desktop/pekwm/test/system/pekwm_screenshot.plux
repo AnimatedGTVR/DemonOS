@@ -1,0 +1,32 @@
+[doc]
+Run pekwm_screenshot tests using Xvfb
+
+Start a single Xvfb pekwm_screenshot system tests in one go.
+[enddoc]
+
+[include test.pluxinc]
+
+[shell Xvfb]
+	[call start-xvfb]
+
+[shell pekwm_screenshot]
+	[log test pekwm_screenshot (help)]
+	!$BIN_DIR/screenshot/pekwm_screenshot -h
+	?usage
+	?SH-PROMPT:
+
+	[log test pekwm_screenshot (generated name)]
+	!$BIN_DIR/screenshot/pekwm_screenshot
+	?screenshot written to (pekwm_screenshot-.*\.png)
+	[local screenshot=$1]
+	?SH-PROMPT:
+	[call sh-eval "rm -f $screenshot"]
+
+	[log test pekwm_screenshot (specified name)]
+	!$BIN_DIR/screenshot/pekwm_screenshot screenshot.png
+	?screenshot written to screenshot.png
+	?SH-PROMPT:
+	[call sh-eval "rm -f screenshot.png"]
+
+[shell Xvfb]
+	[call stop-xvfb]

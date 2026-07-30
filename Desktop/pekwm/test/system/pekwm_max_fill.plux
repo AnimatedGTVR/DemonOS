@@ -1,0 +1,117 @@
+[doc]
+Test Fullscreen/Maximize/Fill actions
+
+Verify state toggling and geometry changes for action manipulating the fill
+state.
+[enddoc]
+
+[include test.pluxinc]
+
+[function xwininfo-geometry id name]
+	!xwininfo $id
+	?Absolute upper-left X:\s+(\d+)
+	[global ${name}_x=$1]
+	?Absolute upper-left Y:\s+(\d+)
+	[global ${name}_y=$1]
+	?Width: (\d+)
+	[global ${name}_width=$1]
+	?Height: (\d+)
+	[global ${name}_height=$1]
+	?SH-PROMPT:
+[endfunction]
+
+[shell Xvfb]
+	[call start-xvfb]
+
+[shell pekwm]
+	-Invalid read of size
+	[log starting pekwm (pekwm.config)]
+	!$$VALGRIND ./bin/pekwm $PEKWM_OPTIONS --config ./config/pekwm.config
+	?Enter event loop.
+
+[shell xedit1]
+	!xedit -geometry 500x200+0+0 -name xedit1
+
+[shell pekwm]
+	?client xedit1 constructed for window (0x[0-9a-f]+)
+	[global xedit1_window=$1]
+
+[shell xedit2]
+	!xedit -geometry 500x200-0+100 -name xedit2
+
+[shell pekwm]
+	?client xedit2 constructed for window (0x[0-9a-f]+)
+	[global xedit2_window=$1]
+	
+[shell xwininfo]
+	[call xwininfo-geometry "-id $xedit1_window" xedit1]
+	[log xedit1 geometry ${xedit1_width}x${xedit1_height}+${xedit1_x}+${xedit1_y}]
+	[call xwininfo-geometry "-id $xedit2_window" xedit2]
+	[log xedit2 geometry ${xedit2_width}x${xedit2_height}+${xedit2_x}+${xedit2_y}]
+
+[shell pekwm_ctrl]
+	[log xedit1: Set Fullscreen]
+	[call sh-eval "$BIN_DIR/ctrl/pekwm_ctrl -w $xedit1_window Set Fullscreen"]
+
+[shell pekwm]
+	[log wait for Set Fullscreen to be processed]
+	?received _PEKWM_CMD: Set Fullscreen
+	?end action
+
+[shell xwininfo]
+	[call xwininfo-geometry -root root]
+	[log root geometry ${root_width}x${root_height}+${root_x}+${root_y}]
+
+	[log verify xedit1 window geometry]
+	!xwininfo -id $xedit1_window
+	?Width: $root_width
+	?Height: $root_height
+	?SH-PROMPT:
+	[log verify xedit1 window state]
+	!xprop -id $xedit1_window _NET_WM_STATE
+	???_NET_WM_STATE(ATOM) = _NET_WM_STATE_FULLSCREEN, _NET_WM_STATE_ABOVE
+	?SH-PROMPT:
+
+[shell pekwm_ctrl]
+	[log xedit1: Unset Fullscreen]
+	[call sh-eval "$BIN_DIR/ctrl/pekwm_ctrl -w $xedit1_window Unset Fullscreen"]
+
+[shell pekwm]
+	[log wait for Unset Fullscreen to be processed]
+	?received _PEKWM_CMD: Unset Fullscreen
+	?end action
+
+[shell xwininfo]
+	[log verify xedit1 window geometry]
+	!xwininfo -id $xedit1_window
+	?Width: $xedit1_width
+	?Height: $xedit1_height
+	?SH-PROMPT:
+
+	[log verify xedit1 window state]
+	!xprop -id $xedit1_window _NET_WM_STATE
+	?^_NET_WM_STATE\(ATOM\) = $
+	?SH-PROMPT:
+
+[shell pekwm_ctrl]
+	[log xedit1: MaxFill True True]
+	[call sh-eval "$BIN_DIR/ctrl/pekwm_ctrl -w $xedit1_window MaxFill True True"]
+
+[shell pekwm]
+	[log wait for MaxFill True True to be processed]
+	?received _PEKWM_CMD: MaxFill True True
+	?end action
+
+[shell xwininfo]
+	[log calculate expected width]
+	# * 4 for borders of xedit1 and xedit2
+	[call sh-calc "$root_width - $xedit2_width - $xedit1_x * 4" expected_width]
+	[call sh-calc "$root_height - $xedit1_y - $xedit1_x" expected_height]
+	[log verify xedit1 window geometry ${expected_width}x${expected_height}]
+	!xwininfo -id $xedit1_window
+	?Width: $expected_width
+	?Height: $expected_height
+	?SH-PROMPT:
+
+[shell Xvfb]
+	[call stop-xvfb]

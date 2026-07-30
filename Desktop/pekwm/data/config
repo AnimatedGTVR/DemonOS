@@ -1,0 +1,66 @@
+# This file is in the public domain. Anyone is free to copy, modify, publish
+# use, sell or distribute for any purpose, commercial or non-commercial, and by
+# any means.
+
+INCLUDE = "$_PEKWM_ETC_PATH/config_system"
+
+Files {
+	Theme = "$_PEKWM_THEME_PATH/default"
+	ThemeVariant = ""
+}
+
+Screen {
+	Scale = "1.0"
+
+	Workspaces = "4"
+	WorkspacesPerRow = "2"
+	WorkspaceNames = "01;02;03;04"
+
+	# Remove below comment if you want the pointer to move whenever focus
+	# changes by the means of focus toggle or new clients.
+	# WarpPointerOn = "New FocusChange"
+
+	Placement {
+		Model = "CenteredOnParent Smart MouseNotUnder"
+	}
+}
+
+//Debug {
+//	File = "~/.pekwm/log"
+//	Level = "debug"
+//}
+
+Hooks {
+	# Script executed when a change in connected monitors is detected
+	OnMonitorChange = ""
+	# Script executed when a change in monitor configuration is detected
+	# (xrandr changes)
+	OnMonitorConfigurationChange = ""
+}
+
+//Sys {
+//	LocationLookup = "False"
+//	Latitude = "0.0"
+//	Longitude = "0.0"
+//	XSettings = "True"
+//	Dpi = "96.0"
+//	# Number of seconds of inactivity before screen lock is started,
+//      # set to 0 to disable.
+//	ScreenLockIdleTime = 0" 
+//      # Allow applications to inhibit automatic locking.
+//      ScreenLockAllowInhibit = "True"
+//	MonitorLoadOnChange = "False"
+//	MonitorAutoConfigure = "False"
+//	NetTheme = ""
+//	NetIconTheme = ""
+//	XResources {
+//		Day {
+//			"XTerm*background" = "#ffffff"
+//			"XTerm*foreground" = "#31363b"
+//		}
+//		Night {
+//			"XTerm*background" = "#22272e"
+//			"XTerm*foreground" = "#a5b1be"
+//		}
+//	}
+//}

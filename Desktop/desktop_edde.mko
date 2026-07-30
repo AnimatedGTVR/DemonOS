@@ -308,10 +308,14 @@ fn desktop_draw_task_panel(display: u64, request_address: u64,
     # ALIGN_RIGHT, third in load order -- x=537): real live window count
     # (0..8), the same telemetry substitution DemonOS's activity bars
     # used, since there is no /proc here to read real CPU/memory load
-    # from. This stands in for the pager visible in the reference
-    # screenshot, which would otherwise have to be a fake "1 2 3 4" --
-    # this kernel has no virtual-desktop concept to back it with real
-    # data.
+    # from. Wave 13 added a real workspace concept (see
+    # compositor_edde.mko's slot_workspace/switch_workspace, a genuine
+    # PekWM-derived port), switched with Super+1..4 -- but the reference
+    # screenshot's fixed applet spacing (see this function's header
+    # comment for the exact left/right walk) leaves no free pixels for a
+    # pager widget between the settings gear at x=512 and this cluster at
+    # x=537, so the switch stays keyboard-only rather than crowding a
+    # widget in that isn't backed by that same walk.
     bar1: u64 = Desktop.well_face();
     if window_count >= 1 { bar1 = Desktop.accent_blue(); }
     bar2: u64 = Desktop.well_face();

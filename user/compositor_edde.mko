@@ -170,6 +170,17 @@ fn unpack_task_menu_slot(packed: u64) -> u64 {
     return field - (field / 16) * 16;
 }
 
+# Wave 13: active_workspace (0..workspace_count()-1) packed at 2^28 (268435456),
+# clear of task_menu_slot's 2^24 stride (max contribution 8*16777216 =
+# 134217728 < 268435456), folded into the same word for the same
+# 6-parameter-ceiling reason as launcher_open/task_menu_slot above --
+# render_scene's window draw loop and top_slot_at hit-testing both need to
+# know which workspace is active to filter by slot_on_workspace().
+fn unpack_active_workspace(packed: u64) -> u64 {
+    field: u64 = packed / 268435456;
+    return field - (field / 16) * 16;
+}
+
 fn unpack_cursor_x(packed: u64) -> u64 {
     return packed - (packed / 1024) * 1024;
 }
@@ -449,8 +460,19 @@ fn write_event_channel_name(name: vptr<u8>, window_id: u64) -> u64 {
 fn send_window_event(name_scratch: u64, packet_scratch: u64, window_id: u64,
                      opcode_serial: u64, word2: u64, word3: u64) -> u64 {
     name: vptr<u8> = vptr_from_u8(name_scratch);
-    write_event_channel_name(name, window_id);
-    send_channel: u64 = MakoAbi.channel_connect(name_scratch, 12);
+    name_length: u64 = 12;
+    if window_id >= 2097152 {
+        # "demonx.display.0", packed little-endian four bytes at a time.
+        name_words: vptr<u32> = vptr_from_u32(name_scratch);
+        vptr_write_u32(name_words, 1869440356);
+        vptr_write_u32(vptr_offset_u32(name_words, 1), 1680767086);
+        vptr_write_u32(vptr_offset_u32(name_words, 2), 1819308905);
+        vptr_write_u32(vptr_offset_u32(name_words, 3), 808352097);
+        name_length = 16;
+    } else {
+        write_event_channel_name(name, window_id);
+    }
+    send_channel: u64 = MakoAbi.channel_connect(name_scratch, name_length);
     if send_channel == u64_max() { return 0; }
     # Only words 0-3 carry real content; every receiving client's parser
     # (window_event_client.mko, window_client.mko's new event loop) only
@@ -950,7 +972,8 @@ fn layer_overlay() -> u64 { return 3; }
 
 fn slot_app_kind(slot: u64) -> u64 {
     table: vptr<u64> = table_ptr();
-    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9))));
+    packed_low: u64 = low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9))));
+    return packed_low - (packed_low / 16) * 16;
 }
 
 fn slot_layer(slot: u64) -> u64 {
@@ -961,8 +984,10 @@ fn slot_layer(slot: u64) -> u64 {
 fn slot_set_app_kind(slot: u64, kind: u64) -> u64 {
     table: vptr<u64> = table_ptr();
     current: u64 = vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
+    packed_low: u64 = low32(current);
+    workspace_bits: u64 = (packed_low / 16) * 16;
     vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)),
-                   kind + high32(current) * 4294967296);
+                   kind + workspace_bits + high32(current) * 4294967296);
     return 0;
 }
 
@@ -971,6 +996,42 @@ fn slot_set_layer(slot: u64, layer: u64) -> u64 {
     current: u64 = vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
     vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)),
                    low32(current) + layer * 4294967296);
+    return 0;
+}
+
+# Wave 13: real multi-workspace support, ported from PekWM's Workspaces
+# class (real EDE's actual window manager, see
+# Desktop/pekwm/src/wm/Workspaces.hh/.cc -- a workspace index per window,
+# switching hides/shows by filtering on it)
+# rather than the fake "1 2 3 4" pager a screenshot comparison earlier this
+# session would have called for without one: this kernel had no workspace
+# concept at all until now, so drawing that pager would have been exactly
+# the kind of fabricated indicator this whole project has refused elsewhere
+# (the battery icon, the activity bars). Packed into word9's low32
+# alongside app_kind (app_kind < 16, so app_kind + workspace*16 never
+# collides -- see slot_app_kind/slot_set_app_kind's own masking).
+fn workspace_count() -> u64 { return 4; }
+
+fn slot_workspace(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    packed_low: u64 = low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9))));
+    return packed_low / 16;
+}
+
+fn slot_set_workspace(slot: u64, workspace: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    current: u64 = vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)),
+                   slot_app_kind(slot) + workspace * 16 + high32(current) * 4294967296);
+    return 0;
+}
+
+# Wave 13: real per-workspace visibility, used everywhere DemonOS's
+# original slot_visible() (state-only) would otherwise show/hit-test/list a
+# window that lives on a different workspace than the one currently active.
+fn slot_on_workspace(slot: u64, active_workspace: u64) -> u64 {
+    if slot_visible(slot) == 0 { return 0; }
+    if slot_workspace(slot) == active_workspace { return 1; }
     return 0;
 }
 
@@ -1042,13 +1103,14 @@ fn find_free_slot() -> u64 {
     return 8;
 }
 
-# The topmost (highest z-order) live slot, or 8 if the table is empty.
-fn find_top_slot() -> u64 {
+# The topmost (highest z-order) live slot on the given workspace, or 8 if
+# none is live there.
+fn find_top_slot(workspace: u64) -> u64 {
     best_slot: u64 = 8;
     best_key: u64 = 0;
     slot: u64 = 0;
     while slot < 8 {
-        if slot_visible(slot) == 1 {
+        if slot_on_workspace(slot, workspace) == 1 {
             key: u64 = slot_stack_key(slot);
             if best_slot == 8 or key > best_key {
                 best_slot = slot;
@@ -1063,12 +1125,12 @@ fn find_top_slot() -> u64 {
 # Return the topmost visible client containing a device-space point. Cursor
 # selection, focus, clicks, and drag initiation all use this one routine so
 # they cannot disagree about which window owns a pixel.
-fn top_slot_at(x: u64, y: u64) -> u64 {
+fn top_slot_at(x: u64, y: u64, workspace: u64) -> u64 {
     best_slot: u64 = 8;
     best_key: u64 = 0;
     slot: u64 = 0;
     while slot < 8 {
-        if slot_visible(slot) == 1 and
+        if slot_on_workspace(slot, workspace) == 1 and
            x >= slot_x(slot) and x < slot_x(slot) + slot_width(slot) and
            y >= slot_y(slot) and y < slot_y(slot) + slot_height(slot) {
             key: u64 = slot_stack_key(slot);
@@ -1090,39 +1152,128 @@ fn top_slot_at(x: u64, y: u64) -> u64 {
 # window as the next focus right away, while render_window keeps drawing this
 # slot -- fading it out -- until the idle heartbeat's settle scan (see
 # anim_transition_ticks()) finishes the transition and actually frees it.
-fn close_slot(slot: u64, anim_phase: u64) -> u64 {
+fn close_slot(slot: u64, anim_phase: u64, workspace: u64) -> u64 {
     surface_id: u64 = slot_surface_id(slot);
-    if surface_id != 0 { MakoAbi.surface_unmap(surface_id); }
+    # Bug found interactively this session (Alt+F4 on a mapped-surface
+    # window, e.g. the terminal, page-faulted): surface_unmap() invalidates
+    # the mapping, but the fade-out animation keeps calling render_window
+    # on this slot until the settle scan frees it (see this function's own
+    # header comment). Without clearing slot_mapped_address here too, that
+    # fade-out kept reading mapped_pixel() off the now-unmapped page every
+    # frame -- a real read-after-unmap, not a Wave 13 regression, just
+    # never exercised until this session's Alt+F4 test. Clearing it to 0
+    # falls back to the same flat placeholder content CREATE already uses
+    # when a mapping was never available.
+    if surface_id != 0 {
+        MakoAbi.surface_unmap(surface_id);
+        # Drop the granted capability as well as the mapping; otherwise every
+        # closed client permanently retains a kernel surface.
+        MakoAbi.handle_close(surface_id);
+        slot_set_mapped_address(slot, 0);
+    }
     slot_set_anim(slot, 2, anim_phase);
     slot_set_id_zorder(slot, slot_id(slot), 0);
-    top: u64 = find_top_slot();
+    top: u64 = find_top_slot(workspace);
     if top == 8 { return 0; }
     return slot_id(top);
 }
 
-# Super+D is a reversible show-desktop action. If any window is visible it is
-# minimized; if all live windows are minimized, their exact normal/maximized
-# states are restored and the topmost one regains focus.
-fn toggle_show_desktop() -> u64 {
+# Super+D is a reversible show-desktop action, scoped to the active
+# workspace: if any window on it is visible it is minimized; if all of its
+# live windows are minimized, their exact normal/maximized states are
+# restored and the topmost one regains focus.
+fn toggle_show_desktop(workspace: u64) -> u64 {
     visible: u64 = 0;
     slot: u64 = 0;
     while slot < 8 {
-        if slot_visible(slot) == 1 { visible = 1; }
+        if slot_on_workspace(slot, workspace) == 1 { visible = 1; }
         slot = slot + 1;
     }
     slot = 0;
     while slot < 8 {
-        if visible == 1 and slot_visible(slot) == 1 {
-            slot_set_state(slot, slot_state(slot) + 1);
-        } else if visible == 0 and slot_minimized(slot) == 1 {
-            slot_set_state(slot, slot_state(slot) - 1);
+        if slot_workspace(slot) == workspace {
+            if visible == 1 and slot_visible(slot) == 1 {
+                slot_set_state(slot, slot_state(slot) + 1);
+            } else if visible == 0 and slot_minimized(slot) == 1 {
+                slot_set_state(slot, slot_state(slot) - 1);
+            }
         }
         slot = slot + 1;
     }
     if visible == 1 { return 0; }
-    top: u64 = find_top_slot();
+    top: u64 = find_top_slot(workspace);
     if top == 8 { return 0; }
     return slot_id(top);
+}
+
+# Wave 13: real MRU (most-recently-used) focus order, ported from PekWM's
+# Workspaces::_mru stack (addToMRUFront/removeFromMRU, see
+# Desktop/pekwm/src/wm/Workspaces.hh) -- Alt+Tab below cycles this real
+# recency order instead of DemonOS's original fixed table-slot order,
+# matching how a real window manager's Alt+Tab actually behaves (most
+# recently focused window first, not lowest slot index first). Packed as
+# 8 nibbles (slot indices 0..7) in one u64 since MKO's kernel profile has
+# no arrays; nibble 0 is the most-recently-used slot.
+fn mru_nibble_get(packed: u64, index: u64) -> u64 {
+    shift: u64 = 1;
+    i: u64 = 0;
+    while i < index { shift = shift * 16; i = i + 1; }
+    return (packed / shift) - (packed / (shift * 16)) * 16;
+}
+
+# Moves `slot` to the front of the MRU order, preserving the relative order
+# of every other entry (PekWM's addToMRUFront: remove, then insert at
+# front).
+fn mru_touch(packed: u64, slot: u64) -> u64 {
+    result: u64 = slot;
+    write_index: u64 = 1;
+    read_index: u64 = 0;
+    while read_index < 8 {
+        candidate: u64 = mru_nibble_get(packed, read_index);
+        if candidate != slot and write_index < 8 {
+            shift: u64 = 1;
+            k: u64 = 0;
+            while k < write_index { shift = shift * 16; k = k + 1; }
+            result = result + candidate * shift;
+            write_index = write_index + 1;
+        }
+        read_index = read_index + 1;
+    }
+    return result;
+}
+
+# Wave 13: real workspace switch, ported from PekWM's
+# Workspaces::setWorkspace() hideAll(old)/unhideAll(new) pairing: every
+# visible window tagged for the workspace being left is minimized, and
+# every minimized window tagged for
+# the workspace being entered is restored. Returns the id of the topmost
+# window now visible on the new workspace, or 0 if it is empty.
+fn switch_workspace(target: u64) -> u64 {
+    slot: u64 = 0;
+    while slot < 8 {
+        window_workspace: u64 = slot_workspace(slot);
+        if window_workspace == target and slot_minimized(slot) == 1 {
+            slot_set_state(slot, slot_state(slot) - 1);
+        } else if window_workspace != target and slot_visible(slot) == 1 {
+            slot_set_state(slot, slot_state(slot) + 1);
+        }
+        slot = slot + 1;
+    }
+    best_slot: u64 = 8;
+    best_key: u64 = 0;
+    slot = 0;
+    while slot < 8 {
+        if slot_on_workspace(slot, target) == 1 {
+            key: u64 = slot_stack_key(slot);
+            if best_slot == 8 or key > best_key {
+                best_slot = slot;
+                best_key = key;
+            }
+        }
+        slot = slot + 1;
+    }
+    if best_slot == 8 { return 0; }
+    return slot_id(best_slot);
 }
 
 # direction: 1 left, 2 right, 3 maximize/up, 4 restore-or-minimize/down.
@@ -1716,6 +1867,7 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
     # through for the launcher search box.
     scene_launcher_open: u64 = unpack_launcher_open(high32(anim_and_cursor));
     packed_cursor: u64 = high32(anim_and_cursor);
+    scene_active_workspace: u64 = unpack_active_workspace(high32(anim_and_cursor));
     # Live window count, computed up front so the menu bar's activity bars
     # (Wave 10 -- a native port of ede-panel's CpuMonitor/system-monitor
     # applet spirit, real telemetry instead of a fake CPU percentage since
@@ -1742,7 +1894,7 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
     live_count: u64 = 0;
     scan: u64 = 0;
     while scan < 8 {
-        if slot_visible(scan) == 1 { live_count = live_count + 1; }
+        if slot_on_workspace(scan, scene_active_workspace) == 1 { live_count = live_count + 1; }
         scan = scan + 1;
     }
     while drawn_count < live_count {
@@ -1750,7 +1902,7 @@ fn render_scene(display: u64, request_address: u64, pixel_address: u64,
         pick_z: u64 = 0;
         slot: u64 = 0;
         while slot < 8 {
-            if slot_visible(slot) == 1 {
+            if slot_on_workspace(slot, scene_active_workspace) == 1 {
                 mask_bit: u64 = 1;
                 shift: u64 = 0;
                 while shift < slot { mask_bit = mask_bit * 2; shift = shift + 1; }
@@ -1918,6 +2070,19 @@ fn compositor_main(service_name: u64) -> u64 {
     # call already reads this value fresh each frame.
     settings_open: u64 = 0;
     accent_theme: u64 = 0;
+    # Wave 13: real multi-workspace state, ported from PekWM's Workspaces::_active
+    # (see slot_workspace/slot_set_workspace/slot_on_workspace above).
+    # Super+1..4 calls switch_workspace() below, which hides every visible
+    # window not tagged for the target workspace and restores every
+    # minimized window that is -- the same hideAll/unhideAll pairing
+    # PekWM's real setWorkspace() performs.
+    active_workspace: u64 = 0;
+    # Wave 13: real MRU focus order (see mru_touch's comment). Identity
+    # order 0,1,2,...,7 packed as nibbles; harmless as a starting point
+    # since every slot starts empty (slot_state 0) and gets touched to the
+    # front the first time it's ever really focused.
+    mru_order: u64 = 1985229328;
+    previous_focused_window: u64 = 0;
     cursor_x: u64 = 60;
     cursor_y: u64 = 80;
     if MakoAbi.display_cursor_move(display, cursor_x, cursor_y, 0) != 0 {
@@ -1991,6 +2156,7 @@ fn compositor_main(service_name: u64) -> u64 {
                         # window -- never inherits a stale tagged kind.
                         slot_set_app_kind(free_slot, pending_spawn_kind);
                         slot_set_layer(free_slot, layer_normal());
+                        slot_set_workspace(free_slot, active_workspace);
                         pending_spawn_kind = app_kind_generic();
                         focused_window = update_window;
 
@@ -2020,8 +2186,8 @@ fn compositor_main(service_name: u64) -> u64 {
                 target_slot: u64 = find_slot(update_window);
                 if target_slot != 8 {
                     if focused_window == update_window {
-                        focused_window = close_slot(target_slot, anim_phase);
-                    } else { close_slot(target_slot, anim_phase); }
+                        focused_window = close_slot(target_slot, anim_phase, active_workspace);
+                    } else { close_slot(target_slot, anim_phase, active_workspace); }
                     repaint = 1;
                 }
             } else if update_opcode == 6 {
@@ -2087,7 +2253,7 @@ fn compositor_main(service_name: u64) -> u64 {
                 if resizing != 0 { pointer_icon = resizing + 3; }
                 else if dragging == 1 { pointer_icon = 1; }
                 else {
-                    icon_slot: u64 = top_slot_at(cursor_x, cursor_y);
+                    icon_slot: u64 = top_slot_at(cursor_x, cursor_y, active_workspace);
                     if icon_slot != 8 {
                         isx: u64 = slot_x(icon_slot);
                         isy: u64 = slot_y(icon_slot);
@@ -2135,6 +2301,27 @@ fn compositor_main(service_name: u64) -> u64 {
                 # drop this one repaint rather than take down the whole
                 # desktop over a single missed cursor update.
                 MakoAbi.display_cursor_move(display, cursor_x, cursor_y, pointer_icon);
+                # X11 clients receive motion through DemonX's blocking display
+                # channel. Only content motion is forwarded; compositor-owned
+                # chrome, active native drags/resizes, and the login gate keep
+                # their existing native behavior.
+                if login_done == 1 and dragging == 0 and resizing == 0 {
+                    motion_slot: u64 =
+                        top_slot_at(cursor_x, cursor_y, active_workspace);
+                    if motion_slot != 8 and slot_id(motion_slot) >= 2097152 {
+                        motion_x: u64 = slot_x(motion_slot);
+                        motion_y: u64 = slot_y(motion_slot);
+                        if cursor_y >= motion_y + 32 {
+                            pointer_opcode_serial: u64 = pack_words(458753, 5);
+                            send_window_event(event_address + 32, pixel_address,
+                                              slot_id(motion_slot),
+                                              pointer_opcode_serial,
+                                              (cursor_x - motion_x) +
+                                              (cursor_y - motion_y) * 4294967296,
+                                              0);
+                        }
+                    }
+                }
             }
             if live_type == 3 { repaint = 1; }
             key_now: u64 = MakoAbi.ticks();
@@ -2202,6 +2389,7 @@ fn compositor_main(service_name: u64) -> u64 {
                 alt_down = alt_down - (alt_down / 2) * 2;
                 super_down: u64 = live_modifiers / 8;
                 super_down = super_down - (super_down / 2) * 2;
+                shift_down: u64 = live_modifiers - (live_modifiers / 2) * 2;
                 if launcher_open == 1 and live_type == 1 {
                     # Launcher search box (Wave 12): captures every keydown
                     # while the launcher is open instead of falling through
@@ -2252,7 +2440,7 @@ fn compositor_main(service_name: u64) -> u64 {
                             pending_spawn_kind = app_kind_generic();
                             if find_free_slot() != 8 { spawn_app(4); }
                         } else if first_char == 115 {
-                            focused_window = toggle_show_desktop();
+                            focused_window = toggle_show_desktop(active_workspace);
                         }
                         launcher_open = 0;
                         search_length = 0; search_query = 0;
@@ -2263,19 +2451,41 @@ fn compositor_main(service_name: u64) -> u64 {
                     shortcut_handled = 1;
                     repaint = 1;
                 } else if live_code == 15 and alt_down == 1 {
-                    # Alt+Tab cycles through every visible table slot and
-                    # raises the selected window, including restored clients.
+                    # Wave 13: Alt+Tab now cycles the real MRU order (see
+                    # mru_touch's comment), a genuine port of PekWM's
+                    # Workspaces::_mru-driven Alt+Tab rather than DemonOS's
+                    # original fixed table-slot cycling -- the next window
+                    # switched to is whichever visible, on-workspace window
+                    # was MOST RECENTLY focused before the current one, not
+                    # just the next highest slot index. Shift+Alt+Tab walks
+                    # the same real order from the opposite end (the LEAST
+                    # recently used window first), the standard reverse-
+                    # cycle binding every real window manager pairs with
+                    # forward Alt+Tab -- since this compositor commits focus
+                    # on every press rather than deferring to release like
+                    # PekWM's own preview-then-commit cycle, Shift+Tab here
+                    # is what lets a press be undone instead of having to
+                    # cycle all the way back around.
                     if live_type == 1 {
-                        start_slot: u64 = 0;
-                        current_slot: u64 = find_slot(focused_window);
-                        if current_slot != 8 { start_slot = current_slot + 1; }
-                        attempts: u64 = 0;
+                        current_focus_slot: u64 = find_slot(focused_window);
                         switch_slot: u64 = 8;
-                        while attempts < 8 and switch_slot == 8 {
-                            candidate: u64 = start_slot + attempts;
-                            if candidate >= 8 { candidate = candidate - 8; }
-                            if slot_visible(candidate) == 1 { switch_slot = candidate; }
-                            attempts = attempts + 1;
+                        mru_step: u64 = 0;
+                        while mru_step < 8 and switch_slot == 8 {
+                            mru_scan: u64 = mru_step;
+                            if shift_down == 1 { mru_scan = 7 - mru_step; }
+                            candidate: u64 = mru_nibble_get(mru_order, mru_scan);
+                            if candidate != current_focus_slot and
+                               slot_on_workspace(candidate, active_workspace) == 1 {
+                                switch_slot = candidate;
+                            }
+                            mru_step = mru_step + 1;
+                        }
+                        if switch_slot == 8 and current_focus_slot != 8 and
+                           slot_on_workspace(current_focus_slot, active_workspace) == 1 {
+                            # Only one window lives on this workspace --
+                            # fall back to it so a lone window doesn't lose
+                            # focus on Alt+Tab.
+                            switch_slot = current_focus_slot;
                         }
                         if switch_slot != 8 {
                             switch_id: u64 = slot_id(switch_slot);
@@ -2292,7 +2502,7 @@ fn compositor_main(service_name: u64) -> u64 {
                     # surface-safe lifetime path as its titlebar button.
                     if live_type == 1 {
                         close_target: u64 = find_slot(focused_window);
-                        if close_target != 8 { focused_window = close_slot(close_target, anim_phase); }
+                        if close_target != 8 { focused_window = close_slot(close_target, anim_phase, active_workspace); }
                         launcher_open = 0;
                         repaint = 1;
                     }
@@ -2312,7 +2522,24 @@ fn compositor_main(service_name: u64) -> u64 {
                     if live_type == 1 {
                         super_chord = 1;
                         if live_code == 32 {
-                            focused_window = toggle_show_desktop();
+                            focused_window = toggle_show_desktop(active_workspace);
+                            launcher_open = 0;
+                            repaint = 1;
+                        } else if live_code >= 2 and live_code <= 5 {
+                            # Wave 13: Super+1..4, real workspace switch
+                            # (PekWM's Workspaces::setWorkspace), not a decorative
+                            # pager -- see switch_workspace()'s own comment.
+                            # live_code is the raw PS/2 Set-1 scancode (see
+                            # every other shortcut in this chain -- e.g.
+                            # live_code==15 is Tab's 0x0F, ==62 is F4's
+                            # 0x3E), not ASCII: digits 1..4 are scancodes
+                            # 0x02..0x05. An earlier pass here used ASCII
+                            # 49..52 by mistake, which meant this branch
+                            # could never fire -- caught interactively this
+                            # session (Super+2 produced no effect in
+                            # QEMU) rather than by code review.
+                            active_workspace = live_code - 2;
+                            focused_window = switch_workspace(active_workspace);
                             launcher_open = 0;
                             repaint = 1;
                         } else if live_code == 331 or live_code == 333 or
@@ -2325,7 +2552,7 @@ fn compositor_main(service_name: u64) -> u64 {
                             if snap_target != 8 {
                                 snap_slot(snap_target, snap_direction);
                                 if slot_minimized(snap_target) == 1 {
-                                    new_top: u64 = find_top_slot();
+                                    new_top: u64 = find_top_slot(active_workspace);
                                     if new_top == 8 { focused_window = 0; }
                                     else { focused_window = slot_id(new_top); }
                                 }
@@ -2398,7 +2625,7 @@ fn compositor_main(service_name: u64) -> u64 {
                     pending_spawn_kind = app_kind_generic();
                     if find_free_slot() != 8 { spawn_app(4); }
                 } else {
-                    focused_window = toggle_show_desktop();
+                    focused_window = toggle_show_desktop(active_workspace);
                 }
                 launcher_open = 0;
                 repaint = 1;
@@ -2423,7 +2650,7 @@ fn compositor_main(service_name: u64) -> u64 {
                         if slot_minimized(task_menu_slot) == 0 {
                             slot_set_state(task_menu_slot, slot_state(task_menu_slot) + 1);
                             if focused_window == slot_id(task_menu_slot) {
-                                new_top: u64 = find_top_slot();
+                                new_top: u64 = find_top_slot(active_workspace);
                                 if new_top == 8 { focused_window = 0; }
                                 else { focused_window = slot_id(new_top); }
                             }
@@ -2437,7 +2664,7 @@ fn compositor_main(service_name: u64) -> u64 {
                         focused_window = slot_id(task_menu_slot);
                     } else if menu_row == 2 {
                         # Close: real EDE's close_cb (netwm_window_close).
-                        focused_window = close_slot(task_menu_slot, anim_phase);
+                        focused_window = close_slot(task_menu_slot, anim_phase, active_workspace);
                     }
                 }
                 task_menu_slot = 8;
@@ -2471,7 +2698,7 @@ fn compositor_main(service_name: u64) -> u64 {
                         focused_window = task_id;
                     } else if focused_window == task_id {
                         slot_set_state(task_slot, task_state + 1);
-                        new_top: u64 = find_top_slot();
+                        new_top: u64 = find_top_slot(active_workspace);
                         if new_top == 8 { focused_window = 0; }
                         else { focused_window = slot_id(new_top); }
                     } else {
@@ -2527,7 +2754,7 @@ fn compositor_main(service_name: u64) -> u64 {
                 # clicking any window (title bar or content) refocuses it and
                 # raises its z-order. This replaces the old single-window
                 # scalar hit test.
-                hit_slot: u64 = top_slot_at(live_x, live_y);
+                hit_slot: u64 = top_slot_at(live_x, live_y, active_workspace);
                 # The desktop Demon shortcut opens the native launcher only
                 # when no window covers the tile. Window hit-testing happens
                 # first so this behaves like a real desktop icon rather than
@@ -2561,7 +2788,7 @@ fn compositor_main(service_name: u64) -> u64 {
                         # generous 20px square, the button row only 16px tall).
                         target_slot: u64 = find_slot(hit_id);
                         if target_slot != 8 {
-                            focused_window = close_slot(target_slot, anim_phase);
+                            focused_window = close_slot(target_slot, anim_phase, active_workspace);
                         }
                     } else if live_x >= hit_x + hit_width - 52 and
                               live_x < hit_x + hit_width - 34 and
@@ -2575,7 +2802,7 @@ fn compositor_main(service_name: u64) -> u64 {
                         # Preserve whether this is a normal or maximized
                         # window so taskbar restore returns to the same mode.
                         slot_set_state(hit_slot, slot_state(hit_slot) + 1);
-                        new_top: u64 = find_top_slot();
+                        new_top: u64 = find_top_slot(active_workspace);
                         if new_top == 8 { focused_window = 0; }
                         else { focused_window = slot_id(new_top); }
                     } else if hit_direction != 0 {
@@ -2607,7 +2834,8 @@ fn compositor_main(service_name: u64) -> u64 {
                         click_opcode_serial: u64 = pack_words(720897, 4);
                         send_window_event(event_address + 32, pixel_address, hit_id,
                                           click_opcode_serial,
-                                          (live_x - hit_x) + (live_y - hit_y) * 4294967296, 0);
+                                          (live_x - hit_x) + (live_y - hit_y) * 4294967296,
+                                          1 + (low32(live_word) / 65536) * 4294967296);
                     }
                     repaint = 1;
                 }
@@ -2698,6 +2926,23 @@ fn compositor_main(service_name: u64) -> u64 {
                     repaint = 1;
                 }
             } else if live_type == 5 {
+                if dragging == 0 and resizing == 0 {
+                    release_slot: u64 =
+                        top_slot_at(live_x, live_y, active_workspace);
+                    if release_slot != 8 and slot_id(release_slot) >= 2097152 {
+                        release_x: u64 = slot_x(release_slot);
+                        release_y: u64 = slot_y(release_slot);
+                        if live_y >= release_y + 32 {
+                            release_opcode_serial: u64 = pack_words(720897, 6);
+                            send_window_event(event_address + 32, pixel_address,
+                                              slot_id(release_slot),
+                                              release_opcode_serial,
+                                              (live_x - release_x) +
+                                              (live_y - release_y) * 4294967296,
+                                              2 + (low32(live_word) / 65536) * 4294967296);
+                        }
+                    }
+                }
                 dragging = 0;
                 resizing = 0;
             }
@@ -2751,6 +2996,17 @@ fn compositor_main(service_name: u64) -> u64 {
         }
         if repaint == 1 {
             dirty = 1;
+            # Wave 13: sync the real MRU order (see mru_touch's comment)
+            # whenever focus actually changed this iteration, regardless of
+            # which branch above changed it -- CREATE, a taskbar/window
+            # click, Alt+Tab itself, a close-driven refocus, or a
+            # workspace switch. One check here covers all of them instead
+            # of instrumenting every focused_window assignment separately.
+            if focused_window != previous_focused_window {
+                mru_focus_slot: u64 = find_slot(focused_window);
+                if mru_focus_slot != 8 { mru_order = mru_touch(mru_order, mru_focus_slot); }
+                previous_focused_window = focused_window;
+            }
             # Self-report window-table state right when it actually changes
             # (create/close/focus), not deferred to the next paint, so the
             # kernel boot test can observe it promptly via a real syscall
@@ -2787,7 +3043,8 @@ fn compositor_main(service_name: u64) -> u64 {
                                               pack_words(anim_phase, pack_cursor_theme_and_settings(
                                                   cursor_x, cursor_y, accent_theme, settings_open) +
                                                   launcher_open * 8388608 +
-                                                  task_menu_slot * 16777216),
+                                                  task_menu_slot * 16777216 +
+                                                  active_workspace * 268435456),
                                               search_query);
             }
             # A failed draw call inside a repaint (a single bad

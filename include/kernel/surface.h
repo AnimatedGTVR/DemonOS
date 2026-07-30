@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SURFACE_LIMIT 4u
+#define SURFACE_LIMIT 8u
 #define SURFACE_MAX_WIDTH 256u
 #define SURFACE_MAX_HEIGHT 64u
 /* The arena is suballocated per surface. Terminal and browser each use a

@@ -1,0 +1,86 @@
+# This file is in the public domain. Anyone is free to copy, modify, publish
+# use, sell or distribute for any purpose, commercial or non-commercial, and by
+# any means.
+
+/*
+ Desktop windows such as nautilus window in gnome. These should
+ cover the root window and be below all other windows. Also they
+ should not be included in the menu and in snapping.
+ */
+Property = "DESKTOP" {
+    FrameGeometry = "0x0+0+0"
+    Titlebar = "False"
+    Border = "False"
+    Sticky = "True"
+    Skip = "FocusToggle Menus Snap"
+    Layer = "Desktop"
+    FocusNew = "False"
+    Focusable = "False"
+    DisallowedActions = "Move"
+}
+Property = "DOCK" {
+    Titlebar = "False"
+    Border = "False"
+    Sticky = "True"
+    Layer = "Dock"
+    Skip = "FocusToggle Menus"
+    FocusNew = "False"
+    Focusable = "False"
+    DisallowedActions = "Move"
+}
+Property = "TOOLBAR" {
+    Skip = "FocusToggle Menus Snap"
+}
+Property = "MENU" {
+    Titlebar = "False"
+    Border = "False"
+    Skip = "FocusToggle Menus Snap"
+}
+Property = "UTILITY" {
+}
+Property = "SPLASH" {
+    Titlebar = "False"
+    Border = "False"
+    Layer = "OnTop"
+    FocusNew = "False"
+}
+Property = "DIALOG" {
+    Layer = "OnTop"
+}
+
+Property = "DROPDOWNMENU" {
+    Titlebar = "False"
+    Border = "False"
+    Skip = "FocusToggle Menus Snap"
+}
+
+Property = "POPUPMENU" {
+    Titlebar = "False"
+    Border = "False"
+    Skip = "FocusToggle Menus Snap"
+}
+
+Property = "TOOLTIP" {
+    Titlebar = "False"
+    Border = "False"
+    FocusNew = "False"
+    Skip = "FocusToggle Menus Snap"
+}
+
+Property = "NOTIFICATION" {
+    Titlebar = "False"
+    Border = "False"
+    FocusNew = "False"
+    Skip = "FocusToggle Menus Snap"
+}
+
+Property = "COMBO" {
+    Skip = "FocusToggle Menus Snap"
+}
+
+Property = "DND" {
+    Skip = "FocusToggle Menus Snap"
+}
+
+Property = "NORMAL" {
+}

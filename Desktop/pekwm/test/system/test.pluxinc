@@ -1,0 +1,66 @@
+[doc]
+Common functions and variables for pekwm tests
+[enddoc]
+
+[config set shell_hook_init=init-shell]
+
+[global DISPLAY=:9]
+[global DISPLAYNUM=9]
+[global PEKWM_BASE_OPTIONS=--skip-start --log-file - --log-level trace]
+[global PEKWM_OPTIONS=$PEKWM_BASE_OPTIONS --config config/pekwm.config]
+
+[function init-shell-bindir]
+	[call sh-eval "mkdir -p ./bin"]
+	[call sh-eval "ln -sf ../$BIN_DIR/bg/pekwm_bg ./bin"]
+	[call sh-eval "ln -sf ../$BIN_DIR/ctrl/pekwm_ctrl ./bin"]
+	[call sh-eval "ln -sf ../$BIN_DIR/dialog/pekwm_dialog ./bin"]
+	[call sh-eval "ln -sf ../$BIN_DIR/sys/pekwm_sys ./bin"]
+	[call sh-eval "ln -sf ../$BIN_DIR/wm/pekwm ./bin"]
+	[call sh-eval "ln -sf ../$BIN_DIR/wm/pekwm_wm ./bin"]
+[endfunction]
+
+[function init-shell-cmake]
+	[global BIN_DIR=../../build/src]
+	[global TEST_DIR=../../build/test/system]
+	[global SCRIPTS_DIR=../../build/data/scripts]
+	[call init-shell-bindir]
+[endfunction]
+
+[function init-shell-autoconf]
+	[global BIN_DIR=../../src]
+	[global TEST_DIR=.]
+	[global SCRIPTS_DIR=../../data/scripts]
+	[call init-shell-bindir]
+[endfunction]
+
+[function init-test-display]
+	[call sh-eval "export DISPLAY=$$TEST_USE_DISPLAY"]
+[endfunction]
+
+[function init-shell]
+	?SH-PROMPT:
+	[call sh-eval "export DISPLAY=$DISPLAY LANG=C LC_CTYPE=C"]
+	[call sh-which valgrind VALGRIND]
+	[call sh-if "x$$TEST_USE_DISPLAY != x" init-test-display]
+	[call sh-if-else "-d ../../build" init-shell-cmake init-shell-autoconf]
+[endfunction]
+
+[function start-xvfb]
+	[call sh-if "-z $$TEST_USE_DISPLAY" do-start-xvfb]
+[endfunction]
+
+[function do-start-xvfb]
+	[log starting Xvfb]
+	-Fatal server error
+	!Xvfb -screen 0 1024x768x24 -dpi 96 -displayfd 1 $DISPLAY
+	?^$DISPLAYNUM$
+[endfunction]
+
+[function stop-xvfb]
+	[call sh-if "-z $$TEST_USE_DISPLAY" do-stop-xvfb]
+[endfunction]
+
+[function do-stop-xvfb]
+	!$_CTRL_C_
+	?SH-PROMPT:
+[endfunction]

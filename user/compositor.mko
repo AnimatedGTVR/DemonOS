@@ -430,8 +430,22 @@ fn write_event_channel_name(name: vptr<u8>, window_id: u64) -> u64 {
 fn send_window_event(name_scratch: u64, packet_scratch: u64, window_id: u64,
                      opcode_serial: u64, word2: u64, word3: u64) -> u64 {
     name: vptr<u8> = vptr_from_u8(name_scratch);
-    write_event_channel_name(name, window_id);
-    send_channel: u64 = MakoAbi.channel_connect(name_scratch, 12);
+    name_length: u64 = 12;
+    if window_id >= 2097152 {
+        # DemonX is itself the native client for every X11 window. Route its
+        # native input packet into the display server's blocking channel so
+        # input wakes it without polling per-window queues.
+        # "demonx.display.0", packed little-endian four bytes at a time.
+        name_words: vptr<u32> = vptr_from_u32(name_scratch);
+        vptr_write_u32(name_words, 1869440356);
+        vptr_write_u32(vptr_offset_u32(name_words, 1), 1680767086);
+        vptr_write_u32(vptr_offset_u32(name_words, 2), 1819308905);
+        vptr_write_u32(vptr_offset_u32(name_words, 3), 808352097);
+        name_length = 16;
+    } else {
+        write_event_channel_name(name, window_id);
+    }
+    send_channel: u64 = MakoAbi.channel_connect(name_scratch, name_length);
     if send_channel == u64_max() { return 0; }
     # Only words 0-3 carry real content; every receiving client's parser
     # (window_event_client.mko, window_client.mko's new event loop) only
@@ -1064,7 +1078,20 @@ fn top_slot_at(x: u64, y: u64) -> u64 {
 # anim_transition_ticks()) finishes the transition and actually frees it.
 fn close_slot(slot: u64, anim_phase: u64) -> u64 {
     surface_id: u64 = slot_surface_id(slot);
-    if surface_id != 0 { MakoAbi.surface_unmap(surface_id); }
+    # Found and fixed via EDDE's own close_slot this session (see its
+    # matching comment): the fade-out animation keeps rendering this slot
+    # after this function returns, and without clearing the mapped address
+    # too, it kept reading mapped_pixel() off the page surface_unmap() had
+    # just invalidated -- a real page fault on Alt+F4 for any window with a
+    # mapped surface (e.g. the terminal), not something new to this port.
+    if surface_id != 0 {
+        MakoAbi.surface_unmap(surface_id);
+        # The mapping and the granted capability are separate resources.
+        # Once close animation uses the mapped snapshot, release the handle
+        # so the owner can reclaim the kernel surface after its own close.
+        MakoAbi.handle_close(surface_id);
+        slot_set_mapped_address(slot, 0);
+    }
     slot_set_anim(slot, 2, anim_phase);
     slot_set_id_zorder(slot, slot_id(slot), 0);
     top: u64 = find_top_slot();
@@ -2011,6 +2038,18 @@ fn compositor_main(service_name: u64) -> u64 {
                         repaint = 1;
                     }
                 }
+            } else if update_opcode == 12 {
+                # POINTER_WARP: DemonX resolved the destination window and
+                # sends absolute desktop coordinates. Move both the software
+                # cursor state and the kernel's native overlay immediately.
+                pointer_geometry: u64 =
+                    vptr_read_u64(vptr_offset_u64(update, 2));
+                cursor_x = low32(pointer_geometry);
+                cursor_y = high32(pointer_geometry);
+                if cursor_x > 639 { cursor_x = 639; }
+                if cursor_y > 479 { cursor_y = 479; }
+                MakoAbi.display_cursor_move(display, cursor_x, cursor_y, 0);
+                repaint = 1;
             }
             # Unrecognized/irrelevant opcodes on the control channel are
             # ignored rather than treated as fatal protocol violations --
@@ -2084,6 +2123,26 @@ fn compositor_main(service_name: u64) -> u64 {
                 # drop this one repaint rather than take down the whole
                 # desktop over a single missed cursor update.
                 MakoAbi.display_cursor_move(display, cursor_x, cursor_y, pointer_icon);
+                # X11 clients receive motion through DemonX's blocking display
+                # channel. Only content motion is forwarded; compositor-owned
+                # chrome, active native drags/resizes, and the login gate keep
+                # their existing native behavior.
+                if login_done == 1 and dragging == 0 and resizing == 0 {
+                    motion_slot: u64 = top_slot_at(cursor_x, cursor_y);
+                    if motion_slot != 8 and slot_id(motion_slot) >= 2097152 {
+                        motion_x: u64 = slot_x(motion_slot);
+                        motion_y: u64 = slot_y(motion_slot);
+                        if cursor_y >= motion_y + 32 {
+                            pointer_opcode_serial: u64 = pack_words(458753, 5);
+                            send_window_event(event_address + 32, pixel_address,
+                                              slot_id(motion_slot),
+                                              pointer_opcode_serial,
+                                              (cursor_x - motion_x) +
+                                              (cursor_y - motion_y) * 4294967296,
+                                              0);
+                        }
+                    }
+                }
             }
             if live_type == 3 { repaint = 1; }
             key_now: u64 = MakoAbi.ticks();
@@ -2492,7 +2551,8 @@ fn compositor_main(service_name: u64) -> u64 {
                         click_opcode_serial: u64 = pack_words(720897, 4);
                         send_window_event(event_address + 32, pixel_address, hit_id,
                                           click_opcode_serial,
-                                          (live_x - hit_x) + (live_y - hit_y) * 4294967296, 0);
+                                          (live_x - hit_x) + (live_y - hit_y) * 4294967296,
+                                          1 + (low32(live_word) / 65536) * 4294967296);
                     }
                     repaint = 1;
                 }
@@ -2583,6 +2643,22 @@ fn compositor_main(service_name: u64) -> u64 {
                     repaint = 1;
                 }
             } else if live_type == 5 {
+                if dragging == 0 and resizing == 0 {
+                    release_slot: u64 = top_slot_at(live_x, live_y);
+                    if release_slot != 8 and slot_id(release_slot) >= 2097152 {
+                        release_x: u64 = slot_x(release_slot);
+                        release_y: u64 = slot_y(release_slot);
+                        if live_y >= release_y + 32 {
+                            release_opcode_serial: u64 = pack_words(720897, 6);
+                            send_window_event(event_address + 32, pixel_address,
+                                              slot_id(release_slot),
+                                              release_opcode_serial,
+                                              (live_x - release_x) +
+                                              (live_y - release_y) * 4294967296,
+                                              2 + (low32(live_word) / 65536) * 4294967296);
+                        }
+                    }
+                }
                 dragging = 0;
                 resizing = 0;
             }
