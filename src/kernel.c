@@ -976,7 +976,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write("PCI_AHCI_UNAVAILABLE\n");
         boot_status("AHCI", "no SATA/AHCI controller exposed");
     }
-    if (install_multiboot_projects(multiboot_info) != 19u)
+    if (install_multiboot_projects(multiboot_info) != 21u)
         boot_fatal("MKO repository/SDK/starter modules are missing from the ISO");
     serial_write("MKO_SYSTEM_PREINSTALLED\n");
     boot_status("MKO system", "MAKO manifest + SDK + starter installed from ISO");

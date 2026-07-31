@@ -32,6 +32,8 @@ DEMONX_ELF := $(BUILD)/demonx.elf
 DEMONX_CLIENT_ELF := $(BUILD)/demonx_client.elf
 DEMONX_XLIB_TEST_ELF := $(BUILD)/demonx-xlib-test.elf
 DEMONWM_ELF := $(BUILD)/demonwm.elf
+FILEMANAGER_ELF := $(BUILD)/filemanager.elf
+SETTINGS_ELF := $(BUILD)/settings.elf
 TETRIS_ELF := $(BUILD)/tetris.elf
 CALCULATOR_ELF := $(BUILD)/calculator.elf
 TERMINAL_CLIENT_ELF := $(BUILD)/terminal_client.elf
@@ -443,6 +445,32 @@ $(DEMONWM_ELF): $(BUILD)/demonwm_entry.o \
 		$(BUILD)/demonwm.o $(BUILD)/demonx_xlib.o -o $@
 	$(STRIP) -s $@
 
+$(BUILD)/filemanager_entry.o: apps/filemanager/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/filemanager.o: apps/filemanager/filemanager.cc \
+		include/X11/Xlib.h include/demon/c_app.h include/demon/dirent.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(FILEMANAGER_ELF): $(BUILD)/filemanager_entry.o \
+		$(BUILD)/filemanager.o $(BUILD)/demonx_xlib.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) $(BUILD)/filemanager_entry.o \
+		$(BUILD)/filemanager.o $(BUILD)/demonx_xlib.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/settings_entry.o: apps/settings/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/settings.o: apps/settings/settings.cc \
+		include/X11/Xlib.h include/demon/c_app.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(SETTINGS_ELF): $(BUILD)/settings_entry.o \
+		$(BUILD)/settings.o $(BUILD)/demonx_xlib.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) $(BUILD)/settings_entry.o \
+		$(BUILD)/settings.o $(BUILD)/demonx_xlib.o -o $@
+	$(STRIP) -s $@
+
 $(BUILD)/tetris_entry.o: apps/tetris/entry.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
@@ -553,7 +581,7 @@ $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) &: tools/package-mako-source.sh FORCE | 
 
 iso: $(ISO) iso-check
 
-$(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(DEMONX_ELF) $(DEMONX_CLIENT_ELF) $(DEMONWM_ELF) $(TETRIS_ELF) $(CALCULATOR_ELF) $(TERMINAL_CLIENT_ELF) $(COUNTER_CLIENT_ELF) $(BROWSER_CLIENT_ELF) $(CXX_HELLO_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/desktop-iso-roadmap.md docs/init-system.md docs/apps-and-git.md docs/c-apps.md docs/freedoom-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/compositor-stage6.md docs/demonx.md docs/network-stage7.md grub/grub-test.cfg
+$(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDOW_MOVE_CLIENT_ELF) $(WINDOW_EVENT_CLIENT_ELF) $(WINDOW_CRASH_CLIENT_ELF) $(DEMONX_ELF) $(DEMONX_CLIENT_ELF) $(DEMONWM_ELF) $(FILEMANAGER_ELF) $(SETTINGS_ELF) $(TETRIS_ELF) $(CALCULATOR_ELF) $(TERMINAL_CLIENT_ELF) $(COUNTER_CLIENT_ELF) $(BROWSER_CLIENT_ELF) $(CXX_HELLO_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/desktop-iso-roadmap.md docs/init-system.md docs/apps-and-git.md docs/c-apps.md docs/freedoom-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/compositor-stage6.md docs/demonx.md docs/network-stage7.md grub/grub-test.cfg
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/grub $(ISO_ROOT)/boot/mako $(ISO_ROOT)/system/mako $(ISO_ROOT)/docs
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
@@ -568,6 +596,8 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(COMPOSITOR_ELF) $(WINDOW_CLIENT_ELF) $(WINDO
 	cp $(DEMONX_ELF) $(ISO_ROOT)/boot/mako/demonx.elf
 	cp $(DEMONX_CLIENT_ELF) $(ISO_ROOT)/boot/mako/demonx-client.elf
 	cp $(DEMONWM_ELF) $(ISO_ROOT)/boot/mako/demonwm.elf
+	cp $(FILEMANAGER_ELF) $(ISO_ROOT)/boot/mako/filemanager.elf
+	cp $(SETTINGS_ELF) $(ISO_ROOT)/boot/mako/settings.elf
 	cp $(TETRIS_ELF) $(ISO_ROOT)/boot/mako/tetris.elf
 	cp $(CALCULATOR_ELF) $(ISO_ROOT)/boot/mako/calculator.elf
 	cp $(CXX_HELLO_ELF) $(ISO_ROOT)/boot/mako/cxx-hello.elf
@@ -630,6 +660,8 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/mako/demonx.elf -type f 2>/dev/null | grep -q demonx.elf
 	@xorriso -indev $(ISO) -find /boot/mako/demonx-client.elf -type f 2>/dev/null | grep -q demonx-client.elf
 	@xorriso -indev $(ISO) -find /boot/mako/demonwm.elf -type f 2>/dev/null | grep -q demonwm.elf
+	@xorriso -indev $(ISO) -find /boot/mako/filemanager.elf -type f 2>/dev/null | grep -q filemanager.elf
+	@xorriso -indev $(ISO) -find /boot/mako/settings.elf -type f 2>/dev/null | grep -q settings.elf
 	@test $$(wc -c < $(DEMONWM_ELF)) -le 32768
 	@xorriso -indev $(ISO) -find /boot/mako/tetris.elf -type f 2>/dev/null | grep -q tetris.elf
 	@xorriso -indev $(ISO) -find /boot/mako/calculator.elf -type f 2>/dev/null | grep -q calculator.elf
@@ -767,6 +799,8 @@ smoke: $(ISO)
 	@grep -q "preinstalled MKO asset: /system/bin/demonx.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/bin/demonx-client.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/bin/demonwm.elf" $(BUILD)/serial.log
+	@grep -q "preinstalled MKO asset: /system/bin/filemanager.elf" $(BUILD)/serial.log
+	@grep -q "preinstalled MKO asset: /system/bin/settings.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/bin/tetris.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/bin/terminal-client.elf" $(BUILD)/serial.log
 	@grep -q "preinstalled MKO asset: /system/bin/counter-client.elf" $(BUILD)/serial.log

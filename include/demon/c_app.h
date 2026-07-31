@@ -2,6 +2,7 @@
 #define DEMON_C_APP_H
 
 #include <stdint.h>
+#include <demon/dirent.h>
 
 static inline uint64_t demon_syscall0(uint64_t number) {
     register uint64_t rax __asm__("rax") = number;
@@ -212,5 +213,17 @@ static inline uint64_t demon_display_submit_effect(uint64_t display, const void 
 }
 static inline uint64_t demon_boot_test_mode(void) { return demon_syscall0(34u); }
 static inline uint64_t demon_battery_present(void) { return demon_syscall0(37u); }
+
+/* Lists the immediate children of `prefix` (see ramfs_list). Call with
+   index = 0, 1, 2, ... until it returns 0. `storage` is a handle opened
+   via demon_service_open(4). `out` must point at a valid, writable
+   struct demon_dir_entry. Returns 1 on a filled entry, 0 past the last
+   entry, or UINT64_MAX on error (bad handle/range). */
+static inline uint64_t demon_dir_list(uint64_t storage, const char *prefix,
+                                      uint64_t prefix_length, uint64_t index,
+                                      void *out) {
+    return demon_syscall5(39u, storage, (uint64_t)(uintptr_t)prefix,
+                          prefix_length, index, (uint64_t)(uintptr_t)out);
+}
 
 #endif

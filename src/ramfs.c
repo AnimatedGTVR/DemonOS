@@ -18,8 +18,15 @@
    384 KiB bound. Nine additional pages keep the arena tightly bounded while
    accommodating DemonX and the 22 KiB native PekWM bootstrap; large game data
    still belongs in a streamed read-only boot filesystem rather than permanent
-   kernel BSS. */
-#define RAMFS_STORAGE_MAX 430080u
+   kernel BSS.
+   Raised again to 512 KiB when the DemonWM file manager (~22 KiB) and
+   Settings (~22 KiB) apps pushed total seeded content to ~421 KiB,
+   leaving too little of the old 420 KiB bound for README.md (~18 KiB)
+   -- caught by ramfs_seed() actually failing at boot (boot_fatal "Could
+   not install MKO ISO module"), not a static size check, so verify with a
+   real boot after adding anything sizeable rather than assuming there's
+   headroom. */
+#define RAMFS_STORAGE_MAX 524288u
 
 struct ramfs_file {
     bool used;
@@ -189,7 +196,7 @@ bool ramfs_view(uint32_t object_id, const uint8_t **data, size_t *length) {
 bool ramfs_self_test(void) {
     static const char expected_name[] = "project.mko";
     static const uint8_t expected_data[] = "PORTABLE-PROJECT";
-    if (ramfs_file_count() != seeded_count + 1u || seeded_count != 19u ||
+    if (ramfs_file_count() != seeded_count + 1u || seeded_count != 21u ||
         ramfs_bytes_used() <= 16u || read_count != 1u || write_count != 1u)
         return false;
     uint32_t object_id;

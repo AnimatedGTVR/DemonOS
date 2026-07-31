@@ -32,6 +32,8 @@ static const char *app_name_for_path(const char *path) {
     if (equal(path, "/system/bin/tetris.elf")) return "tetris";
     if (equal(path, "/system/bin/calculator.elf")) return "calculator";
     if (equal(path, "/system/bin/demonwm.elf")) return "demonwm";
+    if (equal(path, "/system/bin/filemanager.elf")) return "filemanager";
+    if (equal(path, "/system/bin/settings.elf")) return "settings";
     return path;
 }
 

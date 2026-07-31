@@ -4,6 +4,7 @@
 #include <kernel/elf64.h>
 #include <kernel/display.h>
 #include <kernel/framebuffer.h>
+#include <demon/dirent.h>
 #include <demon/input.h>
 #include <kernel/interrupt_frame.h>
 #include <kernel/interrupts.h>
@@ -143,6 +144,16 @@ static bool user_range(uint64_t address, uint64_t length) {
         address <= USER_CODE + process_memory[pid].code_page_count * 4096u &&
         length <= USER_CODE + process_memory[pid].code_page_count * 4096u - address)
         return true;
+    /* NOTE: this only confirms address/length fall somewhere inside the
+       aggregate 4-slot surface-map region, not that they stay within the
+       one slot the caller actually mapped. A per-slot version of this
+       check was tried and reproducibly broke DEMON_WEB_NAVIGATION_OK in
+       the boot-test (surface_damages() stopped advancing) -- root cause
+       not yet found, likely related to USER_SURFACE_MAP_SLOTS (4) being
+       easy to exceed once several real windows (terminal, browser, demonx
+       panel, ...) are mapped at once and slots getting reused. Needs a
+       real investigation of slot lifecycle/reuse before tightening this
+       again, not another guess. */
     return pid != 0u && pid < SCHEDULER_PROCESS_LIMIT &&
         any_surface_mapped(pid) && address >= USER_SURFACE_MAP &&
         address <= USER_SURFACE_MAP + USER_SURFACE_MAP_REGION_SIZE &&
@@ -872,6 +883,37 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
     }
     if (number == 38u) {
         frame->rax = demonwm_mode ? 1u : 0u;
+        return frame_address;
+    }
+    if (number == 39u) {
+        enum capability_service service;
+        if (!capability_resolve(scheduler_current_pid(), frame->rdi,
+                CAPABILITY_RIGHT_OPEN, &service) ||
+            service != CAPABILITY_SERVICE_STORAGE ||
+            !user_range(frame->rsi, frame->rdx) ||
+            !user_write_range(frame->r8, sizeof(struct demon_dir_entry))) {
+            frame->rax = UINT64_MAX;
+            return frame_address;
+        }
+        const char *relative_name = NULL;
+        size_t relative_length = 0u, length = 0u;
+        bool is_directory = false;
+        if (!ramfs_list((const char *)(uintptr_t)frame->rsi, (size_t)frame->rdx,
+                        (size_t)frame->r10, &relative_name, &relative_length,
+                        &length, &is_directory)) {
+            frame->rax = 0u;
+            return frame_address;
+        }
+        struct demon_dir_entry entry;
+        for (size_t i = 0u; i < sizeof(entry.name); ++i) entry.name[i] = '\0';
+        const size_t copy_length = relative_length < sizeof(entry.name)
+            ? relative_length : sizeof(entry.name) - 1u;
+        for (size_t i = 0u; i < copy_length; ++i) entry.name[i] = relative_name[i];
+        entry.name_length = (uint32_t)copy_length;
+        entry.is_directory = is_directory ? 1u : 0u;
+        entry.size = (uint64_t)length;
+        frame->rax = userspace_copy_to(scheduler_current_pid(), frame->r8,
+            (const uint8_t *)&entry, sizeof(entry)) ? 1u : UINT64_MAX;
         return frame_address;
     }
     frame->rax = (uint64_t)-1;
