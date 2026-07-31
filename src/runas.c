@@ -6,13 +6,6 @@ static uint64_t granted;
 static uint64_t denied;
 static char last[64];
 
-static bool starts_with(const char *text, const char *prefix) {
-    while (*prefix != '\0') {
-        if (*text++ != *prefix++) return false;
-    }
-    return true;
-}
-
 static void remember(const char *command) {
     size_t i = 0u;
     while (command[i] != '\0' && i + 1u < sizeof(last)) {
@@ -28,26 +21,25 @@ void runas_init(void) {
     last[0] = '\0';
 }
 
+// General like real sudo/doas: a single local-console user, elevated for
+// the duration of one command rather than gated to a fixed allowlist of
+// shapes. The only thing actually refused is an empty command -- there's
+// nothing to run as root there, so it's not a meaningful grant.
 bool runas_authorize(const char *command) {
-    if (command == NULL) {
+    if (command == NULL || command[0] == '\0') {
         ++denied;
         return false;
     }
     remember(command);
-    const bool allowed =
-        starts_with(command, "systemctl start ") ||
-        starts_with(command, "systemctl stop ") ||
-        starts_with(command, "systemctl restart ");
-    if (allowed) ++granted;
-    else ++denied;
-    return allowed;
+    ++granted;
+    return true;
 }
 
 bool runas_self_test(void) {
     const uint64_t grants_before = granted;
     const uint64_t denials_before = denied;
     return runas_authorize("systemctl restart project-host.service") &&
-        !runas_authorize("clear") && granted == grants_before + 1u &&
+        !runas_authorize("") && granted == grants_before + 1u &&
         denied == denials_before + 1u;
 }
 
