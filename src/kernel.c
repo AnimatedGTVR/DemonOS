@@ -1117,6 +1117,12 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write("MAKOBOX_SELF_TEST_OK\n");
     boot_status("MakoBox", "init/systemctl/runas applets ready");
     serial_write("KERNEL_BOOT_OK\n");
+    // framebuffer_self_test() (run earlier, during core subsystem checks)
+    // legitimately exercises the cursor overlay and leaves it sitting
+    // visible mid-screen when it's done -- fine for what it was testing,
+    // but a plain TTY console has no pointer to show, so hide it before
+    // the console's own framebuffer mirroring takes over.
+    framebuffer_cursor_hide();
     terminal_graphical_enable();
     boot_welcome();
     makobox_shell();

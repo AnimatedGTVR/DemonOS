@@ -19,8 +19,18 @@ static bool output_enabled = true;
 static bool automatic_wrap;
 static bool graphical;
 
+// Plain monochrome TTY: black background, light grey text, no title bar,
+// no border, no panel -- nothing that reads as a desktop app window. See
+// sidelined/README.md; the GUI/compositor stack (and the styling that went
+// with it) is sidelined, and this framebuffer-mirroring path is what a
+// real console actually looks like when there's no VGA text-mode fallback.
+#define PLAIN_BG 0xFF000000u
+#define PLAIN_FG 0xFFC0C0C0u
+
+// 80x25 cells at 7x14px is 560x350px; centered on the 640x480 framebuffer
+// this kernel targets (see FRAMEBUFFER_DETECTED at boot).
 #define GRAPHICAL_X 40
-#define GRAPHICAL_Y 72
+#define GRAPHICAL_Y 65
 #define GRAPHICAL_CELL_WIDTH 7
 #define GRAPHICAL_CELL_HEIGHT 14
 
@@ -29,9 +39,9 @@ static void graphical_cell(size_t y, size_t x) {
     const int32_t pixel_x = GRAPHICAL_X + (int32_t)x * GRAPHICAL_CELL_WIDTH;
     const int32_t pixel_y = GRAPHICAL_Y + (int32_t)y * GRAPHICAL_CELL_HEIGHT;
     framebuffer_fill_rect((struct framebuffer_rect){pixel_x, pixel_y,
-        GRAPHICAL_CELL_WIDTH, GRAPHICAL_CELL_HEIGHT}, 0xFF0B1020u);
+        GRAPHICAL_CELL_WIDTH, GRAPHICAL_CELL_HEIGHT}, PLAIN_BG);
     char text[2] = {(char)(cells[y * VGA_WIDTH + x] & 0xffu), '\0'};
-    framebuffer_text(pixel_x, pixel_y + 2, text, 1u, 0xFFE5E7EBu);
+    framebuffer_text(pixel_x, pixel_y + 2, text, 1u, PLAIN_FG);
 }
 
 static void store_cell(size_t y, size_t x, uint16_t value) {
@@ -42,15 +52,7 @@ static void store_cell(size_t y, size_t x, uint16_t value) {
 
 void terminal_graphical_refresh(void) {
     if (!graphical || !framebuffer_available()) return;
-    framebuffer_clear(0xFF080C16u);
-    framebuffer_fill_rect((struct framebuffer_rect){24, 24, 592, 424},
-                          0xFF111827u);
-    framebuffer_border_rect((struct framebuffer_rect){24, 24, 592, 424},
-                            0xFF3B82F6u);
-    framebuffer_fill_rect((struct framebuffer_rect){25, 25, 590, 32},
-                          0xFF1E3A5Fu);
-    framebuffer_text(40, 37, "DEMONOS TERMINAL - C APP WORKSPACE", 1u,
-                     0xFFF8FAFCu);
+    framebuffer_clear(PLAIN_BG);
     for (size_t y = 0u; y < VGA_HEIGHT; ++y)
         for (size_t x = 0u; x < VGA_WIDTH; ++x)
             graphical_cell(y, x);

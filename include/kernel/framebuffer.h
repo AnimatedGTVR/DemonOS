@@ -64,6 +64,7 @@ bool framebuffer_cursor_move(int32_t x, int32_t y);
    result should never leave the cursor invisible. */
 void framebuffer_cursor_set_icon(unsigned int icon_index);
 uint64_t framebuffer_cursor_updates(void);
+void framebuffer_cursor_hide(void);
 bool framebuffer_self_test(void);
 void framebuffer_draw_boot_test(void);
 bool framebuffer_backbuffer_surface(struct graphics_surface *out);

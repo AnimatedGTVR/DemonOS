@@ -415,6 +415,19 @@ void framebuffer_cursor_set_icon(unsigned int icon_index) {
 
 uint64_t framebuffer_cursor_updates(void) { return cursor_update_count; }
 
+// A plain TTY console has no pointer to show -- this restores whatever
+// real scene pixels were under the cursor overlay (the same restore path
+// framebuffer_cursor_move already uses when relocating it) and marks it
+// invisible, so nothing keeps re-compositing a frozen arrow over console
+// text after framebuffer_self_test()'s internal cursor exercise leaves it
+// sitting mid-screen.
+void framebuffer_cursor_hide(void) {
+    if (!cursor_visible) return;
+    scanout_backbuffer_rect((struct framebuffer_rect){cursor_x, cursor_y,
+        (int32_t)DEMON_MOUSE_CURSOR_WIDTH, (int32_t)DEMON_MOUSE_CURSOR_HEIGHT});
+    cursor_visible = false;
+}
+
 bool framebuffer_self_test(void) {
     if (!enabled) return false;
     framebuffer_clear(0xFF102030u);

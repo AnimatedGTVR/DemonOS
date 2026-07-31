@@ -1023,25 +1023,20 @@ void makobox_shell(void) {
     line("");
     line("MakoBox interactive console ready. Type 'help'.");
     line("Terminal owns display and keyboard.");
-    /* Visual prompt only -- serial_write keeps the plain "mako# " text every
-       keyboard/process/vfs smoke test greps for (see the Makefile's
-       "mako# help"/"mako# ls /system"/etc. assertions), so it's left alone
-       and only the on-screen rendering gets the friendlier [user@host]#
-       shape. */
-    terminal_write("ROOT-DEMONOS: ");
+    // Same prompt text on-screen and on serial -- a real console doesn't
+    // get a different "friendlier" visual skin, see sidelined/README.md.
+    terminal_write("mako# ");
     serial_write("mako# ");
     for (;;) {
-        /* Input IRQs wake the persistent ring-3 compositor while the kernel
-           console owns the CPU. Resume ready desktop work once, then return
-           here as soon as it blocks for the next event. This keeps the shell
-           and desktop responsive without a polling thread or idle CPU burn. */
+        /* Input IRQs wake blocked userspace tasks while the kernel console
+           owns the CPU; resume any ready work once, then return here as
+           soon as it blocks again. Keeps the shell responsive without a
+           polling thread or idle CPU burn. */
         if (scheduler_has_ready_users()) {
             (void)userspace_run_init();
             if (terminal_graphical_active()) terminal_graphical_refresh();
         }
         if (terminal_graphical_active()) input_discard_pending();
-        if (framebuffer_available() && !init_system_desktop_active())
-            (void)framebuffer_cursor_move(mouse_x(), mouse_y());
         char value;
         if (!keyboard_read_char(&value)) {
             __asm__ volatile ("hlt");
@@ -1053,7 +1048,7 @@ void makobox_shell(void) {
             input[length] = '\0';
             if (length > 0u) (void)makobox_run(input);
             length = 0;
-            terminal_write("ROOT-DEMONOS: ");
+            terminal_write("mako# ");
             serial_write("mako# ");
         } else if (value == '\b') {
             if (length > 0u) {
