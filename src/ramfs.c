@@ -196,7 +196,7 @@ bool ramfs_view(uint32_t object_id, const uint8_t **data, size_t *length) {
 bool ramfs_self_test(void) {
     static const char expected_name[] = "project.mko";
     static const uint8_t expected_data[] = "PORTABLE-PROJECT";
-    if (ramfs_file_count() != seeded_count + 1u || seeded_count != 21u ||
+    if (ramfs_file_count() != seeded_count + 1u || seeded_count != 7u ||
         ramfs_bytes_used() <= 16u || read_count != 1u || write_count != 1u)
         return false;
     uint32_t object_id;

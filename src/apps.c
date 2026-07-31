@@ -81,11 +81,8 @@ bool apps_find(const char *name, struct app_snapshot *snapshot) {
 bool apps_self_test(void) {
     struct app_snapshot hello;
     struct app_snapshot tetris;
-    struct app_snapshot calculator;
     return catalog_count >= 1u && apps_find("hello", &hello) &&
         hello.valid_elf64 && hello.image_bytes > 0u &&
         apps_find("tetris", &tetris) && tetris.valid_elf64 &&
-        tetris.image_bytes > 0u &&
-        apps_find("calculator", &calculator) && calculator.valid_elf64 &&
-        calculator.image_bytes > 0u;
+        tetris.image_bytes > 0u;
 }

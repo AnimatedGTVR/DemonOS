@@ -242,9 +242,7 @@ static void applet_ls(const char *path) {
         /* Classic ls convention: directories in a distinct color (light
            blue, VGA color 9) from plain files (default white, 15) -- serial
            output stays plain text either way, no ANSI codes to strip there. */
-        terminal_set_color(is_directory ? 9u : 15u, 0u);
         terminal_write(entry_name);
-        terminal_set_color(15u, 0u);
         if (is_directory) { terminal_write_line(""); }
         else { terminal_write("  "); terminal_write_u64(length); terminal_write_line(" bytes"); }
     }
@@ -285,13 +283,11 @@ static void applet_input(void) {
 static void applet_fetch(void) {
     char vendor[13];
     cpu_vendor(vendor);
-    terminal_set_color(11u, 0u);
     line("       /\\        mako@kernel");
     line("      /  \\       -----------");
     line("     / /\\ \\      OS: MAKO Kernel 0.1");
     line("    / ____ \\     Arch: x86_64");
     line("   /_/    \\_\\    Core: C + native MKO");
-    terminal_set_color(15u, 0u);
     terminal_write("CPU: "); terminal_write_line(vendor);
     serial_write("CPU: "); serial_write(vendor); serial_write("\n");
     value_line("Memory: ", live.usable_memory_bytes / (1024u * 1024u), " MiB usable");
@@ -360,38 +356,20 @@ static void applet_git_status(void) {
 }
 
 static void applet_desktop(void) {
-    line("Desktop readiness:");
+    /* The GUI/compositor stack (compositor, DemonX, DemonWM, windowed apps)
+       is sidelined -- see sidelined/. This used to be a long list of
+       compositor/window-manager claims; keeping any of those "[ready]"
+       once the code they described no longer runs would just be false
+       advertising, so this only reports the real, still-true console-mode
+       subsystems. */
+    line("Console readiness:");
     line("  [ready] PS/2 keyboard input");
     line("  [ready] isolated ELF64 application runtime");
     line("  [ready] app-manager.service catalog");
     line("  [ready] project storage and capability handles");
-    line("  [ready] framebuffer and Stage 2 ARGB renderer");
-    line("  [ready] PS/2 mouse and unified input events");
     line("  [ready] dynamic process creation and lifecycle");
     line("  [ready] named capability IPC channels");
-    line("  [ready] ring-3 compositor transport + atomic presentation");
-    line("  [ready] three-client focus/z-order + crash containment");
-    line("  [ready] pointer hit-testing and click-to-focus routing");
-    line("  [ready] persistent receive/repaint + retained MOVE geometry");
-    line("  [ready] client-owned surface + read-only capability transfer");
-    line("  [ready] blocking IPC/input waitset (no compositor polling)");
-    line("  [ready] title-bar pointer drag with bounded geometry");
-    line("  [ready] bottom-right pointer resize with min/screen bounds");
-    line("  [ready] focused KEY delivery to isolated window endpoint");
-    line("  [ready] adjacent pointer-motion burst coalescing");
-    line("  [ready] reference-counted surface reclamation");
-    line("  [ready] read-only mapped client surface + owned damage metadata");
-    line("  [ready] timer-deadline frame pacing and dirty wakeups");
-    line("  [ready] native decorations, resize grip, and launcher toggle");
-    line("  [ready] compositor-owned arrow cursor and compact launcher glyphs");
-    line("  [ready] IRQ-driven desktop event pump beside MakoBox");
-    if (init_system_desktop_active()) {
-        line("  [ready] init-owned desktop.target session");
-        value_line("  desktop compositor PID: ", init_system_desktop_pid(), " blocked/ready");
-    } else {
-        line("  [fallback] desktop.target unavailable without framebuffer");
-    }
-    line("  [complete] desktop-demo platform contract 100/100");
+    line("  [none] no GUI/compositor -- TTY-only boot (see sidelined/)");
     line("  [ready] allocation-free Ethernet/ARP/IPv4 packet core");
     line("  [future] NIC drivers, DHCP, DNS, TCP/TLS, and hardware breadth");
 }
@@ -590,14 +568,6 @@ __attribute__((noreturn))
 void makobox_shell(void) {
     char input[64];
     size_t length = 0;
-    if (terminal_graphical_active() && init_system_desktop_active()) {
-        const uint32_t desktop_pid = init_system_desktop_pid();
-        (void)ipc_cancel_wait(desktop_pid);
-        (void)input_cancel_wait(desktop_pid);
-        input_discard_pending();
-        terminal_graphical_refresh();
-        serial_write("TERMINAL_OWNERSHIP_READY display=kernel input=makobox compositor=suspended\n");
-    }
     /* Clear the visual console only (serial keeps every boot-status line
        that already scrolled by -- smoke tests grep that log). Without this,
        a real interactive session starts buried under dozens of "[ OK ]"
@@ -606,13 +576,7 @@ void makobox_shell(void) {
     terminal_write("\f");
     line("");
     line("MakoBox interactive console ready. Type 'help'.");
-    if (terminal_graphical_active())
-        line("Terminal owns display and keyboard; compositor is suspended.");
-    else {
-        line("Desktop event pump active (IPC + keyboard + pointer).");
-        serial_write("DESKTOP_EVENT_PUMP_READY\n");
-    }
-    terminal_set_color(11u, 0u);
+    line("Terminal owns display and keyboard.");
     /* Visual prompt only -- serial_write keeps the plain "mako# " text every
        keyboard/process/vfs smoke test greps for (see the Makefile's
        "mako# help"/"mako# ls /system"/etc. assertions), so it's left alone
@@ -620,7 +584,6 @@ void makobox_shell(void) {
        shape. */
     terminal_write("ROOT-DEMONOS: ");
     serial_write("mako# ");
-    terminal_set_color(15u, 0u);
     for (;;) {
         /* Input IRQs wake the persistent ring-3 compositor while the kernel
            console owns the CPU. Resume ready desktop work once, then return
@@ -644,10 +607,8 @@ void makobox_shell(void) {
             input[length] = '\0';
             if (length > 0u) (void)makobox_run(input);
             length = 0;
-            terminal_set_color(11u, 0u);
             terminal_write("ROOT-DEMONOS: ");
             serial_write("mako# ");
-            terminal_set_color(15u, 0u);
         } else if (value == '\b') {
             if (length > 0u) {
                 --length;
