@@ -38,7 +38,7 @@ bool runas_authorize(const char *command) {
 bool runas_self_test(void) {
     const uint64_t grants_before = granted;
     const uint64_t denials_before = denied;
-    return runas_authorize("systemctl restart project-host.service") &&
+    return runas_authorize("runit restart project-host.service") &&
         !runas_authorize("") && granted == grants_before + 1u &&
         denied == denials_before + 1u;
 }

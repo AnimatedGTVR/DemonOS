@@ -46,6 +46,10 @@ fn handle_read(handle: u64, address: u64, capacity: u64) -> u64 {
     return abi_syscall3(10, handle, address, capacity);
 }
 
+fn handle_read_at(handle: u64, address: u64, capacity: u64, offset: u64) -> u64 {
+    return abi_syscall4(42, handle, address, capacity, offset);
+}
+
 fn spawn(path: u64, length: u64, service_mask: u64) -> u64 {
     return abi_syscall3(11, path, length, service_mask);
 }

@@ -1,0 +1,21 @@
+diff --git a/doomgeneric/m_config.c b/doomgeneric/m_config.c
+index c401d76..b51c710 100644
+--- a/doomgeneric/m_config.c
++++ b/doomgeneric/m_config.c
+@@ -1608,7 +1608,7 @@ static const int scantokey[128] =
+ 
+ static void SaveDefaultCollection(default_collection_t *collection)
+ {
+-#if ORIGCODE
++    /* DemonOS writable configuration: persist defaults through PortKit. */
+     default_t *defaults;
+     int i, v;
+     FILE *f;
+@@ -1689,7 +1689,6 @@ static void SaveDefaultCollection(default_collection_t *collection)
+     }
+ 
+     fclose (f);
+-#endif
+ }
+ 
+ // Parses integer values in the configuration file

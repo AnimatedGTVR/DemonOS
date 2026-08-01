@@ -26,18 +26,19 @@ before presenting the console.
 `desktop-compositor.service` is not a decorative status record. Before the unit
 can activate, init queries the scheduler, verifies that the bound PID is named
 `compositor`, and requires it to be blocked in its IPC receive loop. The PID is
-reported by `systemctl list-units`. Headless/VGA fallback boots leave both
+reported by `runit list-units`. Headless/VGA fallback boots leave both
 graphical units inactive and still reach the eight-unit console target.
 
-`systemctl` intentionally mirrors the useful, small part of systemd's operator
-surface without importing systemd or its Linux assumptions:
+`runit` is MAKO's init/unit operator surface -- the deliberate, small,
+systemd-shaped slice of unit inspection and lifecycle transactions, without
+importing systemd or its Linux assumptions:
 
 ```text
-systemctl list-units
-systemctl status project-host.service
-runas systemctl stop project-host.service
-runas systemctl start project-host.service
-runas systemctl restart project-host.service
+runit list-units
+runit status project-host.service
+runas runit stop project-host.service
+runas runit start project-host.service
+runas runit restart project-host.service
 ```
 
 Read-only inspection is available directly. Lifecycle mutations are rejected

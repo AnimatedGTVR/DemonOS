@@ -82,6 +82,9 @@ static inline uint64_t demon_service_open(uint64_t service) {
 static inline uint64_t demon_handle_close(uint64_t handle) {
     return demon_syscall1(8u, handle);
 }
+static inline uint64_t demon_handle_query(uint64_t handle, uint64_t property) {
+    return demon_syscall2(7u, handle, property);
+}
 static inline uint64_t demon_input_poll(uint64_t handle, void *event) {
     return demon_syscall2(20u, handle, (uint64_t)(uintptr_t)event);
 }
@@ -143,6 +146,24 @@ static inline uint64_t demon_file_open(uint64_t storage, const char *name,
 static inline uint64_t demon_handle_read(uint64_t handle, void *bytes,
                                          uint64_t capacity) {
     return demon_syscall3(10u, handle, (uint64_t)(uintptr_t)bytes, capacity);
+}
+static inline uint64_t demon_file_delete(uint64_t storage, const char *name,
+                                         uint64_t length) {
+    return demon_syscall3(43u, storage, (uint64_t)(uintptr_t)name, length);
+}
+static inline uint64_t demon_file_rename(uint64_t storage,
+                                         const char *old_name, uint64_t old_length,
+                                         const char *new_name, uint64_t new_length) {
+    register uint64_t rax __asm__("rax") = 44u;
+    register uint64_t rdi __asm__("rdi") = storage;
+    register uint64_t rsi __asm__("rsi") = (uint64_t)(uintptr_t)old_name;
+    register uint64_t rdx __asm__("rdx") = old_length;
+    register uint64_t r10 __asm__("r10") = (uint64_t)(uintptr_t)new_name;
+    register uint64_t r8 __asm__("r8") = new_length;
+    __asm__ volatile("int $0x80" : "+a"(rax)
+                     : "D"(rdi), "S"(rsi), "d"(rdx), "r"(r10), "r"(r8)
+                     : "memory", "cc");
+    return rax;
 }
 static inline uint64_t demon_spawn(const char *path, uint64_t length,
                                    uint64_t service_mask) {
@@ -224,6 +245,23 @@ static inline uint64_t demon_dir_list(uint64_t storage, const char *prefix,
                                       void *out) {
     return demon_syscall5(39u, storage, (uint64_t)(uintptr_t)prefix,
                           prefix_length, index, (uint64_t)(uintptr_t)out);
+}
+
+/* One bounded anonymous arena per process. This is intentionally smaller
+   than POSIX mmap: it gives freestanding ports a reclaimable large heap
+   without reserving that RAM for every lightweight application. */
+static inline void *demon_memory_map(uint64_t byte_count) {
+    const uint64_t result = demon_syscall1(40u, byte_count);
+    return result == UINT64_MAX ? (void *)0 : (void *)(uintptr_t)result;
+}
+static inline uint64_t demon_memory_unmap(void *address) {
+    return demon_syscall1(41u, (uint64_t)(uintptr_t)address);
+}
+static inline uint64_t demon_handle_read_at(uint64_t handle, void *bytes,
+                                            uint64_t capacity,
+                                            uint64_t absolute_offset) {
+    return demon_syscall4(42u, handle, (uint64_t)(uintptr_t)bytes, capacity,
+                          absolute_offset);
 }
 
 #endif

@@ -30,6 +30,7 @@ static bool elf_suffix(const char *name, size_t length) {
 static const char *app_name_for_path(const char *path) {
     if (equal(path, "/projects/hello/main.elf")) return "hello";
     if (equal(path, "/system/bin/tetris.elf")) return "tetris";
+    if (equal(path, "/system/bin/doom-full.elf")) return "doom";
     if (equal(path, "/system/bin/calculator.elf")) return "calculator";
     if (equal(path, "/system/bin/demonwm.elf")) return "demonwm";
     if (equal(path, "/system/bin/filemanager.elf")) return "filemanager";
@@ -81,8 +82,10 @@ bool apps_find(const char *name, struct app_snapshot *snapshot) {
 bool apps_self_test(void) {
     struct app_snapshot hello;
     struct app_snapshot tetris;
+    struct app_snapshot doom;
     return catalog_count >= 1u && apps_find("hello", &hello) &&
         hello.valid_elf64 && hello.image_bytes > 0u &&
         apps_find("tetris", &tetris) && tetris.valid_elf64 &&
-        tetris.image_bytes > 0u;
+        tetris.image_bytes > 0u && apps_find("doom", &doom) &&
+        doom.valid_elf64 && doom.image_bytes > 0u;
 }

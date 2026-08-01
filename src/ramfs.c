@@ -35,6 +35,7 @@ struct ramfs_file {
     size_t offset;
     size_t capacity;
     size_t length;
+    const uint8_t *external_data;
 };
 
 static struct ramfs_file files[RAMFS_FILES];
@@ -105,7 +106,8 @@ void ramfs_init(void) {
 }
 
 static bool store(struct ramfs_file *file, const uint8_t *data, size_t length) {
-    if (file == NULL || data == NULL || length > RAMFS_DATA_MAX) return false;
+    if (file == NULL || data == NULL || file->external_data != NULL ||
+        length > RAMFS_DATA_MAX) return false;
     if (length > file->capacity) {
         if (length > RAMFS_STORAGE_MAX - storage_used) return false;
         file->offset = storage_used;
@@ -114,6 +116,21 @@ static bool store(struct ramfs_file *file, const uint8_t *data, size_t length) {
     }
     for (size_t i = 0u; i < length; ++i) storage[file->offset + i] = data[i];
     file->length = length;
+    return true;
+}
+
+bool ramfs_seed_reference(const char *name, size_t name_length,
+                          const uint8_t *data, size_t length) {
+    if (data == NULL) return false;
+    uint32_t object_id;
+    if (!ramfs_open(name, name_length, true, &object_id)) return false;
+    struct ramfs_file *file = file_for_id(object_id);
+    if (file == NULL || file->length != 0u || file->capacity != 0u ||
+        file->external_data != NULL)
+        return false;
+    file->external_data = data;
+    file->length = length;
+    ++seeded_count;
     return true;
 }
 
@@ -145,6 +162,7 @@ bool ramfs_open(const char *name, size_t name_length, bool create,
         files[i].offset = storage_used;
         files[i].capacity = 0u;
         files[i].length = 0u;
+        files[i].external_data = NULL;
         for (size_t byte = 0; byte < name_length; ++byte)
             files[i].name[byte] = name[byte];
         files[i].name[name_length] = '\0';
@@ -152,6 +170,42 @@ bool ramfs_open(const char *name, size_t name_length, bool create,
         return true;
     }
     return false;
+}
+
+// Frees the file-table slot only -- the storage arena is a simple
+// bump allocator with no compaction (matches every other path here, e.g.
+// overwriting a file's content never reclaims its old capacity either),
+// so the bytes stay allocated until reboot. That's a real, documented
+// limitation, not a correctness bug: the file is genuinely gone (its name
+// no longer resolves, ramfs_list/ramfs_open won't find it), it just
+// doesn't shrink storage_used.
+bool ramfs_delete(const char *name, size_t name_length) {
+    if (!valid_name(name, name_length)) return false;
+    for (size_t i = 0; i < RAMFS_FILES; ++i) {
+        if (name_equal(&files[i], name, name_length)) {
+            files[i].used = false;
+            files[i].name_length = 0u;
+            files[i].length = 0u;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ramfs_rename(const char *old_name, size_t old_length,
+                  const char *new_name, size_t new_length) {
+    if (!valid_name(old_name, old_length) || !valid_name(new_name, new_length))
+        return false;
+    struct ramfs_file *source = NULL;
+    for (size_t i = 0u; i < RAMFS_FILES; ++i) {
+        if (name_equal(&files[i], new_name, new_length)) return false;
+        if (name_equal(&files[i], old_name, old_length)) source = &files[i];
+    }
+    if (source == NULL) return false;
+    source->name_length = new_length;
+    for (size_t i = 0u; i < new_length; ++i) source->name[i] = new_name[i];
+    source->name[new_length] = '\0';
+    return true;
 }
 
 bool ramfs_write(uint32_t object_id, const uint8_t *data, size_t length) {
@@ -163,16 +217,23 @@ bool ramfs_write(uint32_t object_id, const uint8_t *data, size_t length) {
 
 bool ramfs_read(uint32_t object_id, uint8_t *data, size_t capacity,
                 size_t *length) {
+    return ramfs_read_range(object_id, 0u, data, capacity, length);
+}
+
+bool ramfs_read_range(uint32_t object_id, size_t offset, uint8_t *data,
+                      size_t capacity, size_t *length) {
     struct ramfs_file *file = file_for_id(object_id);
-    if (file == NULL || data == NULL || length == NULL || capacity == 0u)
+    if (file == NULL || data == NULL || length == NULL || offset > file->length)
         return false;
     /* Match ordinary bounded-read semantics. This lets lightweight native
        applications inspect the beginning of a large object without first
        allocating an executable-sized userspace buffer. Demon Web uses this
        to render a 512-byte preview of file:/// RAMFS documents. */
-    size_t amount = file->length;
+    size_t amount = file->length - offset;
     if (amount > capacity) amount = capacity;
-    for (size_t i = 0; i < amount; ++i) data[i] = storage[file->offset + i];
+    const uint8_t *source = file->external_data != NULL ? file->external_data :
+        &storage[file->offset];
+    for (size_t i = 0; i < amount; ++i) data[i] = source[offset + i];
     *length = amount;
     ++read_count;
     return true;
@@ -188,7 +249,8 @@ bool ramfs_size(uint32_t object_id, size_t *length) {
 bool ramfs_view(uint32_t object_id, const uint8_t **data, size_t *length) {
     struct ramfs_file *file = file_for_id(object_id);
     if (file == NULL || data == NULL || length == NULL) return false;
-    *data = &storage[file->offset];
+    *data = file->external_data != NULL ? file->external_data :
+        &storage[file->offset];
     *length = file->length;
     return true;
 }
@@ -196,7 +258,10 @@ bool ramfs_view(uint32_t object_id, const uint8_t **data, size_t *length) {
 bool ramfs_self_test(void) {
     static const char expected_name[] = "project.mko";
     static const uint8_t expected_data[] = "PORTABLE-PROJECT";
-    if (ramfs_file_count() != seeded_count + 1u || seeded_count != 7u ||
+    /* The boot image may gain additional preinstalled native tools. The
+       invariant is that every module was seeded plus this one test file,
+       not that the OS must forever ship exactly seven modules. */
+    if (ramfs_file_count() != seeded_count + 1u || seeded_count < 7u ||
         ramfs_bytes_used() <= 16u || read_count != 1u || write_count != 1u)
         return false;
     uint32_t object_id;
@@ -204,8 +269,10 @@ bool ramfs_self_test(void) {
         return false;
     struct ramfs_file *file = file_for_id(object_id);
     if (file == NULL || file->length != sizeof(expected_data) - 1u) return false;
+    const uint8_t *contents = file->external_data != NULL ? file->external_data :
+        &storage[file->offset];
     for (size_t i = 0; i < sizeof(expected_data) - 1u; ++i)
-        if (storage[file->offset + i] != expected_data[i]) return false;
+        if (contents[i] != expected_data[i]) return false;
     return true;
 }
 
@@ -226,6 +293,8 @@ uint64_t ramfs_bytes_used(void) {
 uint64_t ramfs_reads(void) { return read_count; }
 uint64_t ramfs_writes(void) { return write_count; }
 uint64_t ramfs_seeded_files(void) { return seeded_count; }
+uint64_t ramfs_storage_capacity(void) { return RAMFS_STORAGE_MAX; }
+uint64_t ramfs_max_files(void) { return RAMFS_FILES; }
 
 bool ramfs_entry(size_t index, const char **name, size_t *name_length,
                  size_t *length) {

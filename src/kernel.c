@@ -179,6 +179,7 @@ static bool allocate_process_memory(struct userspace_memory *memory,
     }
     *memory = (struct userspace_memory){
         .address_space = pml4,
+        .page_directory = pd,
         .page_table = pt1,
         .code_page_count = code_page_count,
     };
@@ -223,6 +224,17 @@ static void boot_status(const char *name, const char *detail) {
         terminal_write(detail);
     }
     terminal_write_line("");
+}
+
+/* Announce work before it begins so a slow hardware/network operation never
+   looks like a frozen black screen. Unlike a splash animation, every message
+   names the real operation the kernel is about to execute. */
+static void boot_progress(const char *detail) {
+    serial_write("[ .... ] ");
+    serial_write(detail);
+    serial_write("\n");
+    terminal_write("[ .... ] ");
+    terminal_write_line(detail);
 }
 
 static void boot_banner(void) {
@@ -309,9 +321,17 @@ static uint64_t install_multiboot_projects(uintptr_t info_address) {
                 boot_fatal("Invalid or unreachable MKO ISO module");
             const size_t module_length =
                 (size_t)(module->module_end - module->module_start);
-            if (!ramfs_seed(module->command_line, name_length,
-                    (const uint8_t *)(uintptr_t)module->module_start,
-                    module_length))
+            const uint8_t *module_data =
+                (const uint8_t *)(uintptr_t)module->module_start;
+            /* Large boot assets remain in their Multiboot-reserved frames.
+               Small executable/config modules retain the historical copied,
+               writable behavior. */
+            const bool seeded = module_length > 196608u ?
+                ramfs_seed_reference(module->command_line, name_length,
+                                     module_data, module_length) :
+                ramfs_seed(module->command_line, name_length,
+                           module_data, module_length);
+            if (!seeded)
                 boot_fatal("Could not install MKO ISO module");
             serial_write("preinstalled MKO asset: ");
             serial_write(module->command_line);
@@ -464,7 +484,13 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     }
     boot_status("Boot protocol", "Multiboot2 validated");
     const bool test_mode = multiboot_test_mode(multiboot_info);
-    userspace_set_boot_test_mode(test_mode);
+    const bool doom_frame_test =
+        multiboot_cmdline_has(multiboot_info, "doomtest");
+    /* 0 = interactive boot, 1 = ordinary scripted smoke boot, and
+       2 = dedicated Doom gameplay test. The distinction lets the full Doom
+       image run real game logic in doomtest without making every normal
+       launch skip its title/menu. */
+    userspace_set_boot_test_mode(test_mode ? 1u : (doom_frame_test ? 2u : 0u));
 
     const struct multiboot2_info *boot_info =
         (const struct multiboot2_info *)multiboot_info;
@@ -544,11 +570,18 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write("FRAMEBUFFER_PRIMITIVES_OK\n");
         if (!graphics_self_test()) boot_fatal("Stage 2 software renderer self-test failed");
         serial_write("GRAPHICS_LIBRARY_OK\n");
+        /* framebuffer_self_test deliberately leaves its pointer test overlay
+           on scanout. Take display ownership now, before network discovery and
+           the rest of boot, so progress is visible instead of a black test
+           scene with a frozen cursor. */
+        framebuffer_cursor_hide();
+        terminal_graphical_enable();
         boot_status("Framebuffer", "linear RGB mode + software backbuffer online");
     } else {
         serial_write("FRAMEBUFFER_FALLBACK_VGA\n");
         boot_status("Framebuffer", "unavailable; VGA text fallback retained");
     }
+    boot_progress("Loading interrupt descriptor table");
     interrupts_init();
     if (!interrupts_breakpoint_self_test())
         boot_fatal("IDT breakpoint round-trip failed");
@@ -558,6 +591,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     capabilities_init();
     ipc_init();
     ramfs_init();
+    boot_progress("Checking Ethernet, ARP, and IPv4 packet core");
     network_init();
     if (!network_self_test())
         boot_fatal("Ethernet/ARP/IPv4 packet-core self-test failed");
@@ -566,6 +600,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     network_init();
     serial_write("NETWORK_PACKET_CORE_OK ethernet=validated arp=cache ipv4=checksum\n");
     boot_status("Network core", "Ethernet + ARP + IPv4 parser ready; no NIC attached");
+    boot_progress("Scanning PCI devices");
     pci_init();
     serial_write("PCI_ENUMERATION_OK devices=");
     serial_write_u64(pci_device_count());
@@ -616,6 +651,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             serial_write("E1000_DMA_RINGS_READY rx=8 tx=8 buffers=2048 arena=");
             serial_write_hex(network_dma);
             serial_write("\n");
+            boot_progress("Requesting a network lease with DHCP");
             uint8_t dhcp_discover[320];
             const uint32_t dhcp_transaction = 0x4D414B4Fu;
             const size_t dhcp_length = network_build_dhcp_discover(
@@ -677,6 +713,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             serial_write(" dns=");
             serial_write_hex(lease.dns);
             serial_write("\n");
+            boot_status("DHCP", "lease acknowledged and IPv4 address configured");
             if (lease.gateway == 0u)
                 boot_fatal("DHCP ACK did not provide a gateway");
             uint8_t arp_request[60];
@@ -712,6 +749,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             serial_write(" rx=");
             serial_write_u64(e1000_received_frames());
             serial_write("\n");
+            boot_status("Network route", "gateway resolved through ARP");
             if (lease.dns == 0u)
                 boot_fatal("DHCP ACK did not provide a DNS server");
             uint8_t dns_query[320];
@@ -744,6 +782,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             serial_write(" ttl=");
             serial_write_u64(dns_answer.ttl_seconds);
             serial_write("\n");
+            boot_status("DNS", "example.com resolved through configured server");
             uint8_t tcp_syn[60];
             const uint16_t tcp_local_port = 49153u;
             const uint16_t tcp_remote_port = 80u;
@@ -786,6 +825,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             serial_write(":80 window=");
             serial_write_u64(tcp_syn_ack.receive_window);
             serial_write("\n");
+            boot_status("TCP", "real three-way handshake completed");
             static const uint8_t http_request[] =
                 "GET / HTTP/1.0\r\n"
                 "Host: example.com\r\n"
@@ -839,6 +879,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
                 serial_write(character);
             }
             serial_write("\"\n");
+            boot_status("HTTP", "real response received and validated");
         }
     } else {
         serial_write("PCI_ETHERNET_UNAVAILABLE\n");
@@ -897,7 +938,8 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write("PCI_AHCI_UNAVAILABLE\n");
         boot_status("AHCI", "no SATA/AHCI controller exposed");
     }
-    if (install_multiboot_projects(multiboot_info) != 7u)
+    boot_progress("Checking ISO modules and preinstalled project files");
+    if (install_multiboot_projects(multiboot_info) < 9u)
         boot_fatal("MKO repository/SDK/starter modules are missing from the ISO");
     serial_write("MKO_SYSTEM_PREINSTALLED\n");
     boot_status("MKO system", "MAKO manifest + SDK + starter installed from ISO");
@@ -906,6 +948,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         const struct framebuffer_info *display = framebuffer_get_info();
         mouse_set_bounds(display->width, display->height);
     }
+    boot_progress("Starting timer, keyboard, and mouse hardware IRQs");
     if (!interrupts_hardware_start())
         boot_fatal("PIT timer IRQ did not arrive");
     serial_write("timer ticks: ");
@@ -917,6 +960,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     boot_status("Hardware IRQs", mouse_controller_ready() ?
         "PIC, PIT, keyboard, and PS/2 mouse enabled" :
         "PIC, PIT, and keyboard enabled; mouse unavailable");
+    boot_progress("Allocating isolated userspace process pools");
     struct userspace_memory processes[SCHEDULER_PROCESS_LIMIT - 1u];
     size_t code_page_total = 0u;
     for (size_t process = 0u; process < SCHEDULER_PROCESS_LIMIT - 1u; ++process) {
@@ -944,7 +988,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write(" base="); serial_write_hex(surface_arena);
     serial_write(" end="); serial_write_hex(surface_arena + surface_capacity);
     serial_write("\n");
-    if (!userspace_init(processes))
+    if (!userspace_init(processes, (uintptr_t)&frames))
         boot_fatal("Ring-3 address-space setup failed");
     serial_write("ELF64_MKO_LOAD_OK\n");
     boot_status("Application loader", "ELF64 image with native MKO code loaded");
@@ -1024,6 +1068,58 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write("CXX_RUNTIME_SPAWN_OK pid="); serial_write_u64(cxx_hello_pid);
     serial_write(" status="); serial_write_u64(cxx_hello_status); serial_write("\n");
     boot_status("C++ runtime (Wave 0)", "heap alloc, vtable dispatch, and clean exit passed");
+    const uint32_t portcheck_pid = userspace_spawn_path(0u,
+        "/system/bin/portcheck.elf", 25u, "portcheck",
+        CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+        CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS) |
+        CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+        CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_INPUT));
+    if (portcheck_pid == 0u || !userspace_run_init())
+        boot_fatal("Native PortKit anonymous-memory test failed to start");
+    uint64_t portcheck_status = UINT64_MAX;
+    const bool portcheck_reaped = scheduler_reap(0u, portcheck_pid, &portcheck_status);
+    if (!portcheck_reaped || portcheck_status != 0u)
+        boot_fatal("Native PortKit anonymous-memory test failed");
+    serial_write("PORTKIT_RING3_OK pid="); serial_write_u64(portcheck_pid);
+    serial_write(" status="); serial_write_u64(portcheck_status);
+    serial_write("\n");
+    boot_status("Native port runtime", "dynamic heap, reuse, files, timing, and input ABI passed");
+    const uint32_t doom_pid = userspace_spawn_path(0u,
+        "/system/bin/doom.elf", 20u, "doom-version",
+        CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+        CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS));
+    if (doom_pid == 0u || !userspace_run_init())
+        boot_fatal("Doom D0 executable failed to start");
+    uint64_t doom_status = UINT64_MAX;
+    if (!scheduler_reap(0u, doom_pid, &doom_status) || doom_status != 0u)
+        boot_fatal("Doom D0 executable did not exit cleanly");
+    serial_write("DOOM_VERSION_RING3_OK pid="); serial_write_u64(doom_pid);
+    serial_write(" status="); serial_write_u64(doom_status); serial_write("\n");
+    boot_status("Doom engine D0", "native version executable exited cleanly");
+    if (test_mode || doom_frame_test) {
+        const uint32_t doom_full_pid = userspace_spawn_path(0u,
+            "/system/bin/doom-full.elf", 25u, "doom-full",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_INPUT) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+        if (doom_full_pid == 0u || !userspace_run_init())
+            boot_fatal("Full Doom image failed to map or start");
+        if (doom_frame_test) {
+            serial_write("DOOM_FULL_INTERACTIVE_RUNNING pid=");
+            serial_write_u64(doom_full_pid); serial_write("\n");
+            for (;;) __asm__ volatile ("hlt");
+        }
+        uint64_t doom_full_status = UINT64_MAX;
+        if (!scheduler_reap(0u, doom_full_pid, &doom_full_status) ||
+            doom_full_status != 0u)
+            boot_fatal("Full Doom image did not exit cleanly");
+        serial_write("DOOM_FULL_RING3_OK pid="); serial_write_u64(doom_full_pid);
+        serial_write(" status="); serial_write_u64(doom_full_status); serial_write("\n");
+        boot_status("Doom large image", "149 executable pages mapped and reclaimed");
+    }
     /* GUI/compositor stack sidelined -- see sidelined/. Every boot now goes
        straight to a plain console: no framebuffer graphics mode, no
        compositor, no windowing. init_system_reach_boot_target(0u) already
@@ -1115,7 +1211,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     terminal_set_output(true);
     if (!makobox_ok) boot_fatal("MakoBox dispatcher self-test failed");
     serial_write("MAKOBOX_SELF_TEST_OK\n");
-    boot_status("MakoBox", "init/systemctl/runas applets ready");
+    boot_status("MakoBox", "init/runit/runas applets ready");
     serial_write("KERNEL_BOOT_OK\n");
     // framebuffer_self_test() (run earlier, during core subsystem checks)
     // legitimately exercises the cursor overlay and leaves it sitting

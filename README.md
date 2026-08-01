@@ -72,9 +72,11 @@ motion without entering terminal ownership.
 The ISO also includes a freestanding C Tetris application, launchable from
 the recovery console with `tetris` or `apps launch tetris` (A/D, W, S, and
 Q). The reproducible freestanding C build contract is in
-[C applications](docs/c-apps.md). Freedoom is tracked as an honest engine
-port, not a renamed demo; see the
-[Freedoom port plan](docs/freedoom-port.md).
+[C applications](docs/c-apps.md). The interactive image includes the real
+DoomGeneric engine and checksum-pinned Freedoom 0.13.0 Phase 1 IWAD; launch it
+with `doom` at MakoBox. See the [Freedoom port](docs/freedoom-port.md).
+`make freedoom-smoke` additionally builds an unattended image and validates
+real gameplay, rendering, configuration writes, and clean exit in ring 3.
 
 ## DemonX: X11 compatibility
 
@@ -168,7 +170,7 @@ services are ported. That work is specified in the
 - Arch-style colored boot status, MAKO banner, and kernel welcome screen
 - Dependency-aware init system with ten graphical units, PID-bound
   `desktop-compositor.service`, and console-only fallback
-- `systemctl`-style unit inspection and lifecycle transactions
+- `runit` init/unit inspection and lifecycle transactions
 - `runas` administrative allowlist with grant/denial auditing
 - Allocation-free ELF application discovery through `apps`
 - Native Git worktree/snapshot foundation without a host Linux binary
@@ -208,7 +210,7 @@ services are ported. That work is specified in the
 
 MakoBox is the kernel's single-binary command toolkit. `makobox_run()`
 dispatches `help`, `uname`, `status`, `mem`, `frames`, `paging`, `ticks`,
-`ps`, `abi`, `caps`, `projects`, `systemctl`, `runas`, `mko`, `input`,
+`ps`, `abi`, `caps`, `projects`, `runit`, `runas`, `mko`, `input`,
 `fetch`, and `clear` without a C library. The diagnostic applets read live
 kernel state and write to both VGA and serial. Boot executes the dispatcher
 through all read-only applets and requires `MAKOBOX_SELF_TEST_OK`. The
@@ -219,13 +221,16 @@ The dependency-aware init system and its deliberately smaller systemd-like
 operator surface are documented in
 [MAKO Init and Service Management](docs/init-system.md). Graphical boot
 resolves ten units through `desktop.target`; framebuffer fallback resolves
-the original eight through `default.target`. Read-only `systemctl`
+the original eight through `default.target`. Read-only `runit`
 operations are public; mutations require the local-console `runas` policy
 boundary.
 
 Application discovery, the native Git foundation, and the boundary for
 dynamic launch/desktop work are documented in
 [Applications and Git Foundation](docs/apps-and-git.md).
+The staged route from that recovery-oriented snapshot engine to an
+interoperable upstream fork is in
+[Forking and Porting Git to DemonOS](docs/git-port.md).
 
 The first real graphics milestone is documented in
 [Native Framebuffer Stage 1](docs/framebuffer-stage1.md). It maps QEMU's
@@ -312,7 +317,8 @@ make                 # build build/kernel.elf
 make project         # build build/portable_hello.elf against the MKO SDK
 make iso             # build and verify the complete bootable distribution ISO
 make iso-check       # verify required files inside the existing ISO
-make run             # boot interactively in QEMU; Ctrl+A, X exits
+make run             # boot interactive ISO (including Freedoom) in QEMU
+make run-doom        # explicit alias for the Freedoom-capable interactive ISO
 make smoke           # headless boot assertion via serial output
 make keyboard-smoke  # inject PS/2 keys and verify interactive command input
 make mako-check      # kernel-profile check + optimized MIR lowering

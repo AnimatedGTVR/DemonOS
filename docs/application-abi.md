@@ -71,6 +71,7 @@ RSI, and results return in RAX.
 | 30 | `surface_unmap` | RDI=readable surface | 0 or `-1` |
 | 31 | `compositor_report` | RDI=display, RSI=window count, RDX=focused window id | 0 or `-1` |
 | 33 | `display_submit_effect` | RDI=display, RSI=request | 0 or `-1` |
+| 42 | `handle_read_at` | RDI=file, RSI=destination, RDX=capacity, R10=absolute byte offset | bytes read or `-1` |
 
 Syscall 31 is compositor introspection: it publishes the caller's live window
 count and focused window id into kernel-side counters (read back via

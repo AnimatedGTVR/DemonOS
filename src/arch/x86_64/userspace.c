@@ -27,6 +27,11 @@
 #define USER_STACK_PAGE (USER_HEAP + USER_HEAP_SIZE)
 #define USER_STACK_SIZE (USERSPACE_STACK_PAGES * 4096u)
 #define USER_ADDRESS_END (USER_STACK_PAGE + USER_STACK_SIZE)
+#define USER_ANON_BASE 0x10000000u
+#define USER_ANON_MAX_BYTES (24u * 1024u * 1024u)
+#define USER_ANON_MAX_PAGES (USER_ANON_MAX_BYTES / 4096u)
+#define USER_LARGE_CODE_BASE 0x20000000u
+#define USER_LARGE_CODE_MAX_PAGES 256u
 #define USER_SURFACE_MAP 0x380000u
 /* 16 pages (64 KiB) matches the old 256x64 SURFACE_MAX_WIDTH/HEIGHT
    ceiling (see include/kernel/surface.h). Raising SURFACE_MAX_WIDTH/HEIGHT
@@ -79,6 +84,13 @@ static struct userspace_memory process_memory[SCHEDULER_PROCESS_LIMIT];
 static bool process_memory_used[SCHEDULER_PROCESS_LIMIT];
 static uint32_t mapped_surface[SCHEDULER_PROCESS_LIMIT][USER_SURFACE_MAP_SLOTS];
 static uintptr_t kernel_address_space;
+static uintptr_t userspace_frame_allocator;
+static uint64_t anonymous_free_frames;
+static size_t anonymous_page_count[SCHEDULER_PROCESS_LIMIT];
+static uint64_t large_code_frames[SCHEDULER_PROCESS_LIMIT][USER_LARGE_CODE_MAX_PAGES];
+static size_t large_code_page_count[SCHEDULER_PROCESS_LIMIT];
+static uint64_t large_code_page_table[SCHEDULER_PROCESS_LIMIT];
+extern uint64_t mako_frame_allocate(uintptr_t state_address);
 /* Set once from kernel_main (see multiboot_test_mode in kernel.c) before any
    userspace task runs, and never changed afterward. Exposed read-only to
    every process via syscall 34 so the compositor can tell a scripted boot
@@ -86,7 +98,7 @@ static uintptr_t kernel_address_space;
    small fixed tick budget) apart from a real interactive boot (make run,
    where a human needs several real seconds to read the loading/login
    screens) -- see compositor.mko's boot_test_mode/deadline setup. */
-static bool boot_test_mode;
+static uint64_t boot_test_mode;
 static bool demonwm_mode;
 /* Display pixels originate in the caller's address space, while the physical
    framebuffer backbuffer is intentionally accessed through the kernel's
@@ -96,6 +108,40 @@ static bool demonwm_mode;
    small while supporting the framebuffer's maximum width. */
 #define DISPLAY_BOUNCE_PIXELS 640u
 static uint32_t display_bounce[DISPLAY_BOUNCE_PIXELS] __attribute__((aligned(16)));
+#define STORAGE_BOUNCE_BYTES 4096u
+static uint8_t storage_bounce[STORAGE_BOUNCE_BYTES] __attribute__((aligned(16)));
+
+/* RAMFS reference-backed files point at physical Multiboot module memory.
+   Low module addresses can share a virtual address with a process's code
+   pages, so they must only be dereferenced with the kernel CR3 active. Copy
+   through one bounded page, then restore the caller's CR3 before touching
+   its destination. */
+static bool copy_ramfs_to_user(uint32_t object_id, size_t file_offset,
+                               uint8_t *destination, size_t capacity,
+                               size_t *copied) {
+    if (copied == NULL) return false;
+    *copied = 0u;
+    while (*copied < capacity) {
+        if (*copied > (size_t)-1 - file_offset) return false;
+        size_t chunk = capacity - *copied;
+        if (chunk > STORAGE_BOUNCE_BYTES) chunk = STORAGE_BOUNCE_BYTES;
+        uint64_t caller_cr3;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(caller_cr3));
+        if (caller_cr3 != kernel_address_space)
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+        size_t received = 0u;
+        const bool ok = ramfs_read_range(object_id, file_offset + *copied,
+                                         storage_bounce, chunk, &received);
+        if (caller_cr3 != kernel_address_space)
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(caller_cr3) : "memory");
+        if (!ok) return false;
+        for (size_t i = 0u; i < received; ++i)
+            destination[*copied + i] = storage_bounce[i];
+        *copied += received;
+        if (received < chunk) break;
+    }
+    return true;
+}
 static void install_gdt_tss(void) {
     gdt[0] = 0u;
     gdt[1] = 0x00AF9A000000FFFFull;
@@ -121,7 +167,7 @@ void userspace_set_kernel_stack(uintptr_t stack_top) {
     tss.rsp0 = stack_top;
 }
 
-void userspace_set_boot_test_mode(bool test_mode) {
+void userspace_set_boot_test_mode(uint64_t test_mode) {
     boot_test_mode = test_mode;
 }
 
@@ -135,14 +181,181 @@ static bool any_surface_mapped(uint32_t pid) {
     return false;
 }
 
+static uint64_t anonymous_frame_take(void) {
+    uint64_t frame;
+    if (anonymous_free_frames != 0u) {
+        frame = anonymous_free_frames;
+        anonymous_free_frames = *(uint64_t *)(uintptr_t)frame;
+    } else {
+        frame = mako_frame_allocate(userspace_frame_allocator);
+    }
+    if (frame == 0u) return 0u;
+    uint64_t *words = (uint64_t *)(uintptr_t)frame;
+    for (size_t i = 0u; i < 512u; ++i) words[i] = 0u;
+    return frame;
+}
+
+static void anonymous_frame_release(uint64_t frame) {
+    if (frame == 0u) return;
+    *(uint64_t *)(uintptr_t)frame = anonymous_free_frames;
+    anonymous_free_frames = frame;
+}
+
+static void large_code_release(uint32_t pid) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT) return;
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+    uint64_t *directory = (uint64_t *)(uintptr_t)process_memory[pid].page_directory;
+    const size_t directory_index = USER_LARGE_CODE_BASE >> 21u;
+    directory[directory_index] = 0u;
+    for (size_t page = 0u; page < large_code_page_count[pid]; ++page) {
+        anonymous_frame_release(large_code_frames[pid][page]);
+        large_code_frames[pid][page] = 0u;
+    }
+    large_code_page_count[pid] = 0u;
+    anonymous_frame_release(large_code_page_table[pid]);
+    large_code_page_table[pid] = 0u;
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
+}
+
+static bool large_code_load(uint32_t pid, const uint8_t *image, size_t image_size,
+                            const struct elf64_layout *layout, uint64_t *entry) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT || layout == NULL ||
+        layout->virtual_base != USER_LARGE_CODE_BASE ||
+        layout->virtual_end <= USER_LARGE_CODE_BASE) return false;
+    const uint64_t byte_count = layout->virtual_end - USER_LARGE_CODE_BASE;
+    if (byte_count > USER_LARGE_CODE_MAX_PAGES * 4096u) return false;
+    const size_t pages = (size_t)((byte_count + 4095u) / 4096u);
+    const uint64_t table = anonymous_frame_take();
+    if (table == 0u) return false;
+    large_code_page_table[pid] = table;
+    uint64_t *page_table = (uint64_t *)(uintptr_t)table;
+    for (size_t page = 0u; page < pages; ++page) {
+        const uint64_t frame = anonymous_frame_take();
+        if (frame == 0u) {
+            large_code_page_count[pid] = page;
+            large_code_release(pid);
+            return false;
+        }
+        large_code_frames[pid][page] = frame;
+        large_code_page_count[pid] = page + 1u;
+        page_table[page] = frame + 7u;
+    }
+    if (!elf64_load_executable_pages(image, image_size, USER_LARGE_CODE_BASE,
+            large_code_frames[pid], pages, entry)) {
+        large_code_release(pid);
+        return false;
+    }
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+    uint64_t *directory = (uint64_t *)(uintptr_t)process_memory[pid].page_directory;
+    directory[USER_LARGE_CODE_BASE >> 21u] = table + 7u;
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
+    return true;
+}
+
+/* One bounded anonymous arena per process is enough for a conventional libc
+   heap and avoids pretending we already implement full POSIX mmap semantics. */
+static void anonymous_release(uint32_t pid) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT ||
+        anonymous_page_count[pid] == 0u) return;
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+    uint64_t *directory = (uint64_t *)(uintptr_t)process_memory[pid].page_directory;
+    const size_t table_count = (anonymous_page_count[pid] + 511u) / 512u;
+    for (size_t table = 0u; table < table_count; ++table) {
+        const size_t directory_index = (USER_ANON_BASE >> 21u) + table;
+        const uint64_t entry = directory[directory_index];
+        if ((entry & 1u) == 0u || (entry & 0x80u) != 0u) continue;
+        uint64_t *page_table = (uint64_t *)(uintptr_t)(entry & ~0xFFFull);
+        size_t pages = anonymous_page_count[pid] - table * 512u;
+        if (pages > 512u) pages = 512u;
+        for (size_t page = 0u; page < pages; ++page) {
+            if ((page_table[page] & 1u) != 0u)
+                anonymous_frame_release(page_table[page] & ~0xFFFull);
+            page_table[page] = 0u;
+        }
+        directory[directory_index] = (uint64_t)directory_index * 0x200000u + 0x87u;
+        anonymous_frame_release(entry & ~0xFFFull);
+    }
+    anonymous_page_count[pid] = 0u;
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
+    else
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
+}
+
+static uint64_t anonymous_map(uint32_t pid, uint64_t byte_count) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT || byte_count == 0u ||
+        byte_count > USER_ANON_MAX_BYTES || anonymous_page_count[pid] != 0u ||
+        byte_count > UINT64_MAX - 4095u) return UINT64_MAX;
+    const size_t pages = (size_t)((byte_count + 4095u) / 4096u);
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+    uint64_t *directory = (uint64_t *)(uintptr_t)process_memory[pid].page_directory;
+    bool ok = true;
+    for (size_t page = 0u; page < pages && ok; ++page) {
+        const size_t directory_index = (USER_ANON_BASE >> 21u) + page / 512u;
+        uint64_t *page_table;
+        if (page % 512u == 0u) {
+            const uint64_t table_frame = anonymous_frame_take();
+            if (table_frame == 0u) { ok = false; break; }
+            directory[directory_index] = table_frame + 7u;
+            page_table = (uint64_t *)(uintptr_t)table_frame;
+        } else {
+            page_table = (uint64_t *)(uintptr_t)(directory[directory_index] & ~0xFFFull);
+        }
+        const uint64_t frame = anonymous_frame_take();
+        if (frame == 0u) {
+            if (page % 512u == 0u) {
+                anonymous_frame_release(directory[directory_index] & ~0xFFFull);
+                directory[directory_index] =
+                    (uint64_t)directory_index * 0x200000u + 0x87u;
+            }
+            ok = false;
+            break;
+        }
+        page_table[page % 512u] = frame + 7u;
+        anonymous_page_count[pid] = page + 1u;
+    }
+    if (!ok) anonymous_release(pid);
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
+    if (!ok) return UINT64_MAX;
+    return USER_ANON_BASE;
+}
+
+static bool anonymous_range(uint32_t pid, uint64_t address, uint64_t length) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT ||
+        anonymous_page_count[pid] == 0u || address < USER_ANON_BASE) return false;
+    const uint64_t end = USER_ANON_BASE + anonymous_page_count[pid] * 4096u;
+    return address <= end && length <= end - address;
+}
+
 static bool user_range(uint64_t address, uint64_t length) {
     const uint32_t pid = scheduler_current_pid();
+    if (anonymous_range(pid, address, length)) return true;
     if (address >= USER_HEAP && address <= USER_ADDRESS_END &&
         length <= USER_ADDRESS_END - address) return true;
     if (pid != 0u && pid < SCHEDULER_PROCESS_LIMIT && process_memory_used[pid] &&
         address >= USER_CODE &&
         address <= USER_CODE + process_memory[pid].code_page_count * 4096u &&
         length <= USER_CODE + process_memory[pid].code_page_count * 4096u - address)
+        return true;
+    if (pid != 0u && pid < SCHEDULER_PROCESS_LIMIT &&
+        large_code_page_count[pid] != 0u && address >= USER_LARGE_CODE_BASE &&
+        address <= USER_LARGE_CODE_BASE + large_code_page_count[pid] * 4096u &&
+        length <= USER_LARGE_CODE_BASE + large_code_page_count[pid] * 4096u - address)
         return true;
     /* NOTE: this only confirms address/length fall somewhere inside the
        aggregate 4-slot surface-map region, not that they stay within the
@@ -165,6 +378,7 @@ static bool user_range(uint64_t address, uint64_t length) {
 // mapped read/execute-only (see load_process's PTE flags) so a kernel
 // write there would silently desync from the actual page permissions.
 static bool user_write_range(uint64_t address, uint64_t length) {
+    if (anonymous_range(scheduler_current_pid(), address, length)) return true;
     if (address < USER_HEAP || address > USER_ADDRESS_END) return false;
     if (length > USER_ADDRESS_END - address) return false;
     return true;
@@ -469,12 +683,54 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
                                        &object_id) ||
             service != CAPABILITY_SERVICE_FILE ||
             !user_write_range(frame->rsi, frame->rdx) ||
-            !ramfs_read(object_id, (uint8_t *)(uintptr_t)frame->rsi,
-                        (size_t)frame->rdx, &length)) {
+            !copy_ramfs_to_user(object_id, 0u,
+                                (uint8_t *)(uintptr_t)frame->rsi,
+                                (size_t)frame->rdx, &length)) {
             frame->rax = UINT64_MAX;
             return frame_address;
         }
         frame->rax = length;
+        return frame_address;
+    }
+    if (number == 42u) {
+        enum capability_service service;
+        uint32_t object_id;
+        size_t length;
+        if (!capability_resolve_object(scheduler_current_pid(), frame->rdi,
+                                       CAPABILITY_RIGHT_READ, &service,
+                                       &object_id) ||
+            service != CAPABILITY_SERVICE_FILE ||
+            frame->r10 > (uint64_t)(size_t)-1 ||
+            !user_write_range(frame->rsi, frame->rdx) ||
+            !copy_ramfs_to_user(object_id, (size_t)frame->r10,
+                                (uint8_t *)(uintptr_t)frame->rsi,
+                                (size_t)frame->rdx, &length)) {
+            frame->rax = UINT64_MAX;
+            return frame_address;
+        }
+        frame->rax = length;
+        return frame_address;
+    }
+    if (number == 43u) {
+        enum capability_service service;
+        if (!capability_resolve(scheduler_current_pid(), frame->rdi,
+                CAPABILITY_RIGHT_OPEN, &service) ||
+            service != CAPABILITY_SERVICE_STORAGE ||
+            !user_range(frame->rsi, frame->rdx)) frame->rax = UINT64_MAX;
+        else frame->rax = ramfs_delete((const char *)(uintptr_t)frame->rsi,
+            (size_t)frame->rdx) ? 0u : UINT64_MAX;
+        return frame_address;
+    }
+    if (number == 44u) {
+        enum capability_service service;
+        if (!capability_resolve(scheduler_current_pid(), frame->rdi,
+                CAPABILITY_RIGHT_OPEN, &service) ||
+            service != CAPABILITY_SERVICE_STORAGE ||
+            !user_range(frame->rsi, frame->rdx) ||
+            !user_range(frame->r10, frame->r8)) frame->rax = UINT64_MAX;
+        else frame->rax = ramfs_rename((const char *)(uintptr_t)frame->rsi,
+            (size_t)frame->rdx, (const char *)(uintptr_t)frame->r10,
+            (size_t)frame->r8) ? 0u : UINT64_MAX;
         return frame_address;
     }
     if (number == 11u) {
@@ -552,7 +808,12 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
             frame->rax = UINT64_MAX; return frame_address;
         }
         const uint64_t bytes = count * sizeof(uint32_t);
-        if (count > DISPLAY_TRANSFER_MAX_PIXELS || bytes / sizeof(uint32_t) != count ||
+        /* The public limit describes one kernel-side transfer chunk, not the
+           largest frame a client may submit. display_submit_from_user()
+           deliberately walks larger frames a few rows at a time through the
+           bounded bounce buffer. Reject only arithmetic overflow or an
+           invalid complete source range here. */
+        if (bytes / sizeof(uint32_t) != count ||
             !user_range(request.pixels, bytes)) frame->rax = UINT64_MAX;
         else frame->rax = display_submit_from_user(&request) ? 0u : UINT64_MAX;
         return frame_address;
@@ -816,7 +1077,7 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
         /* Read-only, no capability gate -- boot_test_mode carries no
            sensitive state, it's just "is this the scripted boot-test
            harness or a real interactive session", so any process may ask. */
-        frame->rax = boot_test_mode ? 1u : 0u;
+        frame->rax = boot_test_mode;
         return frame_address;
     }
     if (number == 35u) {
@@ -916,6 +1177,21 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
             (const uint8_t *)&entry, sizeof(entry)) ? 1u : UINT64_MAX;
         return frame_address;
     }
+    if (number == 40u) {
+        frame->rax = anonymous_map(scheduler_current_pid(), frame->rdi);
+        return frame_address;
+    }
+    if (number == 41u) {
+        const uint32_t pid = scheduler_current_pid();
+        if (frame->rdi != USER_ANON_BASE || pid == 0u ||
+            anonymous_page_count[pid] == 0u) {
+            frame->rax = UINT64_MAX;
+        } else {
+            anonymous_release(pid);
+            frame->rax = 0u;
+        }
+        return frame_address;
+    }
     frame->rax = (uint64_t)-1;
     return frame_address;
 }
@@ -947,13 +1223,20 @@ static bool load_process(uint32_t expected_pid, uint32_t parent_pid, const char 
     uint8_t *heap = (uint8_t *)(uintptr_t)memory->heap_frames[0];
     for (size_t i = 0; i < USER_HEAP_SIZE; ++i) heap[i] = 0u;
 
-    const struct elf64_target target = {
-        .virtual_base = USER_CODE,
-        .memory = (uint8_t *)(uintptr_t)memory->code_frames[0],
-        .memory_size = memory->code_page_count * 4096u,
-    };
+    struct elf64_layout layout;
+    if (!elf64_executable_layout(image, image_size, &layout)) return false;
     uint64_t entry = 0u;
-    if (!elf64_load_executable(image, image_size, &target, &entry)) return false;
+    if (layout.virtual_base == USER_LARGE_CODE_BASE) {
+        if (!large_code_load(expected_pid, image, image_size, &layout, &entry))
+            return false;
+    } else {
+        const struct elf64_target target = {
+            .virtual_base = USER_CODE,
+            .memory = (uint8_t *)(uintptr_t)memory->code_frames[0],
+            .memory_size = memory->code_page_count * 4096u,
+        };
+        if (!elf64_load_executable(image, image_size, &target, &entry)) return false;
+    }
 
     uint64_t *pt1 = (uint64_t *)(uintptr_t)memory->page_table;
     // +7u (present+write+user), not +5u: the ELF loader folds every app's
@@ -972,18 +1255,30 @@ static bool load_process(uint32_t expected_pid, uint32_t parent_pid, const char 
 
     uint32_t pid = scheduler_create_user(parent_pid, name, entry,
         USER_STACK_PAGE + USER_STACK_SIZE - 16u, memory->address_space);
-    if (pid != expected_pid || !capability_assign_services(pid, service_mask)) return false;
+    if (pid != expected_pid || !capability_assign_services(pid, service_mask)) {
+        large_code_release(expected_pid);
+        return false;
+    }
     process_memory_used[pid] = true;
     return true;
 }
 
-bool userspace_init(const struct userspace_memory processes[SCHEDULER_PROCESS_LIMIT - 1u]) {
-    if (processes == NULL) return false;
+bool userspace_init(const struct userspace_memory processes[SCHEDULER_PROCESS_LIMIT - 1u],
+                    uintptr_t frame_allocator_state) {
+    if (processes == NULL || frame_allocator_state == 0u) return false;
     install_gdt_tss();
     __asm__ volatile ("mov %%cr3, %0" : "=r"(kernel_address_space));
-    for (uint32_t pid = 0u; pid < SCHEDULER_PROCESS_LIMIT; ++pid)
+    userspace_frame_allocator = frame_allocator_state;
+    anonymous_free_frames = 0u;
+    for (uint32_t pid = 0u; pid < SCHEDULER_PROCESS_LIMIT; ++pid) {
+        anonymous_page_count[pid] = 0u;
+        large_code_page_count[pid] = 0u;
+        large_code_page_table[pid] = 0u;
+        for (size_t page = 0u; page < USER_LARGE_CODE_MAX_PAGES; ++page)
+            large_code_frames[pid][page] = 0u;
         for (size_t slot = 0u; slot < USER_SURFACE_MAP_SLOTS; ++slot)
             mapped_surface[pid][slot] = 0u;
+    }
     for (uint32_t pid = 1u; pid < SCHEDULER_PROCESS_LIMIT; ++pid) {
         process_memory[pid] = processes[pid - 1u]; process_memory_used[pid] = false;
     }
@@ -1024,6 +1319,8 @@ void userspace_release_process(uint32_t pid) {
     ipc_process_cleanup(pid);
     capabilities_close_all(pid);
     unmap_surface(pid);
+    anonymous_release(pid);
+    large_code_release(pid);
     process_memory_used[pid] = false;
 }
 

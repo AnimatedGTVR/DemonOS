@@ -18,6 +18,7 @@ static uint8_t color;
 static bool output_enabled = true;
 static bool automatic_wrap;
 static bool graphical;
+static uintptr_t graphical_kernel_cr3;
 
 // Plain monochrome TTY: black background, light grey text, no title bar,
 // no border, no panel -- nothing that reads as a desktop app window. See
@@ -34,8 +35,22 @@ static bool graphical;
 #define GRAPHICAL_CELL_WIDTH 7
 #define GRAPHICAL_CELL_HEIGHT 14
 
+/* The low physical backbuffer is identity-mapped in the kernel CR3, but its
+   virtual range crosses the userspace image window beginning at 0x300000.
+   Kernel code entered through a syscall still runs with the caller's CR3;
+   drawing then would follow userspace PTEs and turn executable/stack pages
+   into pixels. Keep accepting terminal text into `cells`, but defer all
+   framebuffer access until execution has returned to the kernel CR3. */
+static bool graphical_render_safe(void) {
+    if (!graphical || !framebuffer_available() || graphical_kernel_cr3 == 0u)
+        return false;
+    uintptr_t current_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(current_cr3));
+    return current_cr3 == graphical_kernel_cr3;
+}
+
 static void graphical_cell(size_t y, size_t x) {
-    if (!graphical || !framebuffer_available()) return;
+    if (!graphical_render_safe()) return;
     const int32_t pixel_x = GRAPHICAL_X + (int32_t)x * GRAPHICAL_CELL_WIDTH;
     const int32_t pixel_y = GRAPHICAL_Y + (int32_t)y * GRAPHICAL_CELL_HEIGHT;
     framebuffer_fill_rect((struct framebuffer_rect){pixel_x, pixel_y,
@@ -51,7 +66,7 @@ static void store_cell(size_t y, size_t x, uint16_t value) {
 }
 
 void terminal_graphical_refresh(void) {
-    if (!graphical || !framebuffer_available()) return;
+    if (!graphical_render_safe()) return;
     framebuffer_clear(PLAIN_BG);
     for (size_t y = 0u; y < VGA_HEIGHT; ++y)
         for (size_t x = 0u; x < VGA_WIDTH; ++x)
@@ -61,6 +76,7 @@ void terminal_graphical_refresh(void) {
 
 void terminal_graphical_enable(void) {
     if (!framebuffer_available()) return;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(graphical_kernel_cr3));
     graphical = true;
     terminal_graphical_refresh();
 }
@@ -79,7 +95,7 @@ void terminal_init(void) {
     for (size_t y = 0; y < VGA_HEIGHT; ++y)
         for (size_t x = 0; x < VGA_WIDTH; ++x)
             store_cell(y, x, entry(' '));
-    if (graphical) terminal_graphical_refresh();
+    if (graphical_render_safe()) terminal_graphical_refresh();
 }
 
 void terminal_set_color(uint8_t foreground, uint8_t background) {
@@ -98,7 +114,7 @@ static void newline(void) {
     row = VGA_HEIGHT - 1u;
     for (size_t x = 0; x < VGA_WIDTH; ++x)
         store_cell(row, x, entry(' '));
-    if (graphical) terminal_graphical_refresh();
+    if (graphical_render_safe()) terminal_graphical_refresh();
 }
 
 void terminal_write(const char *text) {
@@ -111,7 +127,7 @@ void terminal_write(const char *text) {
             for (size_t y = 0u; y < VGA_HEIGHT; ++y)
                 for (size_t x = 0u; x < VGA_WIDTH; ++x)
                     store_cell(y, x, entry(' '));
-            if (graphical) terminal_graphical_refresh();
+            if (graphical_render_safe()) terminal_graphical_refresh();
             ++text;
             continue;
         }
@@ -144,7 +160,7 @@ void terminal_write(const char *text) {
             automatic_wrap = true;
         }
     }
-    if (changed && graphical) framebuffer_present();
+    if (changed && graphical_render_safe()) framebuffer_present();
 }
 
 void terminal_write_line(const char *text) {
@@ -181,5 +197,5 @@ void terminal_backspace(void) {
     --column;
     store_cell(row, column, entry(' '));
     graphical_cell(row, column);
-    if (graphical) framebuffer_present();
+    if (graphical_render_safe()) framebuffer_present();
 }

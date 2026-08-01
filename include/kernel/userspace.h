@@ -66,6 +66,7 @@
 
 struct userspace_memory {
     uint64_t address_space;
+    uint64_t page_directory;
     uint64_t page_table;
     size_t code_page_count;
     uint64_t code_frames[USERSPACE_CODE_PAGES];
@@ -73,7 +74,8 @@ struct userspace_memory {
     uint64_t stack_frames[USERSPACE_STACK_PAGES];
 };
 
-bool userspace_init(const struct userspace_memory processes[SCHEDULER_PROCESS_LIMIT - 1u]);
+bool userspace_init(const struct userspace_memory processes[SCHEDULER_PROCESS_LIMIT - 1u],
+                    uintptr_t frame_allocator_state);
 uint32_t userspace_spawn_path(uint32_t parent_pid, const char *path, size_t path_length,
                               const char *name, uint32_t service_mask);
 void userspace_release_process(uint32_t pid);
@@ -84,7 +86,7 @@ bool userspace_run_init(void);
 uint64_t userspace_exit_code(void);
 uint64_t userspace_yield_count(void);
 void userspace_set_kernel_stack(uintptr_t stack_top);
-void userspace_set_boot_test_mode(bool test_mode);
+void userspace_set_boot_test_mode(uint64_t test_mode);
 void userspace_set_demonwm_mode(bool enabled);
 
 #endif

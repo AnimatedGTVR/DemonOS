@@ -1,0 +1,17 @@
+diff --git a/doomgeneric/i_system.c b/doomgeneric/i_system.c
+index 902bda9..0abf00d 100644
+--- a/doomgeneric/i_system.c
++++ b/doomgeneric/i_system.c
+@@ -257,10 +257,7 @@ void I_Quit (void)
+ 	entry = entry->next;
+     }
+ 
+-#if ORIGCODE
+-    SDL_Quit();
+-
++    /* DemonOS supplies exit() through its freestanding syscall runtime. */
+     exit(0);
+-#endif
+ }
+ 
+ #if !defined(_WIN32) && !defined(__MACOSX__) && !defined(__DJGPP__)
