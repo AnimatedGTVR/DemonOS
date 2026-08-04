@@ -1,0 +1,23 @@
+diff --git a/src/Core.h b/src/Core.h
+index 67ea6d4..3abc269 100644
+--- a/src/Core.h
++++ b/src/Core.h
+@@ -187,5 +187,17 @@ Copyright 2014-2025 ClassiCube | Licensed under BSD-3
+ /*#define CC_BUILD_GL11*/
+ 
+ #ifndef CC_BUILD_MANUAL
+-#if defined NXDK
++#if defined __demonos__
++	#define CC_BUILD_DEMONOS
++	#define CC_BUILD_CONSOLE
++	#define CC_BUILD_LOWMEM
++	#define CC_BUILD_COOPTHREADED
++	#define CC_BUILD_NOMUSIC
++	#define CC_BUILD_NOSOUNDS
++	#undef  CC_BUILD_NETWORKING
++	#undef  CC_BUILD_FREETYPE
++	#undef  CC_BUILD_PLUGINS
++	#define DEFAULT_AUD_BACKEND CC_AUD_BACKEND_NULL
++	#define DEFAULT_GFX_BACKEND CC_GFX_BACKEND_SOFTGPU
++#elif defined NXDK
+ 	/* XBox also defines _WIN32 */

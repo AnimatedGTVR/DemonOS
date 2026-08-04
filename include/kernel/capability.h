@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum capability_service {
     CAPABILITY_SERVICE_CONSOLE = 1,
     CAPABILITY_SERVICE_CLOCK = 2,
@@ -15,6 +19,7 @@ enum capability_service {
     CAPABILITY_SERVICE_INPUT = 8,
     CAPABILITY_SERVICE_SURFACE = 9,
     CAPABILITY_SERVICE_NETWORK = 10,
+    CAPABILITY_SERVICE_AUDIO = 11,
 };
 
 enum capability_right {
@@ -50,5 +55,9 @@ uint64_t capabilities_denied(void);
 uint64_t capabilities_live(void);
 
 #define CAPABILITY_SERVICE_BIT(service) (1u << (service))
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

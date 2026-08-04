@@ -1,20 +1,23 @@
 use "sdk.mko";
-
-fn low32(value: u64) -> u64 {
-    return value - (value / 4294967296) * 4294967296;
-}
+use "../../user/mako_std.mko";
 
 # Window channel names are "desktop.win<pid>" (single decimal digit, pid
 # always < SCHEDULER_PROCESS_LIMIT=8 -- see compositor.mko's
 # write_event_channel_name, the exact same byte pattern this must match so
 # the compositor can connect to whichever client owns a given window id).
+# The "desktop.win" prefix comes from a real string literal now instead of
+# 11 hand-written vptr_write_u8 byte codes -- see docs/mako-userspace-improvements.md's
+# Finding 3. The literal itself is compile-time-only static data (an
+# address, not a runtime string); this loop is what actually copies its
+# bytes into the caller's buffer.
 fn write_event_name(name: vptr<u8>, pid: u64) -> u64 {
-    vptr_write_u8(name, 100); vptr_write_u8(vptr_offset_u8(name, 1), 101);
-    vptr_write_u8(vptr_offset_u8(name, 2), 115); vptr_write_u8(vptr_offset_u8(name, 3), 107);
-    vptr_write_u8(vptr_offset_u8(name, 4), 116); vptr_write_u8(vptr_offset_u8(name, 5), 111);
-    vptr_write_u8(vptr_offset_u8(name, 6), 112); vptr_write_u8(vptr_offset_u8(name, 7), 46);
-    vptr_write_u8(vptr_offset_u8(name, 8), 119); vptr_write_u8(vptr_offset_u8(name, 9), 105);
-    vptr_write_u8(vptr_offset_u8(name, 10), 110);
+    prefix_address: u64 = "desktop.win";
+    prefix: vptr<u8> = vptr_from_u8(prefix_address);
+    index: u64 = 0;
+    while index < 11 {
+        vptr_write_u8(vptr_offset_u8(name, index), vptr_read_u8(vptr_offset_u8(prefix, index)));
+        index = index + 1;
+    }
     vptr_write_u8(vptr_offset_u8(name, 11), 48 + pid - (pid / 10) * 10);
     return 0;
 }
@@ -133,9 +136,9 @@ fn counter_client_main(service_name: u64) -> u64 {
             MakoAbi.exit(0); return 0;
         }
         click_header: u64 = vptr_read_u64(packet);
-        click_low_header: u64 = low32(click_header);
+        click_low_header: u64 = MakoStd.low32(click_header);
         click_identity: u64 = vptr_read_u64(vptr_offset_u64(packet, 1));
-        click_window_id: u64 = low32(click_identity);
+        click_window_id: u64 = MakoStd.low32(click_identity);
         if click_low_header == 720897 and click_window_id == pid and surface <= 4294967295 {
             clicks = clicks + 1;
             draw_click_bar(pixel_address, clicks);

@@ -1,7 +1,11 @@
 #include <kernel/multiboot2.h>
 #include <kernel/acpi.h>
+#include <kernel/ac97.h>
 #include <kernel/ahci.h>
 #include <kernel/capability.h>
+#include <kernel/cxx_runtime.h>
+#include <kernel/bounded_table_test.h>
+#include <kernel/slot_table_test.h>
 #include <kernel/apps.h>
 #include <kernel/framebuffer.h>
 #include <kernel/display.h>
@@ -605,6 +609,10 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write("PCI_ENUMERATION_OK devices=");
     serial_write_u64(pci_device_count());
     serial_write("\n");
+    if (ac97_init())
+        boot_status("Audio", "AC'97 PCM output ready at 44.1 kHz stereo");
+    else
+        boot_status("Audio", "no supported AC'97 controller; sound disabled");
     struct pci_device ethernet;
     if (pci_find_class(2u, 0u, 0u, &ethernet)) {
         serial_write("PCI_ETHERNET_FOUND vendor=");
@@ -1028,6 +1036,18 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         boot_fatal("Capability ownership/rights lifecycle failed");
     serial_write("CAPABILITY_ABI_OK\n");
     boot_status("Capabilities", "owned service handles + rights passed");
+    if (!kernel_cxx_self_test())
+        boot_fatal("Kernel-side C++ runtime allocator/vtable self-test failed");
+    serial_write("KERNEL_CXX_RUNTIME_OK\n");
+    boot_status("Kernel C++ runtime", "new/delete + vtable + destructor passed (K0)");
+    if (!kernel_bounded_table_self_test())
+        boot_fatal("Kernel bounded_table<T,N> template self-test failed");
+    serial_write("KERNEL_BOUNDED_TABLE_OK\n");
+    boot_status("Kernel bounded_table<T,N>", "open/lookup/release/capacity passed (K1)");
+    if (!kernel_slot_table_self_test())
+        boot_fatal("Kernel slot_table<T,N> template self-test failed");
+    serial_write("KERNEL_SLOT_TABLE_OK\n");
+    boot_status("Kernel slot_table<T,N>", "allocate/generation/release/capacity passed (K3)");
     if (!ramfs_self_test())
         boot_fatal("RAM project store write/read contract failed");
     serial_write("PROJECT_STORE_OK\n");
@@ -1084,6 +1104,37 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write(" status="); serial_write_u64(portcheck_status);
     serial_write("\n");
     boot_status("Native port runtime", "dynamic heap, reuse, files, timing, and input ABI passed");
+    /* The ClassiCube core runs a full render/input smoke that exits itself, so
+       the kernel can reap it and assert an exit status on the scripted smoke
+       ISO. On the interactive ISO the same executable becomes a persistent
+       game launched from MakoBox ("classicube"), so it must not be spawned
+       here or the boot would block until the player quits. Mirrors the
+       doom-full gate below. */
+    if (test_mode || doom_frame_test) {
+        const uint32_t classicube_core_pid = userspace_spawn_path(0u,
+            "/system/bin/classicube-core.elf", 31u, "classicube-core",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+        if (classicube_core_pid == 0u || !userspace_run_init())
+            boot_fatal("ClassiCube D1 core failed to start");
+        uint64_t classicube_core_status = UINT64_MAX;
+        const bool classicube_core_reaped =
+            scheduler_reap(0u, classicube_core_pid, &classicube_core_status);
+        serial_write("CLASSICUBE_CORE_EXIT reaped=");
+        serial_write_u64(classicube_core_reaped ? 1u : 0u);
+        serial_write(" status="); serial_write_u64(classicube_core_status);
+        serial_write("\n");
+        if (!classicube_core_reaped || classicube_core_status != 0u)
+            boot_fatal("ClassiCube D1 core did not exit cleanly");
+        serial_write("CLASSICUBE_CORE_RING3_OK pid=");
+        serial_write_u64(classicube_core_pid);
+        serial_write(" status="); serial_write_u64(classicube_core_status);
+        serial_write("\n");
+        boot_status("ClassiCube port D1", "upstream C core executed in ring 3");
+    }
     const uint32_t doom_pid = userspace_spawn_path(0u,
         "/system/bin/doom.elf", 20u, "doom-version",
         CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
@@ -1104,7 +1155,8 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_INPUT) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
-            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO));
         if (doom_full_pid == 0u || !userspace_run_init())
             boot_fatal("Full Doom image failed to map or start");
         if (doom_frame_test) {

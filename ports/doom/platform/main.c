@@ -8,7 +8,7 @@
    executable mapping are available. */
 uint64_t doom_main(void) {
     demon_port_write("doomgeneric for DemonOS (upstream dcb7a8d)\n");
-    demon_port_write("DOOM_AUDIO_DISABLED\n");
+    demon_port_write("DOOM_AUDIO_AVAILABLE_IN_FULL_ENGINE\n");
     demon_port_write("DOOM_ENGINE_READY\n");
     return 0u;
 }

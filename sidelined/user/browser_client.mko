@@ -1,4 +1,6 @@
 use "sdk.mko";
+use "../../user/mako_std.mko";
+use "../../user/mako_bytes.mko";
 
 # Demon Web is a native MKO document browser. Its start document comes from
 # the kernel's checksum-validated E1000/DHCP/DNS/TCP/HTTP transaction through
@@ -6,55 +8,12 @@ use "sdk.mko";
 # editable location field, keyboard and mouse navigation, multiple rendered
 # documents, and a shared surface owned by the client.
 
-fn low32(value: u64) -> u64 {
-    return value - (value / 4294967296) * 4294967296;
-}
-
-fn pack_words(low: u64, high: u64) -> u64 {
-    return low + high * 4294967296;
-}
-
-fn clear_bytes(address: u64, count: u64) -> u64 {
-    bytes: vptr<u8> = vptr_from_u8(address);
-    index: u64 = 0;
-    while index < count {
-        vptr_write_u8(vptr_offset_u8(bytes, index), 0);
-        index = index + 1;
-    }
-    return 0;
-}
-
-fn get_byte(address: u64, offset: u64) -> u64 {
-    word_index: u64 = offset / 8;
-    byte_index: u64 = offset - word_index * 8;
-    divisor: u64 = 1;
-    while byte_index > 0 {
-        divisor = divisor * 256;
-        byte_index = byte_index - 1;
-    }
-    value: u64 = vptr_read_u64(vptr_offset_u64(vptr_from_u64(address), word_index));
-    value = value / divisor;
-    return value - (value / 256) * 256;
-}
-
-fn copy_bytes(destination: u64, source: u64, count: u64) -> u64 {
-    output: vptr<u8> = vptr_from_u8(destination);
-    source_bytes: vptr<u8> = vptr_from_u8(source);
-    index: u64 = 0;
-    while index < count {
-        vptr_write_u8(vptr_offset_u8(output, index),
-                      vptr_read_u8(vptr_offset_u8(source_bytes, index)));
-        index = index + 1;
-    }
-    return count;
-}
-
 fn history_store(history_address: u64, lengths_address: u64, index: u64,
                  location_address: u64, location_length: u64) -> u64 {
     if location_length > 47 { location_length = 47; }
     slot_address: u64 = history_address + index * 48;
-    clear_bytes(slot_address, 48);
-    copy_bytes(slot_address, location_address, location_length);
+    MakoBytes.zero(slot_address, 48);
+    MakoBytes.copy(slot_address, location_address, location_length);
     lengths: vptr<u64> = vptr_from_u64(lengths_address);
     vptr_write_u64(vptr_offset_u64(lengths, index), location_length);
     return location_length;
@@ -64,18 +23,23 @@ fn history_restore(history_address: u64, lengths_address: u64, index: u64,
                    location_address: u64) -> u64 {
     lengths: vptr<u64> = vptr_from_u64(lengths_address);
     location_length: u64 = vptr_read_u64(vptr_offset_u64(lengths, index));
-    clear_bytes(location_address, 64);
-    copy_bytes(location_address, history_address + index * 48, location_length);
+    MakoBytes.zero(location_address, 64);
+    MakoBytes.copy(location_address, history_address + index * 48, location_length);
     return location_length;
 }
 
+# The "desktop.win" prefix comes from a real string literal now instead of
+# 11 hand-written vptr_write_u8 byte codes -- see
+# docs/mako-userspace-improvements.md's Finding 3 and counter_client.mko's
+# identical helper.
 fn write_event_name(name: vptr<u8>, pid: u64) -> u64 {
-    vptr_write_u8(name, 100); vptr_write_u8(vptr_offset_u8(name, 1), 101);
-    vptr_write_u8(vptr_offset_u8(name, 2), 115); vptr_write_u8(vptr_offset_u8(name, 3), 107);
-    vptr_write_u8(vptr_offset_u8(name, 4), 116); vptr_write_u8(vptr_offset_u8(name, 5), 111);
-    vptr_write_u8(vptr_offset_u8(name, 6), 112); vptr_write_u8(vptr_offset_u8(name, 7), 46);
-    vptr_write_u8(vptr_offset_u8(name, 8), 119); vptr_write_u8(vptr_offset_u8(name, 9), 105);
-    vptr_write_u8(vptr_offset_u8(name, 10), 110);
+    prefix_address: u64 = "desktop.win";
+    prefix: vptr<u8> = vptr_from_u8(prefix_address);
+    index: u64 = 0;
+    while index < 11 {
+        vptr_write_u8(vptr_offset_u8(name, index), vptr_read_u8(vptr_offset_u8(prefix, index)));
+        index = index + 1;
+    }
     vptr_write_u8(vptr_offset_u8(name, 11), 48 + pid - (pid / 10) * 10);
     return 0;
 }
@@ -114,7 +78,7 @@ fn set_pixel(pixels: vptr<u64>, x: u64, y: u64,
     if local - word_offset * 2 == 0 {
         word = color + (word / 4294967296) * 4294967296;
     } else {
-        word = low32(word) + color * 4294967296;
+        word = MakoStd.low32(word) + color * 4294967296;
     }
     vptr_write_u64(vptr_offset_u64(pixels, word_offset), word);
     return 0;
@@ -122,7 +86,7 @@ fn set_pixel(pixels: vptr<u64>, x: u64, y: u64,
 
 fn fill_rect(pixels: vptr<u64>, x: u64, y: u64, width: u64, height: u64,
              color_strip: u64) -> u64 {
-    color: u64 = low32(color_strip);
+    color: u64 = MakoStd.low32(color_strip);
     strip_y: u64 = color_strip / 4294967296;
     row: u64 = 0;
     while row < height {
@@ -157,13 +121,13 @@ fn draw_character(pixels: vptr<u64>, x: u64, y: u64,
 
 fn draw_text(pixels: vptr<u64>, address: u64, length: u64,
              x: u64, y: u64, color_strip: u64) -> u64 {
-    color: u64 = low32(color_strip);
+    color: u64 = MakoStd.low32(color_strip);
     strip_y: u64 = color_strip / 4294967296;
     position: u64 = 0;
     draw_x: u64 = x;
     draw_y: u64 = y;
     while position < length and draw_y < 62 {
-        character: u64 = get_byte(address, position);
+        character: u64 = MakoBytes.byte_at(address, position);
         if character == 10 {
             draw_x = x;
             draw_y = draw_y + 9;
@@ -181,110 +145,110 @@ fn draw_text(pixels: vptr<u64>, address: u64, length: u64,
 }
 
 fn set_location(location_address: u64, page: u64) -> u64 {
-    clear_bytes(location_address, 64);
+    MakoBytes.zero(location_address, 64);
     location: vptr<u64> = vptr_from_u64(location_address);
-    vptr_write_u64(location, pack_words(1869440356, 791624302));
+    vptr_write_u64(location, MakoStd.pack32(1869440356, 791624302));
     if page == 0 {
         vptr_write_u64(vptr_offset_u64(location, 1), 1701670760);
         return 12;
     }
     if page == 1 {
-        vptr_write_u64(vptr_offset_u64(location, 1), pack_words(1970233953, 116));
+        vptr_write_u64(vptr_offset_u64(location, 1), MakoStd.pack32(1970233953, 116));
         return 13;
     }
     if page == 2 {
-        vptr_write_u64(vptr_offset_u64(location, 1), pack_words(2004116846, 7041647));
+        vptr_write_u64(vptr_offset_u64(location, 1), MakoStd.pack32(2004116846, 7041647));
         return 15;
     }
-    vptr_write_u64(vptr_offset_u64(location, 1), pack_words(1701603686, 115));
+    vptr_write_u64(vptr_offset_u64(location, 1), MakoStd.pack32(1701603686, 115));
     return 13;
 }
 
 fn set_readme_location(location_address: u64) -> u64 {
-    clear_bytes(location_address, 64);
+    MakoBytes.zero(location_address, 64);
     location: vptr<u64> = vptr_from_u64(location_address);
-    vptr_write_u64(location, pack_words(1701603686, 791621434));
+    vptr_write_u64(location, MakoStd.pack32(1701603686, 791621434));
     vptr_write_u64(vptr_offset_u64(location, 1),
-                   pack_words(1145128274, 1831748941));
-    vptr_write_u64(vptr_offset_u64(location, 2), pack_words(100, 0));
+                   MakoStd.pack32(1145128274, 1831748941));
+    vptr_write_u64(vptr_offset_u64(location, 2), MakoStd.pack32(100, 0));
     return 17;
 }
 
 fn set_web_location(location_address: u64) -> u64 {
-    clear_bytes(location_address, 64);
+    MakoBytes.zero(location_address, 64);
     words: vptr<u64> = vptr_from_u64(location_address);
-    vptr_write_u64(words, pack_words(1886680168, 1697591098));
-    vptr_write_u64(vptr_offset_u64(words, 1), pack_words(1886216568, 1663985004));
+    vptr_write_u64(words, MakoStd.pack32(1886680168, 1697591098));
+    vptr_write_u64(vptr_offset_u64(words, 1), MakoStd.pack32(1886216568, 1663985004));
     vptr_write_u64(vptr_offset_u64(words, 2), 28015);
     return 18;
 }
 
 fn set_page(page_address: u64, page: u64) -> u64 {
-    clear_bytes(page_address, 512);
+    MakoBytes.zero(page_address, 512);
     words: vptr<u64> = vptr_from_u64(page_address);
     if page == 0 {
-        vptr_write_u64(words, pack_words(1330464068, 1163337806));
-        vptr_write_u64(vptr_offset_u64(words, 1), pack_words(1095633474, 1163282772));
-        vptr_write_u64(vptr_offset_u64(words, 2), pack_words(1129268256, 1313164629));
-        vptr_write_u64(vptr_offset_u64(words, 3), pack_words(1380065364, 1163089743));
-        vptr_write_u64(vptr_offset_u64(words, 4), pack_words(540084818, 1162694472));
-        vptr_write_u64(vptr_offset_u64(words, 5), pack_words(1092629024, 1414876994));
-        vptr_write_u64(vptr_offset_u64(words, 6), pack_words(1310733088, 1331123269));
-        vptr_write_u64(vptr_offset_u64(words, 7), pack_words(874531666, 1279870496));
-        vptr_write_u64(vptr_offset_u64(words, 8), pack_words(889869125, 1095062048));
-        vptr_write_u64(vptr_offset_u64(words, 9), pack_words(541412676, 1411404367));
-        vptr_write_u64(vptr_offset_u64(words, 10), pack_words(541413465, 1381310529));
-        vptr_write_u64(vptr_offset_u64(words, 11), pack_words(76, 0));
+        vptr_write_u64(words, MakoStd.pack32(1330464068, 1163337806));
+        vptr_write_u64(vptr_offset_u64(words, 1), MakoStd.pack32(1095633474, 1163282772));
+        vptr_write_u64(vptr_offset_u64(words, 2), MakoStd.pack32(1129268256, 1313164629));
+        vptr_write_u64(vptr_offset_u64(words, 3), MakoStd.pack32(1380065364, 1163089743));
+        vptr_write_u64(vptr_offset_u64(words, 4), MakoStd.pack32(540084818, 1162694472));
+        vptr_write_u64(vptr_offset_u64(words, 5), MakoStd.pack32(1092629024, 1414876994));
+        vptr_write_u64(vptr_offset_u64(words, 6), MakoStd.pack32(1310733088, 1331123269));
+        vptr_write_u64(vptr_offset_u64(words, 7), MakoStd.pack32(874531666, 1279870496));
+        vptr_write_u64(vptr_offset_u64(words, 8), MakoStd.pack32(889869125, 1095062048));
+        vptr_write_u64(vptr_offset_u64(words, 9), MakoStd.pack32(541412676, 1411404367));
+        vptr_write_u64(vptr_offset_u64(words, 10), MakoStd.pack32(541413465, 1381310529));
+        vptr_write_u64(vptr_offset_u64(words, 11), MakoStd.pack32(76, 0));
         return 89;
     }
     if page == 1 {
-        vptr_write_u64(words, pack_words(1431257665, 1162092628));
-        vptr_write_u64(vptr_offset_u64(words, 1), pack_words(1330532173, 1634601555));
-        vptr_write_u64(vptr_offset_u64(words, 2), pack_words(1702259060, 1330335008));
-        vptr_write_u64(vptr_offset_u64(words, 3), pack_words(1886413088, 1633905004));
-        vptr_write_u64(vptr_offset_u64(words, 4), pack_words(1852795252, 2036689674));
-        vptr_write_u64(vptr_offset_u64(words, 5), pack_words(1918988130, 539697252));
-        vptr_write_u64(vptr_offset_u64(words, 6), pack_words(1937076077, 1852383333));
-        vptr_write_u64(vptr_offset_u64(words, 7), pack_words(175404400, 1830842222));
-        vptr_write_u64(vptr_offset_u64(words, 8), pack_words(1969972079, 112));
+        vptr_write_u64(words, MakoStd.pack32(1431257665, 1162092628));
+        vptr_write_u64(vptr_offset_u64(words, 1), MakoStd.pack32(1330532173, 1634601555));
+        vptr_write_u64(vptr_offset_u64(words, 2), MakoStd.pack32(1702259060, 1330335008));
+        vptr_write_u64(vptr_offset_u64(words, 3), MakoStd.pack32(1886413088, 1633905004));
+        vptr_write_u64(vptr_offset_u64(words, 4), MakoStd.pack32(1852795252, 2036689674));
+        vptr_write_u64(vptr_offset_u64(words, 5), MakoStd.pack32(1918988130, 539697252));
+        vptr_write_u64(vptr_offset_u64(words, 6), MakoStd.pack32(1937076077, 1852383333));
+        vptr_write_u64(vptr_offset_u64(words, 7), MakoStd.pack32(175404400, 1830842222));
+        vptr_write_u64(vptr_offset_u64(words, 8), MakoStd.pack32(1969972079, 112));
         return 69;
     }
     if page == 2 {
-        vptr_write_u64(words, pack_words(1465140558, 541807183));
-        vptr_write_u64(vptr_offset_u64(words, 1), pack_words(1413567571, 1309299541));
-        vptr_write_u64(vptr_offset_u64(words, 2), pack_words(1411400521, 1210077251));
-        vptr_write_u64(vptr_offset_u64(words, 3), pack_words(542135380, 544501614));
-        vptr_write_u64(vptr_offset_u64(words, 4), pack_words(1818850658, 1702436980));
-        vptr_write_u64(vptr_offset_u64(words, 5), pack_words(1869351540, 543973731));
-        vptr_write_u64(vptr_offset_u64(words, 6), pack_words(1701273968, 1870078067));
-        vptr_write_u64(vptr_offset_u64(words, 7), pack_words(1847618418, 1762293615));
-        vptr_write_u64(vptr_offset_u64(words, 8), pack_words(1919251566, 544499054));
-        vptr_write_u64(vptr_offset_u64(words, 9), pack_words(1701670755, 1701716083));
+        vptr_write_u64(words, MakoStd.pack32(1465140558, 541807183));
+        vptr_write_u64(vptr_offset_u64(words, 1), MakoStd.pack32(1413567571, 1309299541));
+        vptr_write_u64(vptr_offset_u64(words, 2), MakoStd.pack32(1411400521, 1210077251));
+        vptr_write_u64(vptr_offset_u64(words, 3), MakoStd.pack32(542135380, 544501614));
+        vptr_write_u64(vptr_offset_u64(words, 4), MakoStd.pack32(1818850658, 1702436980));
+        vptr_write_u64(vptr_offset_u64(words, 5), MakoStd.pack32(1869351540, 543973731));
+        vptr_write_u64(vptr_offset_u64(words, 6), MakoStd.pack32(1701273968, 1870078067));
+        vptr_write_u64(vptr_offset_u64(words, 7), MakoStd.pack32(1847618418, 1762293615));
+        vptr_write_u64(vptr_offset_u64(words, 8), MakoStd.pack32(1919251566, 544499054));
+        vptr_write_u64(vptr_offset_u64(words, 9), MakoStd.pack32(1701670755, 1701716083));
         vptr_write_u64(vptr_offset_u64(words, 10), 29816);
         return 82;
     }
     if page == 3 {
-        vptr_write_u64(words, pack_words(1094930252, 1229332556));
-        vptr_write_u64(vptr_offset_u64(words, 1), pack_words(173229388, 1162893652));
-        vptr_write_u64(vptr_offset_u64(words, 2), pack_words(1279870496, 791624261));
-        vptr_write_u64(vptr_offset_u64(words, 3), pack_words(1095062063, 776293700));
-        vptr_write_u64(vptr_offset_u64(words, 4), pack_words(1326072909, 1229332562));
-        vptr_write_u64(vptr_offset_u64(words, 5), pack_words(792347980, 1498623791));
-        vptr_write_u64(vptr_offset_u64(words, 6), pack_words(1296389203, 1262570799));
-        vptr_write_u64(vptr_offset_u64(words, 7), pack_words(1095577423, 1162234190));
-        vptr_write_u64(vptr_offset_u64(words, 8), pack_words(1412322387, 1376408664));
-        vptr_write_u64(vptr_offset_u64(words, 9), pack_words(1396982085, 1162368032));
-        vptr_write_u64(vptr_offset_u64(words, 10), pack_words(1095062048, 1095901260));
-        vptr_write_u64(vptr_offset_u64(words, 11), pack_words(5457485, 0));
+        vptr_write_u64(words, MakoStd.pack32(1094930252, 1229332556));
+        vptr_write_u64(vptr_offset_u64(words, 1), MakoStd.pack32(173229388, 1162893652));
+        vptr_write_u64(vptr_offset_u64(words, 2), MakoStd.pack32(1279870496, 791624261));
+        vptr_write_u64(vptr_offset_u64(words, 3), MakoStd.pack32(1095062063, 776293700));
+        vptr_write_u64(vptr_offset_u64(words, 4), MakoStd.pack32(1326072909, 1229332562));
+        vptr_write_u64(vptr_offset_u64(words, 5), MakoStd.pack32(792347980, 1498623791));
+        vptr_write_u64(vptr_offset_u64(words, 6), MakoStd.pack32(1296389203, 1262570799));
+        vptr_write_u64(vptr_offset_u64(words, 7), MakoStd.pack32(1095577423, 1162234190));
+        vptr_write_u64(vptr_offset_u64(words, 8), MakoStd.pack32(1412322387, 1376408664));
+        vptr_write_u64(vptr_offset_u64(words, 9), MakoStd.pack32(1396982085, 1162368032));
+        vptr_write_u64(vptr_offset_u64(words, 10), MakoStd.pack32(1095062048, 1095901260));
+        vptr_write_u64(vptr_offset_u64(words, 11), MakoStd.pack32(5457485, 0));
         return 91;
     }
-    vptr_write_u64(words, pack_words(1162297680, 1414483488));
-    vptr_write_u64(vptr_offset_u64(words, 1), pack_words(1431258656, 1409958990));
-    vptr_write_u64(vptr_offset_u64(words, 2), pack_words(1142970706, 1313819973));
-    vptr_write_u64(vptr_offset_u64(words, 3), pack_words(1211051834, 172313935));
-    vptr_write_u64(vptr_offset_u64(words, 4), pack_words(1176523343, 977620041));
-    vptr_write_u64(vptr_offset_u64(words, 5), pack_words(1378823983, 1296318789));
-    vptr_write_u64(vptr_offset_u64(words, 6), pack_words(1145908805, 0));
+    vptr_write_u64(words, MakoStd.pack32(1162297680, 1414483488));
+    vptr_write_u64(vptr_offset_u64(words, 1), MakoStd.pack32(1431258656, 1409958990));
+    vptr_write_u64(vptr_offset_u64(words, 2), MakoStd.pack32(1142970706, 1313819973));
+    vptr_write_u64(vptr_offset_u64(words, 3), MakoStd.pack32(1211051834, 172313935));
+    vptr_write_u64(vptr_offset_u64(words, 4), MakoStd.pack32(1176523343, 977620041));
+    vptr_write_u64(vptr_offset_u64(words, 5), MakoStd.pack32(1378823983, 1296318789));
+    vptr_write_u64(vptr_offset_u64(words, 6), MakoStd.pack32(1145908805, 0));
     return 52;
 }
 
@@ -292,15 +256,15 @@ fn page_from_location(location_address: u64, length: u64) -> u64 {
     words: vptr<u64> = vptr_from_u64(location_address);
     first: u64 = vptr_read_u64(words);
     second: u64 = vptr_read_u64(vptr_offset_u64(words, 1));
-    if (length == 4 and low32(first) == 1701670760) { return 0; }
-    if (length == 5 and low32(first) == 1970233953) { return 1; }
-    if (length == 7 and low32(first) == 2004116846 and low32(second) == 7041647) { return 2; }
-    if (length == 5 and low32(first) == 1701603686 and low32(second) == 115) { return 3; }
-    if (first == pack_words(1869440356, 791624302)) {
-        if (length == 12 and low32(second) == 1701670760) { return 0; }
-        if (length == 13 and second == pack_words(1970233953, 116)) { return 1; }
-        if (length == 15 and second == pack_words(2004116846, 7041647)) { return 2; }
-        if (length == 13 and second == pack_words(1701603686, 115)) { return 3; }
+    if (length == 4 and MakoStd.low32(first) == 1701670760) { return 0; }
+    if (length == 5 and MakoStd.low32(first) == 1970233953) { return 1; }
+    if (length == 7 and MakoStd.low32(first) == 2004116846 and MakoStd.low32(second) == 7041647) { return 2; }
+    if (length == 5 and MakoStd.low32(first) == 1701603686 and MakoStd.low32(second) == 115) { return 3; }
+    if (first == MakoStd.pack32(1869440356, 791624302)) {
+        if (length == 12 and MakoStd.low32(second) == 1701670760) { return 0; }
+        if (length == 13 and second == MakoStd.pack32(1970233953, 116)) { return 1; }
+        if (length == 15 and second == MakoStd.pack32(2004116846, 7041647)) { return 2; }
+        if (length == 13 and second == MakoStd.pack32(1701603686, 115)) { return 3; }
     }
     return 4;
 }
@@ -310,8 +274,8 @@ fn load_document(storage: u64, network: u64, location_address: u64,
     page: u64 = page_from_location(location_address, location_length);
     if page < 4 { return set_page(page_address, page); }
     first: u64 = vptr_read_u64(vptr_from_u64(location_address));
-    if location_length >= 7 and low32(first) == 1886680168 {
-        clear_bytes(page_address, 512);
+    if location_length >= 7 and MakoStd.low32(first) == 1886680168 {
+        MakoBytes.zero(page_address, 512);
         amount: u64 = MakoAbi.network_http_get(network, location_address,
                                                location_length,
                                                page_address, 512);
@@ -322,11 +286,11 @@ fn load_document(storage: u64, network: u64, location_address: u64,
         return set_page(page_address, 4);
     }
     if location_length > 8 and
-       first == pack_words(1701603686, 791621434) {
+       first == MakoStd.pack32(1701603686, 791621434) {
         file: u64 = MakoAbi.file_open(storage, location_address + 7,
                                      location_length - 7, 0);
         if file <= 4294967295 {
-            clear_bytes(page_address, 512);
+            MakoBytes.zero(page_address, 512);
             amount: u64 = MakoAbi.handle_read(file, page_address, 512);
             MakoAbi.handle_close(file);
             if amount <= 512 { return amount; }
@@ -348,21 +312,21 @@ fn redraw(surface: u64, pixel_address: u64, location_address: u64,
             vptr_write_u64(vptr_offset_u64(pixels, word), packed);
             word = word + 1;
         }
-        fill_rect(pixels, 0, 0, 256, 13, pack_words(4280432975, strip_y));
-        fill_rect(pixels, 1, 1, 11, 11, pack_words(4282405215, strip_y));
-        fill_rect(pixels, 13, 1, 11, 11, pack_words(4282405215, strip_y));
-        fill_rect(pixels, 25, 1, 11, 11, pack_words(4282405215, strip_y));
-        fill_rect(pixels, 37, 1, 11, 11, pack_words(4282405215, strip_y));
-        fill_rect(pixels, 50, 2, 187, 9, pack_words(4278717713, strip_y));
-        fill_rect(pixels, 241, 3, 8, 7, pack_words(4291191320, strip_y));
+        fill_rect(pixels, 0, 0, 256, 13, MakoStd.pack32(4280432975, strip_y));
+        fill_rect(pixels, 1, 1, 11, 11, MakoStd.pack32(4282405215, strip_y));
+        fill_rect(pixels, 13, 1, 11, 11, MakoStd.pack32(4282405215, strip_y));
+        fill_rect(pixels, 25, 1, 11, 11, MakoStd.pack32(4282405215, strip_y));
+        fill_rect(pixels, 37, 1, 11, 11, MakoStd.pack32(4282405215, strip_y));
+        fill_rect(pixels, 50, 2, 187, 9, MakoStd.pack32(4278717713, strip_y));
+        fill_rect(pixels, 241, 3, 8, 7, MakoStd.pack32(4291191320, strip_y));
         draw_character(pixels, 4, 3, 98, 4293257195, strip_y);
         draw_character(pixels, 16, 3, 102, 4293257195, strip_y);
         draw_character(pixels, 28, 3, 104, 4293257195, strip_y);
         draw_character(pixels, 40, 3, 114, 4293257195, strip_y);
         draw_text(pixels, location_address, location_length, 53, 3,
-                  pack_words(4293257195, strip_y));
+                  MakoStd.pack32(4293257195, strip_y));
         draw_text(pixels, page_address, page_length, 5, 17,
-                  pack_words(4293257195, strip_y));
+                  MakoStd.pack32(4293257195, strip_y));
         if MakoAbi.surface_write(surface, pixel_address, 4096,
                                  strip * 4096) != 4096 { return 1; }
         strip = strip + 1;
@@ -398,7 +362,7 @@ fn browser_client_main(compositor_name: u64) -> u64 {
                                      location_length, page_address);
     history_index: u64 = 0;
     history_count: u64 = 1;
-    clear_bytes(history_address, 224);
+    MakoBytes.zero(history_address, 224);
     history_store(history_address, history_lengths_address, 0,
                   location_address, location_length);
     if redraw(surface, pixel_address, location_address, location_length,
@@ -413,10 +377,10 @@ fn browser_client_main(compositor_name: u64) -> u64 {
         vptr_write_u64(vptr_offset_u64(packet, word), 0);
         word = word + 1;
     }
-    vptr_write_u64(packet, pack_words(131073, 1));
+    vptr_write_u64(packet, MakoStd.pack32(131073, 1));
     vptr_write_u64(vptr_offset_u64(packet, 1), pid);
-    vptr_write_u64(vptr_offset_u64(packet, 2), pack_words(148, 92));
-    vptr_write_u64(vptr_offset_u64(packet, 3), pack_words(328, 120));
+    vptr_write_u64(vptr_offset_u64(packet, 2), MakoStd.pack32(148, 92));
+    vptr_write_u64(vptr_offset_u64(packet, 3), MakoStd.pack32(328, 120));
     vptr_write_u64(vptr_offset_u64(packet, 4), shared_surface);
     if MakoAbi.channel_send(compositor, packet_address, 64) != 64 {
         MakoAbi.exit(132); return 132;
@@ -429,10 +393,10 @@ fn browser_client_main(compositor_name: u64) -> u64 {
         if MakoAbi.channel_receive(event_server, packet_address, 64, 0) != 64 {
             MakoAbi.exit(133); return 133;
         }
-        header: u64 = low32(vptr_read_u64(packet));
+        header: u64 = MakoStd.low32(vptr_read_u64(packet));
         if header == 720897 {
             coordinates: u64 = vptr_read_u64(vptr_offset_u64(packet, 2));
-            click_x: u64 = low32(coordinates);
+            click_x: u64 = MakoStd.low32(coordinates);
             click_y: u64 = coordinates / 4294967296;
             if click_y >= 36 and click_y < 52 {
                 if click_x < 20 {
@@ -466,7 +430,7 @@ fn browser_client_main(compositor_name: u64) -> u64 {
                     page_length = load_document(storage, network, location_address,
                                                 location_length, page_address);
                 } else {
-                    clear_bytes(location_address, 64);
+                    MakoBytes.zero(location_address, 64);
                     location_length = 0;
                 }
             } else if click_y >= 52 {
@@ -482,7 +446,7 @@ fn browser_client_main(compositor_name: u64) -> u64 {
         } else {
             key_word: u64 = vptr_read_u64(vptr_offset_u64(packet, 2));
             event_type: u64 = key_word - (key_word / 65536) * 65536;
-            character: u64 = low32(vptr_read_u64(vptr_offset_u64(packet, 3)));
+            character: u64 = MakoStd.low32(vptr_read_u64(vptr_offset_u64(packet, 3)));
             if event_type == 1 {
                 if character == 8 {
                     if location_length > 0 { location_length = location_length - 1; }

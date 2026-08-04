@@ -32,5 +32,9 @@ if ! grep -q 'DemonOS writable configuration' "$output/doomgeneric/m_config.c"; 
     patch --batch --forward -d "$output" -p1 < \
         "$script_dir/../ports/doom/doomgeneric-config-demonos.patch"
 fi
+if ! grep -q '!defined(DEMONOS)' "$output/doomgeneric/i_sound.c"; then
+    patch --batch --forward -d "$output" -p1 < \
+        "$script_dir/../ports/doom/doomgeneric-sound-demonos.patch"
+fi
 printf '%s\n' "$commit" > "$output/.demonos-pinned"
 echo "doomgeneric source pinned at $commit"

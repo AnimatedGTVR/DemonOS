@@ -1,16 +1,17 @@
 use "sdk.mko";
+use "mako_std.mko";
 
 # Native MKO init process built against the reusable MAKO-ABI module.
-
-fn user_u64(high: u64, low: u64) -> u64 {
-    return high * 4294967296 + low;
-}
 
 fn user_project_valid(address: u64) -> bool {
     words: vptr<u64> = vptr_from_u64(address);
     second: vptr<u64> = vptr_offset_u64(words, 1);
-    first_expected: u64 = user_u64(1162625601, 1414680400);
-    second_expected: u64 = user_u64(1413694794, 1330794541);
+    # Arguments were (high, low) under the old local user_u64 helper; MakoStd.pack32
+    # takes (low, high), matching the majority of prior call sites elsewhere
+    # (see docs/mako-userspace-improvements.md's Finding 1) -- swapped here,
+    # not just renamed.
+    first_expected: u64 = MakoStd.pack32(1414680400, 1162625601);
+    second_expected: u64 = MakoStd.pack32(1330794541, 1413694794);
     return vptr_read_u64(words) == first_expected and vptr_read_u64(second) == second_expected;
 }
 

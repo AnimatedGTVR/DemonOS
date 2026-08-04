@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void ramfs_init(void);
 bool ramfs_seed(const char *name, size_t name_length,
                 const uint8_t *data, size_t length);
@@ -44,5 +48,9 @@ bool ramfs_entry(size_t index, const char **name, size_t *name_length,
 bool ramfs_list(const char *prefix, size_t prefix_length, size_t index,
                 const char **relative_name, size_t *relative_length,
                 size_t *length, bool *is_directory);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

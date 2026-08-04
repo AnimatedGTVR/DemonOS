@@ -12,6 +12,7 @@
 #include <kernel/http.h>
 #include <kernel/network.h>
 #include <kernel/ramfs.h>
+#include <kernel/ac97.h>
 #include <kernel/scheduler.h>
 #include <kernel/serial.h>
 #include <kernel/surface.h>
@@ -31,7 +32,15 @@
 #define USER_ANON_MAX_BYTES (24u * 1024u * 1024u)
 #define USER_ANON_MAX_PAGES (USER_ANON_MAX_BYTES / 4096u)
 #define USER_LARGE_CODE_BASE 0x20000000u
-#define USER_LARGE_CODE_MAX_PAGES 256u
+/* D30 (NXEngine port) pushed nxengine-core.elf's LOAD segment to within
+   ~600 bytes of the previous 256-page (1MB) cap -- real save-select/
+   title-flow logic (TB_SaveSelect real navigation + a real D27-style
+   stage-transition-on-selection), no new engine translation units.
+   D27/D28/D29 all flagged this cap as tightening with each new stage and
+   this is the first one to actually need a bump. Raised by 4 pages
+   (16KB) -- enough real headroom for another stage or two of similar
+   size (D30 itself only added ~1.4KB), not a speculative 2x/10x jump. */
+#define USER_LARGE_CODE_MAX_PAGES 260u
 #define USER_SURFACE_MAP 0x380000u
 /* 16 pages (64 KiB) matches the old 256x64 SURFACE_MAX_WIDTH/HEIGHT
    ceiling (see include/kernel/surface.h). Raising SURFACE_MAX_WIDTH/HEIGHT
@@ -87,6 +96,20 @@ static uintptr_t kernel_address_space;
 static uintptr_t userspace_frame_allocator;
 static uint64_t anonymous_free_frames;
 static size_t anonymous_page_count[SCHEDULER_PROCESS_LIMIT];
+/* W1 of docs/wine-port.md: how many pages of the anonymous region are
+   RESERVED (address space claimed) vs. anonymous_page_count's existing
+   meaning of how many are actually COMMITTED (physical frame + present
+   PTE). Reservation is pure bookkeeping -- no frame allocation, no page
+   table entries -- so it costs nothing until committed. See
+   anonymous_reserve/anonymous_commit below for why this is a deliberately
+   smaller, safer feature than real demand paging: touching a reserved-but-
+   uncommitted page is a genuine unmapped access, and this kernel's page
+   fault handler is diagnostic-only (see interrupt_page_fault_handler,
+   __attribute__((noreturn))) -- it cannot recover and resume the faulting
+   instruction, so such an access halts the whole kernel, not just the
+   offending process. Callers MUST NOT touch memory past their own last
+   successful commit. */
+static size_t anonymous_reserved_pages[SCHEDULER_PROCESS_LIMIT];
 static uint64_t large_code_frames[SCHEDULER_PROCESS_LIMIT][USER_LARGE_CODE_MAX_PAGES];
 static size_t large_code_page_count[SCHEDULER_PROCESS_LIMIT];
 static uint64_t large_code_page_table[SCHEDULER_PROCESS_LIMIT];
@@ -263,8 +286,15 @@ static bool large_code_load(uint32_t pid, const uint8_t *image, size_t image_siz
 /* One bounded anonymous arena per process is enough for a conventional libc
    heap and avoids pretending we already implement full POSIX mmap semantics. */
 static void anonymous_release(uint32_t pid) {
-    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT ||
-        anonymous_page_count[pid] == 0u) return;
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT) return;
+    if (anonymous_page_count[pid] == 0u) {
+        /* Nothing committed, so no page tables to tear down -- but a
+           reserve-only (never committed) reservation still needs clearing,
+           or a later reserve call for this pid would wrongly see one still
+           outstanding. */
+        anonymous_reserved_pages[pid] = 0u;
+        return;
+    }
     uint64_t original_cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
     if (original_cr3 != kernel_address_space)
@@ -287,29 +317,44 @@ static void anonymous_release(uint32_t pid) {
         anonymous_frame_release(entry & ~0xFFFull);
     }
     anonymous_page_count[pid] = 0u;
+    anonymous_reserved_pages[pid] = 0u;
     if (original_cr3 != kernel_address_space)
         __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
     else
         __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
 }
 
-static uint64_t anonymous_map(uint32_t pid, uint64_t byte_count) {
-    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT || byte_count == 0u ||
-        byte_count > USER_ANON_MAX_BYTES || anonymous_page_count[pid] != 0u ||
-        byte_count > UINT64_MAX - 4095u) return UINT64_MAX;
-    const size_t pages = (size_t)((byte_count + 4095u) / 4096u);
-    uint64_t original_cr3;
-    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
-    if (original_cr3 != kernel_address_space)
-        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+/* Maps pages [start_page, end_page) of pid's anonymous region -- shared by
+   anonymous_map (which always commits [0, pages)) and anonymous_commit
+   (W1's incremental commit, which extends from whatever is already
+   committed). Correct for any contiguous, monotonically-increasing,
+   non-overlapping range: each 2MB chunk's page table is allocated exactly
+   once, the first time the loop's per-page cursor lands on a multiple of
+   512, and the loop always walks every intermediate page one at a time
+   (never jumping), so that condition fires at the right index regardless
+   of where a given call's range starts. Must be called with the target
+   process's page tables active (kernel_address_space or pid's own CR3);
+   callers are responsible for the CR3 switch around this.
+
+   `writable` controls only the PTE write bit. There is no equivalent
+   `executable` parameter: this kernel's EFER has LME (long mode) set but
+   not NXE (`src/arch/x86_64/boot.S` only ORs in bit 8 of MSR 0xC0000080) --
+   setting a PTE's NX bit (63) with NXE disabled is a reserved-bit
+   violation, i.e. an immediate page fault, and this kernel's page fault
+   handler can't recover from one (see anonymous_reserved_pages's comment).
+   Every committed page stays executable regardless of `writable`, matching
+   this kernel's existing global behavior everywhere else -- not a new gap
+   introduced here, just not yet closed anywhere. */
+static bool anonymous_commit_pages(uint32_t pid, size_t start_page, size_t end_page,
+                                   bool writable) {
     uint64_t *directory = (uint64_t *)(uintptr_t)process_memory[pid].page_directory;
-    bool ok = true;
-    for (size_t page = 0u; page < pages && ok; ++page) {
+    const uint64_t page_flags = 5u | (writable ? 2u : 0u); /* present|user, +write */
+    for (size_t page = start_page; page < end_page; ++page) {
         const size_t directory_index = (USER_ANON_BASE >> 21u) + page / 512u;
         uint64_t *page_table;
         if (page % 512u == 0u) {
             const uint64_t table_frame = anonymous_frame_take();
-            if (table_frame == 0u) { ok = false; break; }
+            if (table_frame == 0u) return false;
             directory[directory_index] = table_frame + 7u;
             page_table = (uint64_t *)(uintptr_t)table_frame;
         } else {
@@ -322,17 +367,77 @@ static uint64_t anonymous_map(uint32_t pid, uint64_t byte_count) {
                 directory[directory_index] =
                     (uint64_t)directory_index * 0x200000u + 0x87u;
             }
-            ok = false;
-            break;
+            return false;
         }
-        page_table[page % 512u] = frame + 7u;
+        page_table[page % 512u] = frame | page_flags;
         anonymous_page_count[pid] = page + 1u;
     }
+    return true;
+}
+
+static uint64_t anonymous_map(uint32_t pid, uint64_t byte_count) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT || byte_count == 0u ||
+        byte_count > USER_ANON_MAX_BYTES || anonymous_page_count[pid] != 0u ||
+        anonymous_reserved_pages[pid] != 0u ||
+        byte_count > UINT64_MAX - 4095u) return UINT64_MAX;
+    const size_t pages = (size_t)((byte_count + 4095u) / 4096u);
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+    const bool ok = anonymous_commit_pages(pid, 0u, pages, true);
     if (!ok) anonymous_release(pid);
     if (original_cr3 != kernel_address_space)
         __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
     if (!ok) return UINT64_MAX;
     return USER_ANON_BASE;
+}
+
+/* W1 of docs/wine-port.md: pure bookkeeping, no page table or frame work at
+   all -- claims address space without paying for it, the actual
+   VirtualAlloc(MEM_RESERVE) semantic anonymous_map alone can't express
+   (it always commits everything it maps, in one shot, exactly once).
+   Mutually exclusive with anonymous_map's all-at-once path (same
+   process-lifetime single-region model, just two ways to fill it). */
+static uint64_t anonymous_reserve(uint32_t pid, uint64_t byte_count) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT || byte_count == 0u ||
+        byte_count > USER_ANON_MAX_BYTES || anonymous_page_count[pid] != 0u ||
+        anonymous_reserved_pages[pid] != 0u ||
+        byte_count > UINT64_MAX - 4095u) return UINT64_MAX;
+    anonymous_reserved_pages[pid] = (size_t)((byte_count + 4095u) / 4096u);
+    return USER_ANON_BASE;
+}
+
+/* Extends the committed portion of an already-reserved region by
+   byte_count more bytes, starting exactly where the last commit (or the
+   reservation itself, on the first call) left off -- never sparse, never
+   out of order. Returns the address the newly committed bytes start at,
+   or UINT64_MAX if that would overrun the reservation or a physical frame
+   is unavailable. The caller must never read or write past its own last
+   successful commit's end (see anonymous_reserved_pages's comment on why:
+   there is no recoverable page fault to catch that mistake).
+
+   `writable` exists for W2's PE section loader (see docs/wine-port.md): a
+   read-only section (e.g. ".rdata") can be committed non-writable instead
+   of every commit defaulting to read-write. See
+   anonymous_commit_pages's comment for why there is no equivalent
+   `executable` control yet. */
+static uint64_t anonymous_commit(uint32_t pid, uint64_t byte_count, bool writable) {
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT || byte_count == 0u ||
+        anonymous_reserved_pages[pid] == 0u ||
+        byte_count > UINT64_MAX - 4095u) return UINT64_MAX;
+    const size_t new_pages = (size_t)((byte_count + 4095u) / 4096u);
+    const size_t start_page = anonymous_page_count[pid];
+    if (new_pages > anonymous_reserved_pages[pid] - start_page) return UINT64_MAX;
+    const uint64_t start_address = USER_ANON_BASE + (uint64_t)start_page * 4096u;
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+    const bool ok = anonymous_commit_pages(pid, start_page, start_page + new_pages, writable);
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
+    return ok ? start_address : UINT64_MAX;
 }
 
 static bool anonymous_range(uint32_t pid, uint64_t address, uint64_t length) {
@@ -374,14 +479,39 @@ static bool user_range(uint64_t address, uint64_t length) {
 }
 
 // Destinations the kernel is allowed to write into on a user process's
-// behalf: the heap and the stack, but not the code pages — those are
-// mapped read/execute-only (see load_process's PTE flags) so a kernel
-// write there would silently desync from the actual page permissions.
+// behalf: the heap and the stack, plus the code pages. The code pages
+// used to be excluded here on the assumption they're mapped read/execute
+// only, but every port's PTEs are actually built with the writable bit
+// set (load_process ORs in 0x7 = Present|Writable|User, matching each of
+// these freestanding ELFs' own RWX LOAD segment -- ld even warns "has a
+// LOAD segment with RWX permissions" building them), so a kernel write
+// there doesn't desync from the real page permissions after all. Found
+// via NXEngine's settings.dat round trip: fread()'s underlying
+// demon_port_read syscall silently returned 0 bytes whenever its
+// destination was a BSS global inside the large-code region (normal_settings,
+// living past USER_LARGE_CODE_BASE once nxengine-core.elf grew past the
+// normal code budget) -- the exact same class of bug already noted (and
+// tolerated, there, since the caller ignored the failure) on
+// demon_display_info's out-param write for large-app processes; this is
+// the first case where it broke real correctness instead of just being
+// silently absorbed. Mirrors user_range's own USER_CODE/
+// USER_LARGE_CODE_BASE checks immediately above.
 static bool user_write_range(uint64_t address, uint64_t length) {
-    if (anonymous_range(scheduler_current_pid(), address, length)) return true;
-    if (address < USER_HEAP || address > USER_ADDRESS_END) return false;
-    if (length > USER_ADDRESS_END - address) return false;
-    return true;
+    const uint32_t pid = scheduler_current_pid();
+    if (anonymous_range(pid, address, length)) return true;
+    if (address >= USER_HEAP && address <= USER_ADDRESS_END &&
+        length <= USER_ADDRESS_END - address) return true;
+    if (pid != 0u && pid < SCHEDULER_PROCESS_LIMIT && process_memory_used[pid] &&
+        address >= USER_CODE &&
+        address <= USER_CODE + process_memory[pid].code_page_count * 4096u &&
+        length <= USER_CODE + process_memory[pid].code_page_count * 4096u - address)
+        return true;
+    if (pid != 0u && pid < SCHEDULER_PROCESS_LIMIT &&
+        large_code_page_count[pid] != 0u && address >= USER_LARGE_CODE_BASE &&
+        address <= USER_LARGE_CODE_BASE + large_code_page_count[pid] * 4096u &&
+        length <= USER_LARGE_CODE_BASE + large_code_page_count[pid] * 4096u - address)
+        return true;
+    return false;
 }
 
 bool userspace_copy_to(uint32_t pid, uint64_t address, const uint8_t *data, size_t length) {
@@ -731,6 +861,21 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
         else frame->rax = ramfs_rename((const char *)(uintptr_t)frame->rsi,
             (size_t)frame->rdx, (const char *)(uintptr_t)frame->r10,
             (size_t)frame->r8) ? 0u : UINT64_MAX;
+        return frame_address;
+    }
+    if (number == 45u) {
+        enum capability_service service;
+        const uint64_t frames = frame->rdx;
+        const uint64_t sample_count = frames * 2u;
+        const uint64_t bytes = sample_count * sizeof(int16_t);
+        if (frames == 0u || frames > AC97_MAX_FRAMES ||
+            sample_count / 2u != frames || bytes / sizeof(int16_t) != sample_count ||
+            !capability_resolve(scheduler_current_pid(), frame->rdi,
+                CAPABILITY_RIGHT_WRITE, &service) ||
+            service != CAPABILITY_SERVICE_AUDIO ||
+            !user_range(frame->rsi, bytes)) frame->rax = UINT64_MAX;
+        else frame->rax = ac97_submit((const int16_t *)(uintptr_t)frame->rsi,
+                                      (size_t)frames) ? frames : 0u;
         return frame_address;
     }
     if (number == 11u) {
@@ -1184,12 +1329,20 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
     if (number == 41u) {
         const uint32_t pid = scheduler_current_pid();
         if (frame->rdi != USER_ANON_BASE || pid == 0u ||
-            anonymous_page_count[pid] == 0u) {
+            (anonymous_page_count[pid] == 0u && anonymous_reserved_pages[pid] == 0u)) {
             frame->rax = UINT64_MAX;
         } else {
             anonymous_release(pid);
             frame->rax = 0u;
         }
+        return frame_address;
+    }
+    if (number == 46u) {
+        frame->rax = anonymous_reserve(scheduler_current_pid(), frame->rdi);
+        return frame_address;
+    }
+    if (number == 47u) {
+        frame->rax = anonymous_commit(scheduler_current_pid(), frame->rdi, frame->rsi != 0u);
         return frame_address;
     }
     frame->rax = (uint64_t)-1;

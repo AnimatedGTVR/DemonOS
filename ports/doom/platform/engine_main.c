@@ -2,6 +2,8 @@
 #include "doomgeneric_demonos.h"
 #include "doomstat.h"
 #include "i_system.h"
+#include "s_sound.h"
+#include "sounds.h"
 
 #include <demon/c_app.h>
 #include <demon/portkit.h>
@@ -118,6 +120,8 @@ static void doom_present(const uint32_t *pixels, uint32_t width,
                (unsigned)video->frames, (unsigned)gameepisode,
                (unsigned)gamemap);
     }
+    if (video->automated_exit && video->frames == 10u)
+        S_StartSound(0, sfx_pistol);
     if (video->automated_exit && video->frames == 360u) {
         printf("FREEDOOM_AUTOMATED_EXIT frame=%u\n", (unsigned)video->frames);
         I_Quit();
@@ -140,11 +144,11 @@ uint64_t doom_main(void) {
     char program[] = "doom";
     char iwad_option[] = "-iwad";
     char iwad_path[] = "/games/freedoom/freedoom1.wad";
-    char no_sound[] = "-nosound";
+    char no_music[] = "-nomusic";
     char warp_option[] = "-warp";
     char episode[] = "1";
     char map[] = "1";
-    char *arguments[] = {program, iwad_option, iwad_path, no_sound,
+    char *arguments[] = {program, iwad_option, iwad_path, no_music,
                          warp_option, episode, map, 0};
     const int argument_count = test_mode == 2u ? 7 : 4;
     struct doom_video video = {

@@ -361,6 +361,75 @@ static void fmt_signed(struct fmt_sink *out, int64_t value, int width,
     }
 }
 
+#if defined(QUAKE_LIBC_FLOAT)
+static void fmt_float(struct fmt_sink *out, double value, int width,
+                      int precision, bool zero_pad, bool left, bool plus) {
+    char sign = '\0';
+    if (value < 0.0) { sign = '-'; value = -value; }
+    else if (plus) sign = '+';
+    int prec = precision < 0 ? 6 : precision;
+    if (prec > 16) prec = 16;
+
+    double scaled = value;
+    uint64_t ipart = (uint64_t)scaled;
+    double frac = scaled - (double)ipart;
+    for (int i = 0; i < prec; ++i) frac *= 10.0;
+    frac += 0.5;
+    uint64_t fpart = (uint64_t)frac;
+    if (prec == 0) {
+        if (fpart != 0u) { ++ipart; fpart = 0u; }
+    } else {
+        uint64_t scale = 1u;
+        for (int i = 0; i < prec; ++i) scale *= 10u;
+        if (fpart >= scale) { ++ipart; fpart = 0u; }
+    }
+
+    char idigits[24];
+    size_t icount = 0u;
+    if (ipart == 0u) {
+        idigits[icount++] = '0';
+    } else {
+        while (ipart != 0u) {
+            idigits[icount++] = (char)('0' + (int)(ipart % 10u));
+            ipart /= 10u;
+        }
+    }
+    const size_t sign_len = sign != '\0' ? 1u : 0u;
+    const size_t frac_len = prec > 0 ? (size_t)prec + 1u : 0u;
+    const size_t total = icount + frac_len;
+    const size_t min_width = (size_t)width > sign_len ? (size_t)width - sign_len : 0u;
+    const size_t pad = total < min_width ? min_width - total : 0u;
+    if (left) {
+        if (sign != '\0') fmt_emit(out, sign);
+        for (size_t i = icount; i-- > 0u;) fmt_emit(out, idigits[i]);
+        if (prec > 0) {
+            fmt_emit(out, '.');
+            char fdigits[32];
+            for (int i = 0; i < prec; ++i) {
+                fdigits[i] = (char)('0' + (int)(fpart % 10u));
+                fpart /= 10u;
+            }
+            for (int i = prec - 1; i >= 0; --i) fmt_emit(out, fdigits[i]);
+        }
+        fmt_repeat(out, ' ', pad);
+    } else {
+        if (!zero_pad) fmt_repeat(out, ' ', pad);
+        if (sign != '\0') fmt_emit(out, sign);
+        if (zero_pad) fmt_repeat(out, '0', pad);
+        for (size_t i = icount; i-- > 0u;) fmt_emit(out, idigits[i]);
+        if (prec > 0) {
+            fmt_emit(out, '.');
+            char fdigits[32];
+            for (int i = 0; i < prec; ++i) {
+                fdigits[i] = (char)('0' + (int)(fpart % 10u));
+                fpart /= 10u;
+            }
+            for (int i = prec - 1; i >= 0; --i) fmt_emit(out, fdigits[i]);
+        }
+    }
+}
+#endif /* QUAKE_LIBC_FLOAT */
+
 int vsnprintf(char *buf, size_t capacity, const char *fmt, va_list ap) {
     struct fmt_sink out;
     out.buf = buf;
@@ -432,6 +501,10 @@ int vsnprintf(char *buf, size_t capacity, const char *fmt, va_list ap) {
                 fmt_repeat(&out, ' ', pad);
                 for (size_t i = 0u; i < len; ++i) fmt_emit(&out, s[i]);
             }
+#if defined(QUAKE_LIBC_FLOAT)
+        } else if (spec == 'f') {
+            fmt_float(&out, va_arg(ap, double), width, precision, zpad, left, plus);
+#endif
         } else if (spec == 'p') {
             const uintptr_t p = (uintptr_t)va_arg(ap, void *);
             fmt_emit(&out, '0');

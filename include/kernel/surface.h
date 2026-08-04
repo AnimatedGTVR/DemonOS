@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SURFACE_LIMIT 8u
 #define SURFACE_MAX_WIDTH 640u
 #define SURFACE_MAX_HEIGHT 480u
@@ -41,5 +45,9 @@ uint64_t surface_reclaimed(void);
 uint64_t surface_mappings(void);
 uint64_t surface_damages(void);
 uint64_t surface_damage_consumed(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

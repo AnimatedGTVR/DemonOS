@@ -201,8 +201,12 @@ IWAD and validates all 3,163 directory entries in ring 3.
 
 ### Audio and saves
 
-Audio is not a prerequisite for the first playable milestone. A silent build
-must print `DOOM_AUDIO_DISABLED` once and must not pretend samples were played.
+The full engine has native PCM sound effects. Doom's mixer resamples DMX sound
+lumps into signed 16-bit, 44.1 kHz stereo and submits bounded buffers through
+an audio capability. The kernel validates the userspace range before handing
+the buffer to its AC'97 DMA driver. QEMU run targets attach an AC'97 device to
+the host PipeWire backend; headless tests use the same device with a silent
+backend. Music is intentionally disabled until a native sequencer is added.
 Later audio work requires a PCM ring buffer, mixer, and an emulated device such
 as AC'97 or Intel HDA.
 
@@ -309,7 +313,7 @@ with status zero before continuing.
 - Mouse capture and sensitivity.
 - [x] Session-persistent configuration and saves on writable RAMFS.
 - Reboot-persistent saves after the block-filesystem layer is writable.
-- PCM sound effects and music.
+- Music sequencing (PCM sound effects are implemented).
 - Windowed compositor presentation.
 - Chocolate Doom after the underlying libc/SDL-style platform services exist.
 

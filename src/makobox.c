@@ -1,5 +1,6 @@
 #include <kernel/makobox.h>
 #include <kernel/apps.h>
+#include <kernel/ac97.h>
 #include <kernel/capability.h>
 #include <kernel/git.h>
 #include <kernel/framebuffer.h>
@@ -18,6 +19,7 @@
 #include <stdint.h>
 
 static struct makobox_state live;
+static int16_t bleep_pcm[AC97_MAX_FRAMES * 2u];
 
 static void cpu_vendor(char output[13]) {
     uint32_t unused;
@@ -102,6 +104,11 @@ static void applet_help(void) {
     line("  apps     list and inspect installed applications");
     line("  tetris   launch the native freestanding C Tetris app");
     line("  doom     launch Doom with the installed Freedoom IWAD");
+    line("  classicube  launch the ClassiCube game (ESC pause, Q quit to console)");
+    line("  quake / quake-core  boot the Quake engine (D4 full engine boot + frame)");
+    line("  beep [Hz [ms]]  play a short square-wave bleep (defaults: 880 80)");
+    line("  tone <Hz> [ms]  play a 20-20000 Hz tone for up to 90 ms");
+    line("  bleeps   play a short three-note startup chime");
     line("  git ...  real content-snapshot Git (init/add/commit/log/diff/show/status)");
     line("  desktop  report console readiness (no GUI -- see sidelined/)");
     line("  runit list/status units (mutations require runas)");
@@ -1218,6 +1225,79 @@ static void applet_sleep(const char *argument) {
     value_line("slept ", (uint64_t)seconds, " seconds");
 }
 
+static bool play_bleep(uint32_t frequency, uint32_t milliseconds) {
+    if (!ac97_available()) {
+        line("beep: no AC'97 output device is available");
+        return false;
+    }
+    if (frequency < 20u || frequency > 20000u ||
+        milliseconds == 0u || milliseconds > 90u) {
+        line("beep: frequency must be 20-20000 Hz; duration must be 1-90 ms");
+        return false;
+    }
+    size_t frames = ((size_t)AC97_SAMPLE_RATE * milliseconds) / 1000u;
+    if (frames == 0u) frames = 1u;
+    uint32_t phase = 0u;
+    for (size_t frame = 0u; frame < frames; ++frame) {
+        int32_t amplitude = 7000;
+        /* A tiny linear envelope avoids the harsh clicks caused by starting
+           or stopping a square wave at full amplitude. */
+        if (frame < 96u) amplitude = amplitude * (int32_t)frame / 96;
+        const size_t remaining = frames - frame;
+        if (remaining < 96u) amplitude = amplitude * (int32_t)remaining / 96;
+        const int16_t sample = (int16_t)(phase < AC97_SAMPLE_RATE / 2u
+            ? amplitude : -amplitude);
+        bleep_pcm[frame * 2u] = sample;
+        bleep_pcm[frame * 2u + 1u] = sample;
+        phase += frequency;
+        if (phase >= AC97_SAMPLE_RATE) phase %= AC97_SAMPLE_RATE;
+    }
+    if (!ac97_submit(bleep_pcm, frames)) {
+        line("beep: audio device is busy; try again");
+        return false;
+    }
+    serial_write("BLEEP_PLAYED frequency="); serial_write_u64(frequency);
+    serial_write(" duration_ms="); serial_write_u64(milliseconds);
+    serial_write("\n");
+    return true;
+}
+
+static bool parse_tone_args(const char *argument, uint32_t default_frequency,
+                            uint32_t *frequency, uint32_t *milliseconds) {
+    *frequency = default_frequency;
+    *milliseconds = 80u;
+    if (argument[0] == '\0') return true;
+    char frequency_text[16];
+    const char *duration_text;
+    if (!split_two_args(argument, frequency_text, sizeof(frequency_text),
+                        &duration_text))
+        return parse_u32(argument, frequency);
+    return parse_u32(frequency_text, frequency) &&
+        parse_u32(duration_text, milliseconds);
+}
+
+static bool applet_beep(const char *argument, bool frequency_required) {
+    uint32_t frequency;
+    uint32_t milliseconds;
+    if ((frequency_required && argument[0] == '\0') ||
+        !parse_tone_args(argument, 880u, &frequency, &milliseconds)) {
+        line(frequency_required ? "usage: tone <Hz> [milliseconds]"
+                                : "usage: beep [Hz [milliseconds]]");
+        return false;
+    }
+    return play_bleep(frequency, milliseconds);
+}
+
+static bool applet_bleeps(void) {
+    static const uint32_t notes[] = { 523u, 659u, 784u };
+    for (size_t index = 0u; index < sizeof(notes) / sizeof(notes[0]); ++index) {
+        if (!play_bleep(notes[index], 70u)) return false;
+        const uint64_t end = interrupts_timer_ticks() + 9u;
+        while (interrupts_timer_ticks() < end) __asm__ volatile ("hlt");
+    }
+    return true;
+}
+
 static void applet_groups(void) {
     line(running_elevated ? "root" : "mako");
 }
@@ -1694,7 +1774,9 @@ static void applet_env(void) {
 static bool command_exists(const char *name) {
     static const char *const names[] = {
         "help", "uname", "status", "mem", "frames", "paging", "ticks", "ps",
-        "abi", "caps", "projects", "apps", "tetris", "git", "desktop", "runit",
+        "abi", "caps", "projects", "apps", "tetris", "doom", "classicube", "quake", "quake-core",
+        "nxengine", "nxengine-core", "beep", "tone",
+        "bleeps", "git", "desktop", "runit",
         "runas", "ls", "cat", "head", "tail", "wc", "touch", "write", "rm",
         "cp", "mv", "grep", "hexdump", "strings", "df", "du", "free", "uptime",
         "stat", "find", "tree", "tac", "rev", "sort", "uniq", "cmp", "diff",
@@ -2050,7 +2132,36 @@ static bool launch_app(const char *name) {
         capabilities |=
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO);
+    }
+    if (equal(app.path, "/system/bin/classicube-core.elf")) {
+        capabilities |=
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE);
+    }
+    if (equal(app.path, "/system/bin/quake-core.elf")) {
+        /* PortKit's arena bootstrap and file shims use the storage service;
+           the D4 engine boot drives the display/surface services so the
+           software renderer can present frames. */
+        capabilities |=
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE);
+    }
+    if (equal(app.path, "/system/bin/nxengine-core.elf")) {
+        /* PortKit's arena bootstrap (demon_port_init_dynamic) opens the
+           storage service unconditionally; the D3 rendering stage drives
+           the display/surface services to present a real frame; D31's
+           real sound() implementation opens the audio service (the same
+           real AC'97-backed demon_audio_submit path doom-full.elf already
+           uses) to submit genuine PCM. */
+        capabilities |=
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO);
     }
     uint32_t pid = userspace_spawn_path(0u, app.path, path_length, app.name,
         capabilities);
@@ -2099,6 +2210,14 @@ bool makobox_run(const char *command_line) {
     else if (starts_with(command_line, "apps launch ", &argument)) return launch_app(argument);
     else if (equal(command_line, "tetris")) return launch_app("tetris");
     else if (equal(command_line, "doom")) return launch_app("doom");
+    else if (equal(command_line, "classicube")) return launch_app("classicube");
+    else if (equal(command_line, "quake") || equal(command_line, "quake-core")) return launch_app("quake-core");
+    else if (equal(command_line, "nxengine") || equal(command_line, "nxengine-core")) return launch_app("nxengine-core");
+    else if (equal(command_line, "beep")) return applet_beep("", false);
+    else if (starts_with(command_line, "beep ", &argument)) return applet_beep(argument, false);
+    else if (equal(command_line, "tone")) return applet_beep("", true);
+    else if (starts_with(command_line, "tone ", &argument)) return applet_beep(argument, true);
+    else if (equal(command_line, "bleeps")) return applet_bleeps();
     else if (equal(command_line, "git") || equal(command_line, "git status")) applet_git_status();
     else if (equal(command_line, "git version"))
         line("MAKO Git stage 1 (native, real content snapshots, no host binary)");
@@ -2271,8 +2390,10 @@ bool makobox_self_test(void) {
 
 __attribute__((noreturn))
 void makobox_shell(void) {
-    char input[64];
+    char input[64] = {0};
+    char history_draft[64] = {0};
     size_t length = 0;
+    size_t history_offset = 0u;
     /* Clear the visual console only (serial keeps every boot-status line
        that already scrolled by -- smoke tests grep that log). Without this,
        a real interactive session starts buried under dozens of "[ OK ]"
@@ -2310,16 +2431,53 @@ void makobox_shell(void) {
                 (void)makobox_run(input);
             }
             length = 0;
+            history_offset = 0u;
+            history_draft[0] = '\0';
             terminal_write("mako# ");
             serial_write("mako# ");
+        } else if (value == KEYBOARD_CHAR_HISTORY_UP ||
+                   value == KEYBOARD_CHAR_HISTORY_DOWN) {
+            if (history_count == 0u) continue;
+            if (value == KEYBOARD_CHAR_HISTORY_UP) {
+                if (history_offset == 0u) {
+                    for (size_t i = 0u; i <= length; ++i) history_draft[i] = input[i];
+                }
+                if (history_offset < history_count) ++history_offset;
+            } else if (history_offset > 0u) {
+                --history_offset;
+            }
+            while (length > 0u) {
+                --length;
+                terminal_backspace();
+                serial_write("\b \b");
+            }
+            const char *replacement = history_draft;
+            if (history_offset > 0u) {
+                const size_t absolute = history_next - history_offset;
+                replacement = command_history[absolute % HISTORY_DEPTH];
+            }
+            while (replacement[length] != '\0' && length + 1u < sizeof(input)) {
+                input[length] = replacement[length];
+                ++length;
+            }
+            input[length] = '\0';
+            terminal_write(input);
+            serial_write(input);
+            serial_write("\nHISTORY_RECALL offset=");
+            serial_write_u64(history_offset);
+            serial_write(" command=");
+            serial_write(input);
+            serial_write("\n");
         } else if (value == '\b') {
             if (length > 0u) {
                 --length;
+                input[length] = '\0';
                 terminal_backspace();
                 serial_write("\b \b");
             }
         } else if (length + 1u < sizeof(input)) {
             input[length++] = value;
+            input[length] = '\0';
             char echo[2] = { value, '\0' };
             terminal_write(echo);
             serial_write(echo);

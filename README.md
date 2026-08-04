@@ -18,6 +18,7 @@ can be compiled from native MKO as the MAKO compiler matures.
 - [Build and run](#build-and-run)
 - [Boot status and self-tests](#boot-status-and-self-tests)
 - [The native bridge](#the-native-bridge)
+- [Roadmaps: better MKO userspace, C++ in the kernel, and Wine](#roadmaps-better-mko-userspace-c-in-the-kernel-and-wine)
 
 ## Native display stack
 
@@ -352,3 +353,33 @@ bridge is live: MAKO emits `build/kernel_probe.S`, GCC assembles it into an
 ELF64 relocatable object, and the C kernel calls its exported functions. The
 intended migration path is now to expand native types and memory
 operations, then replace kernel subsystems with MAKO one at a time.
+
+## Roadmaps: better MKO userspace, C++ in the kernel, and Wine
+
+- [Better MAKO in userspace](docs/mako-userspace-improvements.md) — U0/U1
+  implemented: real string literals (kernel-profile MAKO compiler work) and
+  a shared `MakoStd`/`MakoWire`/`MakoBytes` stdlib closing the gap between
+  "MKO can technically do this" and code that doesn't reach for C/C++ as
+  soon as it outgrows a small utility.
+- [C++ in the kernel](docs/kernel-cxx-port.md) — K0 through K3 implemented:
+  a kernel-side freestanding C++ runtime, and `src/ramfs.c`/`src/capability.c`
+  migrated onto two distinct generic templates (`bounded_table<T,N>` for
+  name-keyed slots, `slot_table<T,N>` for generation-checked handles) where
+  templates and RAII are a genuine fit, while boot, interrupts, and the
+  scheduler stay C/assembly.
+- [Wine (Windows compatibility)](docs/wine-port.md) — W0-W4 implemented: a
+  real PE/COFF header parser; explicit `reserve`/`commit` virtual-memory
+  syscalls (chosen deliberately over a riskier recoverable page-fault
+  handler this kernel doesn't have yet); a section loader that maps,
+  zero-fills, and populates a PE32+ image's sections (permission
+  enforcement deliberately deferred — found a real page fault proving why
+  during its own first boot test); export/import name resolution with IAT
+  patching, proven against two synthetic images sharing one process
+  address space (which only became possible after finding, mid-test, that
+  the original loader design could never have loaded more than one image
+  per process at all); and base relocation application, correcting every
+  absolute pointer a linker baked in for a preferred `ImageBase` DemonOS's
+  anonymous region essentially never matches. Framed honestly as a much
+  longer effort than the game-engine ports above — Wine assumes a POSIX
+  host DemonOS doesn't have yet, so this starts from provable foundations
+  rather than a pinned upstream commit.

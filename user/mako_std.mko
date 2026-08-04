@@ -1,0 +1,54 @@
+namespace MakoStd;
+
+use "sdk.mko";
+
+# U1 of docs/mako-userspace-improvements.md, Finding 1: the 32-bit
+# pack/unpack pair was reimplemented four times across this codebase under
+# three different names (`low32` byte-for-byte identical in
+# counter_client.mko/browser_client.mko/terminal_client.mko/compositor.mko;
+# `pack_words(low, high)` in demonx_client.mko/browser_client.mko/
+# compositor.mko; `user_u64(high, low)` in user/init.mko with the argument
+# order silently flipped relative to pack_words) because MKO has no native
+# truncating cast or bitwise AND to extract the low 32 bits of a u64. One
+# shared, namespaced pair here instead of N hand-copied ones -- and one
+# fixed argument order (low, high), matching the majority (pack_words'
+# three call sites) rather than user_u64's inverted one.
+
+fn low32(value: u64) -> u64 {
+    return value - (value / 4294967296) * 4294967296;
+}
+
+fn pack32(low: u64, high: u64) -> u64 {
+    return low + high * 4294967296;
+}
+
+# U1, Finding 5: no consistent error-handling convention. Call sites
+# alternate between exact-byte-count checks and the "is this handle valid"
+# sentinel idiom below, each hand-copied with its own exit code. These two
+# collapse the two most common shapes:
+#
+#   if MakoAbi.channel_send(channel, packet_address, 64) != 64 {
+#       MakoAbi.exit(94); return 94;
+#   }
+#
+# becomes
+#
+#   MakoStd.require_bytes(MakoAbi.channel_send(channel, packet_address, 64), 64, 94);
+#
+# MakoAbi.exit never returns in practice (it is a real process-exit
+# syscall), so callers do not need their own `return` right after this --
+# the process is already gone before any following statement could run.
+fn require_bytes(actual: u64, expected: u64, exit_code: u64) -> u64 {
+    if actual != expected {
+        MakoAbi.exit(exit_code);
+    }
+    return 0;
+}
+
+# A failed capability-service open (service_open, file_open, surface_create,
+# ...) returns a sentinel above the valid 32-bit handle range rather than a
+# separate error type -- every call site re-derives this same
+# "<= 4294967295" comparison by hand today.
+fn handle_valid(handle: u64) -> bool {
+    return handle <= 4294967295;
+}

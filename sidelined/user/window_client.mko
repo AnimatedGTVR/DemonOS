@@ -1,4 +1,6 @@
 use "sdk.mko";
+use "../../user/mako_std.mko";
+use "../../user/mako_wire.mko";
 
 # Generic "create a window with some content" client. Any process that runs
 # this creates exactly one window at a geometry derived from its own pid (so
@@ -6,17 +8,17 @@ use "sdk.mko";
 # with the compositor for it. The compositor's window table has no notion of
 # "the 4th/5th/6th client" any more -- every window here is created the same
 # way, dynamically, and the compositor accepts CREATE at any time.
+#
+# Rewritten onto the shared MakoWire/MakoStd helpers (see
+# docs/mako-userspace-improvements.md's Findings 1/2/5) instead of the
+# hand-copied zero-fill loop, packed-word literals, and
+# if-check-then-exit-then-return boilerplate every sibling client repeated.
 fn window_client_main(service_name: u64) -> u64 {
     pid: u64 = MakoAbi.getpid();
     packet_address: u64 = 3342336;
     packet: vptr<u64> = vptr_from_u64(packet_address);
-    word: u64 = 0;
-    while word < 8 {
-        vptr_write_u64(vptr_offset_u64(packet, word), 0);
-        word = word + 1;
-    }
-    # version 1, CREATE opcode 2, serial 1.
-    vptr_write_u64(packet, 131073 + 4294967296);
+    MakoWire.zero_packet(packet_address);
+    MakoWire.header(packet_address, 1, 2, 1);
     vptr_write_u64(vptr_offset_u64(packet, 1), pid);
     # Tile windows into a 2x2 grid across the usable desktop area (below the
     # 28px topbar, above the 48px taskbar) based on pid, so concurrently
@@ -29,8 +31,8 @@ fn window_client_main(service_name: u64) -> u64 {
     row: u64 = cell_index / 2;
     x: u64 = 16 + column * 312;
     y: u64 = 40 + row * 196;
-    vptr_write_u64(vptr_offset_u64(packet, 2), x + y * 4294967296);
-    vptr_write_u64(vptr_offset_u64(packet, 3), 296 + 180 * 4294967296);
+    vptr_write_u64(vptr_offset_u64(packet, 2), MakoStd.pack32(x, y));
+    vptr_write_u64(vptr_offset_u64(packet, 3), MakoStd.pack32(296, 180));
     channel: u64 = MakoAbi.channel_connect(service_name, 18);
 
     # Draw real content and share a read-only surface capability with the
@@ -42,7 +44,7 @@ fn window_client_main(service_name: u64) -> u64 {
     # with flat placeholder content instead of forged pixels.
     surface_factory: u64 = MakoAbi.service_open(9);
     surface: u64 = MakoAbi.surface_create(surface_factory, 64, 64);
-    if surface <= 4294967295 {
+    if MakoStd.handle_valid(surface) {
         pixel_address: u64 = packet_address + 128;
         pixels: vptr<u64> = vptr_from_u64(pixel_address);
         pixel: u64 = 0;
@@ -57,23 +59,17 @@ fn window_client_main(service_name: u64) -> u64 {
                            color + color * 4294967296);
             pixel = pixel + 2;
         }
-        if MakoAbi.surface_write(surface, pixel_address, 4096, 0) != 4096 {
-            MakoAbi.exit(109); return 109;
-        }
-        if MakoAbi.surface_damage(surface, 0, 0, 64, 64) != 0 {
-            MakoAbi.exit(112); return 112;
-        }
+        MakoStd.require_bytes(MakoAbi.surface_write(surface, pixel_address, 4096, 0), 4096, 109);
+        MakoStd.require_bytes(MakoAbi.surface_damage(surface, 0, 0, 64, 64), 0, 112);
         compositor_surface: u64 = MakoAbi.surface_share(surface, channel);
-        if compositor_surface <= 4294967295 {
+        if MakoStd.handle_valid(compositor_surface) {
             vptr_write_u64(vptr_offset_u64(packet, 4), compositor_surface);
         }
         MakoAbi.handle_close(surface);
     }
     MakoAbi.handle_close(surface_factory);
 
-    if MakoAbi.channel_send(channel, packet_address, 64) != 64 {
-        MakoAbi.exit(94); return 94;
-    }
+    MakoStd.require_bytes(MakoAbi.channel_send(channel, packet_address, 64), 64, 94);
     MakoAbi.handle_close(channel);
     MakoAbi.exit(0);
     return 0;

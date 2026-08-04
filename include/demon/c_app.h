@@ -1,6 +1,7 @@
 #ifndef DEMON_C_APP_H
 #define DEMON_C_APP_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <demon/dirent.h>
 
@@ -165,6 +166,11 @@ static inline uint64_t demon_file_rename(uint64_t storage,
                      : "memory", "cc");
     return rax;
 }
+/* Submit signed 16-bit, 44.1 kHz, interleaved stereo PCM frames. */
+static inline uint64_t demon_audio_submit(uint64_t audio, const int16_t *samples,
+                                          uint64_t frame_count) {
+    return demon_syscall3(45u, audio, (uint64_t)(uintptr_t)samples, frame_count);
+}
 static inline uint64_t demon_spawn(const char *path, uint64_t length,
                                    uint64_t service_mask) {
     return demon_syscall3(11u, (uint64_t)(uintptr_t)path, length, service_mask);
@@ -256,6 +262,33 @@ static inline void *demon_memory_map(uint64_t byte_count) {
 }
 static inline uint64_t demon_memory_unmap(void *address) {
     return demon_syscall1(41u, (uint64_t)(uintptr_t)address);
+}
+/* W1 of docs/wine-port.md: claims address space without committing physical
+   frames for it -- demon_memory_map alone can't express that, it always
+   commits everything it maps in one shot. Mutually exclusive with
+   demon_memory_map for the same process (one anonymous region, reserved
+   either all-at-once or incrementally, not both). */
+static inline void *demon_memory_reserve(uint64_t byte_count) {
+    const uint64_t result = demon_syscall1(46u, byte_count);
+    return result == UINT64_MAX ? (void *)0 : (void *)(uintptr_t)result;
+}
+/* Extends the committed portion of an already-reserved region by
+   byte_count more bytes, always starting exactly where the last commit (or
+   the reservation itself) left off. Returns the address the newly
+   committed bytes start at, or NULL on failure (reservation exhausted or
+   out of physical frames). The caller must never read or write past its
+   own last successful commit's end: there is no recoverable page fault to
+   catch that mistake in this kernel yet (see the comment on
+   anonymous_reserved_pages in src/arch/x86_64/userspace.c), so doing so
+   halts the whole kernel, not just this process.
+
+   `writable` controls only the PTE write bit -- every committed page stays
+   executable regardless (this kernel's EFER has LME but not NXE yet, so a
+   non-executable mapping isn't safely expressible; see
+   anonymous_commit_pages's comment in src/arch/x86_64/userspace.c). */
+static inline void *demon_memory_commit(uint64_t byte_count, bool writable) {
+    const uint64_t result = demon_syscall2(47u, byte_count, writable ? 1u : 0u);
+    return result == UINT64_MAX ? (void *)0 : (void *)(uintptr_t)result;
 }
 static inline uint64_t demon_handle_read_at(uint64_t handle, void *bytes,
                                             uint64_t capacity,

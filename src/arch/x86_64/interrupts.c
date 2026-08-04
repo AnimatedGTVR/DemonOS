@@ -219,6 +219,14 @@ static void publish_key(uint16_t code, bool released, char character) {
     (void)input_publish(&event);
 }
 
+static void keyboard_queue_char(char character) {
+    const uint8_t next = (uint8_t)((keyboard_write + 1u) % sizeof(keyboard_buffer));
+    if (next == keyboard_read) return;
+    keyboard_buffer[keyboard_write] = character;
+    keyboard_write = next;
+    ++keyboard_characters;
+}
+
 uintptr_t interrupt_timer_handler(uintptr_t frame_address) {
     ++timer_ticks;
     /* Some emulators expose the PS/2 auxiliary output as level-triggered
@@ -274,6 +282,10 @@ void interrupt_keyboard_handler(void) {
         const uint8_t code = (uint8_t)(scan & 0x7Fu);
         if (code == 0x5Bu || code == 0x5Cu) keyboard_super = !released;
         if (code == 0x38u) keyboard_alt = !released;
+        if (!released && code == 0x48u)
+            keyboard_queue_char(KEYBOARD_CHAR_HISTORY_UP);
+        if (!released && code == 0x50u)
+            keyboard_queue_char(KEYBOARD_CHAR_HISTORY_DOWN);
         publish_key((uint16_t)(0x100u | code), released, '\0');
         out8(0x20u, 0x20u);
         return;
@@ -298,12 +310,7 @@ void interrupt_keyboard_handler(void) {
         const bool letter = unshifted[code] >= 'a' && unshifted[code] <= 'z';
         const bool use_shift = letter ? keyboard_shift != keyboard_caps_lock : keyboard_shift;
         character = use_shift ? shifted[code] : unshifted[code];
-        const uint8_t next = (uint8_t)((keyboard_write + 1u) % sizeof(keyboard_buffer));
-        if (next != keyboard_read) {
-            keyboard_buffer[keyboard_write] = character;
-            keyboard_write = next;
-            ++keyboard_characters;
-        }
+        keyboard_queue_char(character);
     }
     publish_key(code, released, character);
     out8(0x20u, 0x20u);

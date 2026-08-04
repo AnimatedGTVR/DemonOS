@@ -62,7 +62,20 @@
    it competes with the surface arena for the same fixed low-memory budget
    (see kernel.c's allocate_contiguous/surfaces_init) and did not fix the
    fault when tested. */
-#define USERSPACE_STACK_PAGES 8u
+/* The Quake port's software renderer allocates its edge/surface scratch
+   arrays on the C stack: R_EdgeDrawing (r_main.c) declares
+   ledges[NUMSTACKEDGES + CACHE_SIZE/sizeof(edge_t) + 1] plus
+   lsurfs[NUMSTACKSURFACES + ...] where NUMSTACKEDGES=2400 and
+   NUMSTACKSURFACES=800, i.e. ~200 KiB of stack per R_EdgeDrawing frame.
+   Measured during the D5 play boot (e1m1 first rendered frame) at ~270 KiB
+   total stack use before the R_EdgeDrawing call push faulted at RSP-8 in
+   unmapped memory. 512 KiB (128 pages) covers that with headroom for the
+   callers (Host_Frame -> R_RenderScene -> R_EdgeDrawing) and for anything
+   above the renderer in the frame loop. Raised globally rather than given
+   only to Quake because the kernel spawn path uses one constant; the extra
+   120 pages x 7 process slots (~3.5 MiB) is well within the 256 MiB QEMU
+   budget alongside the seeded 18.7 MiB Quake pak. */
+#define USERSPACE_STACK_PAGES 128u
 
 struct userspace_memory {
     uint64_t address_space;

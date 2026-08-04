@@ -10,6 +10,8 @@ bool interrupts_hardware_start(void);
 uint64_t interrupts_timer_ticks(void);
 bool keyboard_read_char(char *value);
 void keyboard_discard_chars(void);
+#define KEYBOARD_CHAR_HISTORY_UP ((char)0x11)
+#define KEYBOARD_CHAR_HISTORY_DOWN ((char)0x12)
 bool keyboard_controller_ready(void);
 uint64_t keyboard_irq_count(void);
 uint64_t keyboard_character_count(void);
