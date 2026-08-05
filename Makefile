@@ -100,7 +100,7 @@ OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/kernel_slot_table_test.o \
 	$(BUILD)/user_program_blob.o
 
-.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-quake run-wayland run-sdl run-vnc smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
+.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-cave-story run-quake run-wayland run-sdl run-vnc smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
 
 QUAKE_SOURCE := $(BUILD)/quake-upstream
 QUAKE_COMMIT := bf4ac424ce754894ac8f1dae6a3981954bc9852d
@@ -1971,7 +1971,7 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF
 	cp grub/grub-test.cfg $(ISO_ROOT)/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(ISO_ROOT) >/dev/null 2>&1
 
-$(RUN_ISO): $(ISO) freedoom-assets quake-data grub/grub.cfg
+$(RUN_ISO): $(ISO) freedoom-assets quake-data nxengine-data nxengine-source $(NXENGINE_FREEPLAY_ELF) grub/grub.cfg
 	rm -rf $(BUILD)/iso-run
 	cp -r $(ISO_ROOT) $(BUILD)/iso-run
 	mkdir -p $(BUILD)/iso-run/games/freedoom $(BUILD)/iso-run/licenses/doom
@@ -1981,6 +1981,40 @@ $(RUN_ISO): $(ISO) freedoom-assets quake-data grub/grub.cfg
 	cp $(QUAKE_PAK) $(BUILD)/iso-run/games/quake/pak0.pak
 	cp $(QUAKE_DATA_DIR)/SLICNSE.TXT $(BUILD)/iso-run/licenses/quake/SLICNSE.TXT
 	cp $(QUAKE_DATA_DIR)/README.TXT $(BUILD)/iso-run/licenses/quake/README.TXT
+	mkdir -p $(BUILD)/iso-run/games/nxengine
+	cp $(NXENGINE_FREEPLAY_ELF) $(BUILD)/iso-run/boot/mako/nxengine-play-freeplay.elf
+	cp $(NXENGINE_DATA)/CaveStory/data/Bullet.pbm $(BUILD)/iso-run/games/nxengine/Bullet.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/casts.pbm $(BUILD)/iso-run/games/nxengine/casts.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/0.pxm $(BUILD)/iso-run/games/nxengine/0.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Prt0.pbm $(BUILD)/iso-run/games/nxengine/Prt0.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Pens1.pxm $(BUILD)/iso-run/games/nxengine/Pens1.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Pens1.pxe $(BUILD)/iso-run/games/nxengine/Pens1.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/PrtPens.pbm $(BUILD)/iso-run/games/nxengine/PrtPens.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/MyChar.pbm $(BUILD)/iso-run/games/nxengine/MyChar.pbm
+	cp $(NXENGINE_SOURCE)/tilekey.dat $(BUILD)/iso-run/games/nxengine/tilekey.dat
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Pens.pxa $(BUILD)/iso-run/games/nxengine/Pens.pxa
+	cp $(NXENGINE_SOURCE)/sprites.sif $(BUILD)/iso-run/games/nxengine/sprites.sif
+	cp $(NXENGINE_DATA)/CaveStory/data/npc.tbl $(BUILD)/iso-run/games/nxengine/npc.tbl
+	cp $(NXENGINE_DATA)/CaveStory/data/TextBox.pbm $(BUILD)/iso-run/games/nxengine/TextBox.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Caret.pbm $(BUILD)/iso-run/games/nxengine/Caret.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Fade.pbm $(BUILD)/iso-run/games/nxengine/Fade.pbm
+	cp $(NXENGINE_SOURCE)/smalfont.bmp $(BUILD)/iso-run/games/nxengine/smalfont.bmp
+	cp $(NXENGINE_DATA)/CaveStory/data/Credit.tsc $(BUILD)/iso-run/games/nxengine/Credit.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/Head.tsc $(BUILD)/iso-run/games/nxengine/Head.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/ArmsItem.tsc $(BUILD)/iso-run/games/nxengine/ArmsItem.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/StageSelect.tsc $(BUILD)/iso-run/games/nxengine/StageSelect.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Start.pxm $(BUILD)/iso-run/games/nxengine/Start.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Start.pxe $(BUILD)/iso-run/games/nxengine/Start.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.pxm $(BUILD)/iso-run/games/nxengine/Frog.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.pxe $(BUILD)/iso-run/games/nxengine/Frog.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.tsc $(BUILD)/iso-run/games/nxengine/Frog.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/PrtWeed.pbm $(BUILD)/iso-run/games/nxengine/PrtWeed.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Weed.pxa $(BUILD)/iso-run/games/nxengine/Weed.pxa
+	cp $(NXENGINE_DATA)/CaveStory/data/ArmsImage.pbm $(BUILD)/iso-run/games/nxengine/ArmsImage.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Arms.pbm $(BUILD)/iso-run/games/nxengine/Arms.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Npc/NpcSym.pbm $(BUILD)/iso-run/games/nxengine/NpcSym.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/ItemImage.pbm $(BUILD)/iso-run/games/nxengine/ItemImage.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Title.pbm $(BUILD)/iso-run/games/nxengine/Title.pbm
 	cp grub/grub.cfg $(BUILD)/iso-run/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(BUILD)/iso-run >/dev/null 2>&1
 
@@ -2037,6 +2071,13 @@ run: $(RUN_ISO)
 # Explicit alias for the normal interactive image, which includes the real
 # Freedoom IWAD and exposes it to MakoBox as /games/freedoom/freedoom1.wad.
 run-doom: run
+
+# $(RUN_ISO) also carries the real NXEngine D37 freeplay build and the
+# real Cave Story freeware data (see $(RUN_ISO)'s own recipe above), so
+# `make run` already plays real Cave Story, not just its self-test --
+# this is just an explicit alias plus a reminder of the shell command.
+run-cave-story: run
+	@echo "At the mako# prompt, type: cave-story"
 
 # $(RUN_ISO) itself now also carries the real, freely redistributable
 # Quake 1.06 shareware pak0.pak (see $(RUN_ISO)'s own recipe above), so

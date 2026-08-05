@@ -1775,7 +1775,7 @@ static bool command_exists(const char *name) {
     static const char *const names[] = {
         "help", "uname", "status", "mem", "frames", "paging", "ticks", "ps",
         "abi", "caps", "projects", "apps", "tetris", "doom", "classicube", "quake", "quake-core",
-        "nxengine", "nxengine-core", "nxengine-play-freeplay", "nxengine-freeplay", "beep", "tone",
+        "nxengine", "nxengine-core", "nxengine-play-freeplay", "nxengine-freeplay", "cave-story", "beep", "tone",
         "bleeps", "git", "desktop", "runit",
         "runas", "ls", "cat", "head", "tail", "wc", "touch", "write", "rm",
         "cp", "mv", "grep", "hexdump", "strings", "df", "du", "free", "uptime",
@@ -2225,7 +2225,8 @@ bool makobox_run(const char *command_line) {
     else if (equal(command_line, "classicube")) return launch_app("classicube");
     else if (equal(command_line, "quake") || equal(command_line, "quake-core")) return launch_app("quake-core");
     else if (equal(command_line, "nxengine") || equal(command_line, "nxengine-core")) return launch_app("nxengine-core");
-    else if (equal(command_line, "nxengine-play-freeplay") || equal(command_line, "nxengine-freeplay"))
+    else if (equal(command_line, "nxengine-play-freeplay") || equal(command_line, "nxengine-freeplay") ||
+             equal(command_line, "cave-story"))
         return launch_app("nxengine-play-freeplay");
     else if (equal(command_line, "beep")) return applet_beep("", false);
     else if (starts_with(command_line, "beep ", &argument)) return applet_beep(argument, false);
