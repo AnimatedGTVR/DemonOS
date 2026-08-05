@@ -1,0 +1,2832 @@
+use "sdk.mko";
+use "../Desktop/desktop.mko";
+
+# Native ring-3 compositor. This file owns display capability use, window
+# surfaces, z-order, focus, input routing, and bounded presentation. Desktop
+# shell policy and appearance live in Desktop/desktop.mko.
+#
+# Window table: MKO's kernel profile has no structs/arrays (verified against
+# the compiler: `struct construction` and `list` are both rejected under
+# `--kernel`), so the table is a fixed-capacity slot-stride memory region
+# addressed via vptr offset arithmetic, the same trick already used to pack
+# x/y/width/height into u64 words. WINDOW_TABLE_BASE sits past every other
+# scratch buffer in the process heap (request/pixel scratch tops out around
+# 0x330078; the table starts at 0x330100 and uses 640 bytes). These
+# addresses shifted by 0x6000 (24576) when USERSPACE_CODE_PAGES grew from 24
+# to 30 pages to fit the compositor's loading/login screens and taskbar
+# text, then by another 0x4000 (16384) when it grew again from 30 to 34
+# pages to fit the close-fade/wiggle animation work, then by 0x2000 for the
+# native session loading/login work -- see the comment on
+# USERSPACE_CODE_PAGES in kernel/userspace.h.
+# The table grew from 512 to 576 bytes when the slot stride widened from 8
+# to 9 words to fit open/close transition state (word8), then to 640 bytes
+# when it widened again to 10 words to fit an app_kind tag (word9, see
+# slot_app_kind); shift EFFECT_REQUEST_BASE (see effect_request_ptr())
+# forward with it if the stride or slot count ever changes again.
+# EFFECT_REQUEST_BASE sits right after the table at 0x334380 (3359616) and
+# uses 80 bytes, well inside the heap still free before USER_STACK_PAGE
+# begins.
+#
+# Slot stride is 10 u64 words (80 bytes) per window, WINDOW_LIMIT (8) slots:
+#   word0: state (0 closed, 1 normal, 2 minimized-normal, 3 maximized,
+#                4 minimized-maximized)
+#   word1: window_id + z_order * 2^32   (higher z_order = more front)
+#   word2: x + y * 2^32
+#   word3: width + height * 2^32
+#   word4: surface_object_id (0 if this window has no client surface)
+#   word5: mapped_surface_address (0 until MakoAbi.surface_map succeeds;
+#          each process can hold up to USER_SURFACE_MAP_SLOTS=4 concurrent
+#          read-only surface mappings -- see map_surface_readonly in
+#          src/arch/x86_64/userspace.c -- which matches SURFACE_LIMIT=4
+#          system-wide, so up to 4 windows can have real zero-copy pixels
+#          at once; a 5th window's surface_map call fails gracefully and
+#          that window falls back to flat placeholder content instead of
+#          forged pixels)
+#   word6: restore_x + restore_y * 2^32
+#   word7: restore_width + restore_height * 2^32
+#   word8: anim_start_phase + anim_kind * 2^32 (see slot_anim_kind/
+#          slot_set_anim below -- open/close transition state)
+#   word9: app_kind (low32) + composition_layer * 2^32 (see
+#          slot_app_kind/slot_layer and the app_kind/layer helpers below --
+#          which icon/titlebar chrome this window renders with). Every
+#          window-creating client shares one CREATE wire format with no
+#          per-app tag field of its own (see the wire-format note below),
+#          so the compositor instead remembers "the next CREATE is kind X"
+#          in pending_spawn_kind (compositor_main) at the moment
+#          spawn_app() fires, and the CREATE handler consumes it into this
+#          word for the slot it lands in -- see spawn_app's own comment for
+#          why this is safe (spawns are strictly one-in-flight at a time
+#          from the live launcher).
+#
+# Wire format (struct demon_window_message in include/demon/window.h):
+# low32 of word0 = version (low16) | opcode (high16); high32 of word0 = serial.
+# word1 = window_id (low32) | flags (high32). word2 = x | (y << 32).
+# word3 = width | (height << 32). word4 = surface_id (low32).
+fn glyph_pixel(mask: u64, index: u64, foreground: u64) -> u64 {
+    row: u64 = index / 5;
+    column: u64 = index - row * 5;
+    divisor: u64 = 1;
+    step: u64 = 0;
+    while step < row { divisor = divisor * 32; step = step + 1; }
+    step = 0;
+    while step < column { divisor = divisor * 2; step = step + 1; }
+    bit: u64 = mask / divisor;
+    bit = bit - (bit / 2) * 2;
+    if bit == 1 { return foreground; }
+    return 0;
+}
+
+fn pack_words(low: u64, high: u64) -> u64 {
+    return low + high * 4294967296;
+}
+
+# UINT64_MAX (the syscall failure sentinel). The MKO native backend
+# mis-encodes the raw decimal literal 18446744073709551615 as a
+# floating-point constant, which the assembler then rejects -- computing it
+# via unsigned wraparound (0 - 1) avoids emitting that literal at all.
+fn u64_max() -> u64 {
+    zero: u64 = 0;
+    return zero - 1;
+}
+
+# Resize-direction constants for the 8-zone edge/corner resize state
+# machine (see compositor_main's pointer-down hit test and its live_type==3
+# resize-drag handler). Values are arbitrary but match the enum
+# graphics_cursor_icon ordering conceptually (N,S,E,W,NE,NW,SE,SW) so the
+# cursor_icon_for_direction lookup below is a simple 1:1 table, not a
+# separate remapping.
+fn resize_direction_n() -> u64 { return 1; }
+fn resize_direction_s() -> u64 { return 2; }
+fn resize_direction_e() -> u64 { return 3; }
+fn resize_direction_w() -> u64 { return 4; }
+fn resize_direction_ne() -> u64 { return 5; }
+fn resize_direction_nw() -> u64 { return 6; }
+fn resize_direction_se() -> u64 { return 7; }
+fn resize_direction_sw() -> u64 { return 8; }
+
+fn low32(value: u64) -> u64 {
+    return value - (value / 4294967296) * 4294967296;
+}
+
+fn high32(value: u64) -> u64 {
+    return value / 4294967296;
+}
+
+# Pack a screen-resolution (0..639, 0..479) cursor position, plus the
+# current accent_theme (0-3, see accent_border/accent_fill/etc.), into one
+# 32-bit half, since the render_* functions are already at MKO's
+# 6-parameter ceiling (every slot taken by display/request/pixel/state/
+# anim_phase) and have no room for cursor_x/cursor_y/accent_theme as three
+# more separate arguments. 1024 comfortably covers the 640px width with
+# headroom to spare; packed cursor maxes at 639 + 479*1024 = 491135, well
+# under the 2^20 (1048576) stride given to accent_theme, so the two fields
+# never collide.
+fn pack_cursor(cursor_x: u64, cursor_y: u64) -> u64 {
+    return cursor_x + cursor_y * 1024;
+}
+
+fn pack_cursor_and_theme(cursor_x: u64, cursor_y: u64, accent_theme: u64) -> u64 {
+    return pack_cursor(cursor_x, cursor_y) + accent_theme * 1048576;
+}
+
+# settings_open (0 or 1) packed at 2^22 (4194304), clear of accent_theme's
+# 0-3 range at the 2^20 stride below it (max contribution 3*1048576 =
+# 3145728 < 4194304).
+fn pack_cursor_theme_and_settings(cursor_x: u64, cursor_y: u64,
+                                  accent_theme: u64, settings_open: u64) -> u64 {
+    return pack_cursor_and_theme(cursor_x, cursor_y, accent_theme) +
+           settings_open * 4194304;
+}
+
+fn unpack_settings_open(packed: u64) -> u64 {
+    return packed / 4194304;
+}
+
+# launcher_open (0 or 1) packed at 2^23 (8388608), clear of settings_open's
+# 2^22 stride below it, folded into the same cursor/theme/settings word so
+# render_scene (already at MKO's 6-parameter ceiling once search_query is
+# threaded through) doesn't need launcher_open as its own argument.
+fn unpack_launcher_open(packed: u64) -> u64 {
+    field: u64 = packed / 8388608;
+    return field - (field / 2) * 2;
+}
+
+fn unpack_cursor_x(packed: u64) -> u64 {
+    return packed - (packed / 1024) * 1024;
+}
+
+# Masked to the 1024..1048575 field (cursor_y's stride up to accent_theme's
+# stride at 2^20) so a nonzero packed accent_theme -- see
+# pack_cursor_and_theme -- doesn't leak into the unpacked cursor_y value.
+fn unpack_cursor_y(packed: u64) -> u64 {
+    field: u64 = packed / 1024;
+    return field - (field / 1024) * 1024;
+}
+
+# Masked to 0-3 (accent_theme's own field width, 2^22 / 2^20 = 4) so a
+# nonzero packed settings_open bit at 2^22 -- see
+# pack_cursor_theme_and_settings -- doesn't leak into the unpacked
+# accent_theme value.
+fn unpack_accent_theme(packed: u64) -> u64 {
+    field: u64 = packed / 1048576;
+    return field - (field / 4) * 4;
+}
+
+# Triangle wave over [0, amplitude] with the given period (in phase ticks),
+# used to drive a slow "breathing" glow without any floating point -- MKO's
+# kernel profile has no float support, so animation timing is pure integer
+# modulo arithmetic against the phase counter compositor_main advances once
+# per idle-heartbeat tick (see anim_phase in compositor_main).
+fn anim_pulse(phase: u64, period: u64, amplitude: u64) -> u64 {
+    position: u64 = phase - (phase / period) * period;
+    half: u64 = period / 2;
+    if position < half { return position * amplitude / half; }
+    return (period - position) * amplitude / half;
+}
+
+# Nudge one channel of a packed 0xAARRGGBB value up by delta, clamped at 255,
+# leaving alpha untouched -- used to lighten a focused element's color by the
+# current pulse amount without needing per-channel unpack helpers everywhere.
+fn argb_lighten(color: u64, delta: u64) -> u64 {
+    alpha: u64 = color / 16777216;
+    red: u64 = color / 65536 - alpha * 256;
+    green: u64 = color / 256 - (color / 65536) * 256;
+    blue: u64 = color - (color / 256) * 256;
+    red = red + delta;
+    if red > 255 { red = 255; }
+    green = green + delta;
+    if green > 255 { green = 255; }
+    blue = blue + delta;
+    if blue > 255 { blue = 255; }
+    return blue + green * 256 + red * 65536 + alpha * 16777216;
+}
+
+# Replace a packed 0xAARRGGBB value's alpha byte, keeping RGB untouched --
+# used to fade the window open/close transition overlay between transparent
+# and opaque backdrop over anim_transition_ticks() phase ticks.
+fn argb_with_alpha(color: u64, alpha: u64) -> u64 {
+    return (color - (color / 16777216) * 16777216) + alpha * 16777216;
+}
+
+# Named color constants for the dark glass/dock theme (dark translucent
+# panels, blue titlebar/accent, colored-dot window controls, dark-blue
+# desktop backdrop). MKO's kernel profile has no `const`/`let` (verified:
+# only `fn` and inline literals are accepted), so these are zero-arg helper
+# functions returning the packed 0xAARRGGBB value, the same idiom
+# pack_words()/u64_max() already establish for anything constant-like. Every
+# render_* function below calls these instead of inlining raw decimal ARGB
+# literals.
+fn color_shadow() -> u64 { return 1879048192; }                # #70000000
+fn color_window_body() -> u64 { return 3941791740; }           # #EAF2F7FC frosted silver
+fn color_window_border() -> u64 { return 4286101990; }         # #FF78B9E6 aqua glass rim
+
+# Aero-glass specular sheen: a bright, fading-to-transparent band drawn near
+# the top of a glass panel (window titlebars, the login/loading card, the
+# settings popover) to match Desktop/desktop.mko's glass treatment without a
+# real blur buffer. Same values as Desktop.desktop_color_glass_sheen_top/
+# bottom(), duplicated here rather than cross-namespace-imported since these
+# are plain global functions like every other color_* helper in this file.
+fn color_glass_sheen_top() -> u64 { return 1895825407; }       # #70FFFFFF
+fn color_glass_sheen_bottom() -> u64 { return 2785208; }       # #002A7FB8
+
+# Accent-themed colors: settings_open's panel (see render_settings) lets the
+# user pick accent_theme 0-3 at runtime (0=blue, 1=purple, 2=green,
+# currently unused index 3 falls back to blue), threaded through
+# render_scene/render_window/render_taskbar the same way anim_phase/cursor
+# already are (see pack_cursor_and_theme). Theme 0's values are identical to
+# the plain color_titlebar_focused_top()/color_start_fill()/etc. constants
+# below them (unchanged, still used by anything that doesn't need to react
+# to the theme, like color_window_border() above), so switching to theme 0
+# is fully behavior-preserving. accent_fill() covers the focused-titlebar-
+# top use too (same three values) -- no separate accent_titlebar_top,
+# MKO's native backend fully inlines every call site with no code sharing
+# (see the RAMFS_DATA_MAX/USERSPACE_CODE_PAGES notes elsewhere in this
+# file), so a same-body wrapper function costs a second full copy of the
+# branch for zero behavioral benefit.
+fn accent_titlebar_bottom(theme: u64) -> u64 {
+    if theme == 1 { return 4283050114; }                       # #FF4A2882 purple
+    if theme == 2 { return 4279790405; }                       # #FF186B45 green
+    return 4280237690;                                          # #FF1F3E7A blue (default)
+}
+fn accent_fill(theme: u64) -> u64 {
+    if theme == 1 { return 4286336452; }                       # #FF7C4DC4 purple
+    if theme == 2 { return 4281245291; }                       # #FF2E9E6B green
+    return 4282280888;                                          # #FF3E6BB8 blue (default)
+}
+fn accent_border_bright(theme: u64) -> u64 {
+    if theme == 1 { return 4288708320; }                       # #FFA07EE0 purple
+    if theme == 2 { return 4284400786; }                       # #FF5EC492 green
+    return 4285242080;                                          # #FF6B9AE0 blue (default)
+}
+fn accent_task_focused(theme: u64) -> u64 {
+    if theme == 1 { return 2960936388; }                       # #B07C4DC4 purple
+    if theme == 2 { return 2955845227; }                       # #B02E9E6B green
+    return 2956880824;                                          # #B03E6BB8 blue (default)
+}
+
+fn color_titlebar_unfocused_top() -> u64 { return 4285499292; } # #FF6F879C
+fn color_titlebar_unfocused_bottom() -> u64 { return 4282735472; } # #FF455B70
+fn color_title_text() -> u64 { return 4293916671; }            # #FFEFF7FF
+fn color_btn_close() -> u64 { return 4292890460; }             # #FFE04F5C (red dot)
+fn color_resize_grip() -> u64 { return 4285242080; }           # #FF6B9AE0
+fn color_terminal_bg() -> u64 { return 4278915616; }           # #FF0B1220 (matches terminal_client.mko's own redraw() background exactly, so the compositor's backing rect and the terminal's own fill share one seamless color instead of showing a border where they meet)
+fn color_placeholder() -> u64 { return 3861127728; }           # #E6242230
+fn color_start_fill() -> u64 { return 4282280888; }            # #FF3E6BB8
+fn color_start_border() -> u64 { return 4285242080; }          # #FF6B9AE0
+fn color_task_normal() -> u64 { return 2149855304; }           # #80243048
+fn color_task_minimized() -> u64 { return 1612980784; }        # #60242230
+fn color_task_icon_terminal() -> u64 { return 4281714539; }    # #FF35C76B
+fn color_indicator_normal() -> u64 { return 1354290421; }      # #50B8D4F5
+fn color_browser_fill() -> u64 { return 4293951552; }          # #FFF08040 (warm orange, deliberately distinct from the rest of the blue/green palette so the browser's globe icon reads at a glance across launcher/titlebar/taskbar)
+fn color_browser_mark() -> u64 { return 4280948744; }          # #FF2A1808 (dark line color for the globe's equator/meridian, drawn on top of color_browser_fill)
+fn color_launcher_body() -> u64 { return 3893632044; }         # #E8141C2C
+fn color_cursor() -> u64 { return 4293980405; }                # #FFF0F0F5
+fn color_control_base() -> u64 { return 3222809408; }           # #C0182B40
+fn color_control_hover() -> u64 { return 2689433507; }          # #A04D7FA3
+fn color_control_minimize() -> u64 { return 4293636938; }       # #FFEBB34A
+fn color_control_maximize() -> u64 { return 4283220080; }       # #FF4CC070
+fn color_login_card() -> u64 { return 3860144696; }             # #E6152238
+fn color_login_error() -> u64 { return 4293745256; }            # #FFED5A68
+fn color_startup_overlay() -> u64 { return 2684882972; }        # #A008101C
+fn color_startup_text_muted() -> u64 { return 4288397055; }     # #FF9BBEFF
+# Deep background bottom-stop for the loading/login screens' backdrop
+# gradient (render_loading, render_login) -- darker than the desktop
+# wallpaper gradient it replaces there since neither screen has the real
+# wallpaper bitmap composited behind it.
+
+# 5x7 bitmap glyph masks for the loading/login screens (render_loading,
+# render_login), encoded the same way as the DEMON wordmark's existing
+# inline literals: row r's five columns pack into bits [5r, 5r+4]. D/E/M/O/N
+# already exist as inline literals in render_brand/render_window; these are
+# the additional letters those two screens need ("DEMONOS", "USER",
+# "PASSWORD", "LOADING"), named instead of inlined since there are enough of
+# them here to make raw literals unreadable.
+fn glyph_a() -> u64 { return 18842895918; }
+fn glyph_b() -> u64 { return 16694887983; }
+fn glyph_c() -> u64 { return 15603893806; }
+fn glyph_d() -> u64 { return 16694953519; }
+fn glyph_e() -> u64 { return 33321092159; }
+fn glyph_g() -> u64 { return 15621588526; }
+fn glyph_i() -> u64 { return 33424543903; }
+fn glyph_l() -> u64 { return 33320633377; }
+fn glyph_m() -> u64 { return 18842572657; }
+fn glyph_n() -> u64 { return 18842703473; }
+fn glyph_o() -> u64 { return 15621211694; }
+fn glyph_p() -> u64 { return 1108854319; }
+fn glyph_r() -> u64 { return 18561353263; }
+fn glyph_s() -> u64 { return 16660235326; }
+fn glyph_u() -> u64 { return 15621211697; }
+fn glyph_t() -> u64 { return 4433514655; }
+fn glyph_h() -> u64 { return 18842895921; }
+fn glyph_w() -> u64 { return 19182306865; }
+fn glyph_colon() -> u64 { return 134217856; }
+# Digit glyphs (Wave 10 of the EDE port): added for the menu-bar uptime
+# clock, a native port of ede-panel's Clock applet idea (the original reads
+# a real wall clock; this reads MakoAbi.ticks(), the only time source that
+# exists here -- see Desktop.desktop_draw_clock). Same 5x7 bitmap format as
+# the letter glyphs above (glyph_pixel: 5 columns, 7 rows, bit = row*5+col).
+fn glyph_0() -> u64 { return 15623448110; }
+fn glyph_1() -> u64 { return 15170932932; }
+fn glyph_2() -> u64 { return 33357578798; }
+fn glyph_3() -> u64 { return 15619998254; }
+fn glyph_4() -> u64 { return 8891181448; }
+fn glyph_5() -> u64 { return 15620127807; }
+fn glyph_6() -> u64 { return 15621129262; }
+fn glyph_7() -> u64 { return 2216829471; }
+fn glyph_8() -> u64 { return 15621113390; }
+fn glyph_9() -> u64 { return 15620589102; }
+# Launcher search box (Wave 12): the typed query is packed 8 bits per
+# character into a single u64 (byte i = (query / pow256(i)) mod 256,
+# little-endian -- character 0 is always the low byte, which is why Enter-
+# matching in the keydown handler is a plain "query mod 256") rather than
+# stored in a separate memory buffer. MKO doesn't implicitly widen a
+# vptr<u8> read to u64 (tried that first; the native backend rejects it),
+# and this sidesteps the type mismatch entirely instead of adding another
+# hardcoded heap-relative address to the dependent-address map in
+# kernel/userspace.h.
+fn pow256(count: u64) -> u64 {
+    result: u64 = 1;
+    step: u64 = 0;
+    while step < count { result = result * 256; step = step + 1; }
+    return result;
+}
+
+# Maps a decoded lowercase-ASCII keypress to its bitmap glyph, for drawing
+# the launcher search box's typed text. Only covers the letters this font
+# actually has (see the glyph_a..glyph_w definitions above) -- f/j/k/q/v/x/
+# y/z render blank (mask 0), the same bitmap-font limitation every other
+# text surface in this shell already has.
+fn letter_glyph(code: u64) -> u64 {
+    if code == 97 { return glyph_a(); }
+    if code == 98 { return glyph_b(); }
+    if code == 99 { return glyph_c(); }
+    if code == 100 { return glyph_d(); }
+    if code == 101 { return glyph_e(); }
+    if code == 103 { return glyph_g(); }
+    if code == 104 { return glyph_h(); }
+    if code == 105 { return glyph_i(); }
+    if code == 108 { return glyph_l(); }
+    if code == 109 { return glyph_m(); }
+    if code == 110 { return glyph_n(); }
+    if code == 111 { return glyph_o(); }
+    if code == 112 { return glyph_p(); }
+    if code == 114 { return glyph_r(); }
+    if code == 115 { return glyph_s(); }
+    if code == 116 { return glyph_t(); }
+    if code == 117 { return glyph_u(); }
+    if code == 119 { return glyph_w(); }
+    return 0;
+}
+
+fn digit_glyph(value: u64) -> u64 {
+    if value == 0 { return glyph_0(); }
+    if value == 1 { return glyph_1(); }
+    if value == 2 { return glyph_2(); }
+    if value == 3 { return glyph_3(); }
+    if value == 4 { return glyph_4(); }
+    if value == 5 { return glyph_5(); }
+    if value == 6 { return glyph_6(); }
+    if value == 7 { return glyph_7(); }
+    if value == 8 { return glyph_8(); }
+    return glyph_9();
+}
+
+# Write "desktop.winN" (12 bytes, no terminator needed -- channel names are
+# length-prefixed) into scratch memory. window_id is a scheduler pid, always
+# a single decimal digit while SCHEDULER_PROCESS_LIMIT stays at 8, which
+# keeps this deterministic name scheme (both compositor and client derive
+# the same channel name from the window id, so no name bytes ever need to
+# travel over the wire) simple instead of needing general multi-digit or
+# string-building support the kernel profile does not have.
+fn write_event_channel_name(name: vptr<u8>, window_id: u64) -> u64 {
+    vptr_write_u8(name, 100);
+    vptr_write_u8(vptr_offset_u8(name, 1), 101);
+    vptr_write_u8(vptr_offset_u8(name, 2), 115);
+    vptr_write_u8(vptr_offset_u8(name, 3), 107);
+    vptr_write_u8(vptr_offset_u8(name, 4), 116);
+    vptr_write_u8(vptr_offset_u8(name, 5), 111);
+    vptr_write_u8(vptr_offset_u8(name, 6), 112);
+    vptr_write_u8(vptr_offset_u8(name, 7), 46);
+    vptr_write_u8(vptr_offset_u8(name, 8), 119);
+    vptr_write_u8(vptr_offset_u8(name, 9), 105);
+    vptr_write_u8(vptr_offset_u8(name, 10), 110);
+    digit: u64 = window_id - (window_id / 10) * 10;
+    vptr_write_u8(vptr_offset_u8(name, 11), 48 + digit);
+    return 0;
+}
+
+# Connect to window_id's event channel by name and send it a 4-word event
+# packet (opcode_serial = version|opcode<<16 in low32, serial in high32;
+# word2 and word3 are the message's own payload -- word3 unused/zero for
+# CLICK, the decoded key value for KEY). Shared by both the keyboard-
+# forwarding and content-area-click-forwarding call sites in
+# compositor_main so the connect/build/send/close sequence -- and its
+# failure tolerance (a slow/unready client must never take down the whole
+# desktop, so a failed connect or send is silently dropped, not fatal) --
+# exists once instead of twice. name_scratch/packet_scratch are caller-
+# owned addresses (event_address+32 and pixel_address respectively at every
+# real call site) rather than fixed globals, since this runs mid-frame
+# while those buffers are already in active use for other things.
+fn send_window_event(name_scratch: u64, packet_scratch: u64, window_id: u64,
+                     opcode_serial: u64, word2: u64, word3: u64) -> u64 {
+    name: vptr<u8> = vptr_from_u8(name_scratch);
+    name_length: u64 = 12;
+    if window_id >= 2097152 {
+        # DemonX is itself the native client for every X11 window. Route its
+        # native input packet into the display server's blocking channel so
+        # input wakes it without polling per-window queues.
+        # "demonx.display.0", packed little-endian four bytes at a time.
+        name_words: vptr<u32> = vptr_from_u32(name_scratch);
+        vptr_write_u32(name_words, 1869440356);
+        vptr_write_u32(vptr_offset_u32(name_words, 1), 1680767086);
+        vptr_write_u32(vptr_offset_u32(name_words, 2), 1819308905);
+        vptr_write_u32(vptr_offset_u32(name_words, 3), 808352097);
+        name_length = 16;
+    } else {
+        write_event_channel_name(name, window_id);
+    }
+    send_channel: u64 = MakoAbi.channel_connect(name_scratch, name_length);
+    if send_channel == u64_max() { return 0; }
+    # Only words 0-3 carry real content; every receiving client's parser
+    # (window_event_client.mko, window_client.mko's new event loop) only
+    # ever reads those, so words 4-7 are sent as whatever this buffer
+    # already held (stale render scratch) rather than an explicit zero-fill
+    # loop that would cost real inlined bytes for output nothing reads.
+    packet: vptr<u64> = vptr_from_u64(packet_scratch);
+    vptr_write_u64(packet, opcode_serial);
+    vptr_write_u64(vptr_offset_u64(packet, 1), window_id);
+    vptr_write_u64(vptr_offset_u64(packet, 2), word2);
+    vptr_write_u64(vptr_offset_u64(packet, 3), word3);
+    MakoAbi.channel_send(send_channel, packet_scratch, 64);
+    MakoAbi.handle_close(send_channel);
+    return 0;
+}
+
+# Scratch buffer for spawn()'s path argument, right after
+# EFFECT_REQUEST_BASE (3359616 + 80 bytes = 3359696), well inside the free
+# heap before USER_STACK_PAGE (see the header comment's memory-layout
+# notes). spawn() caps path length at 127 bytes; the paths actually used
+# here are 29-31 bytes.
+fn spawn_path_ptr() -> vptr<u64> {
+    return vptr_from_u64(3359696);
+}
+
+# Launch a real new window by spawning one of three RAMFS-seeded clients
+# (see grub/grub-test.cfg and grub/grub.cfg): kind 0 is the terminal,
+# kind 1 is the native C calculator, kind 2 is Demon Web. All need IPC (bit
+# 6) and SURFACE (bit 9) capabilities to create a window and share a drawn
+# surface with the compositor, matching exactly what the kernel boot test
+# grants the same two binaries (CAPABILITY_SERVICE_IPC |
+# CAPABILITY_SERVICE_SURFACE = 576) -- spawn() itself has no capability
+# gate of its own (any process may call it), so this mask is the real
+# access control for what the spawned child can do. Path bytes are packed
+# 8-per-word (little-endian ASCII, zero-padded) and written via
+# vptr_write_u64 instead of one vptr_write_u8 call per character: MKO's
+# native backend fully inlines every call site with no code sharing (see
+# the RAMFS_DATA_MAX/USERSPACE_CODE_PAGES notes elsewhere in this file),
+# so 42 individual byte-writes for two ~30-byte paths was real,
+# measurable binary bloat that pushed this file's compiled size past the
+# 30-page process code budget; 8 word-writes covers the same bytes.
+fn spawn_app(kind: u64) -> u64 {
+    path: vptr<u64> = spawn_path_ptr();
+    # Full terminal, counter, and browser client paths packed little-endian,
+    # 8 ASCII bytes
+    # per word -- not the 12-byte "/system/bin/" prefix packed separately
+    # from each suffix, since that would leave 4 zero-padding bytes
+    # between them instead of the suffix continuing the byte stream (this
+    # was a real bug caught before shipping: the two halves must be
+    # packed as one continuous string, not independently padded). Word 0
+    # happens to be identical for both paths (the shared prefix fits
+    # exactly within the first 8 bytes), so it's written once outside the
+    # branch. Every word is built via pack_words(low32, high32) rather
+    # than a raw decimal literal: MKO's native backend mis-encodes large
+    # 64-bit decimal constants as floating-point (see u64_max()'s comment
+    # for the same issue), which showed up here as an assembler "junk
+    # after expression" error on these specific packed-ASCII values.
+    # kind 1 is the persistent graphical C calculator; kind 2 is the native
+    # document browser. The browser additionally receives STORAGE (bit 4)
+    # so file:/// locations read real RAMFS documents; no other launcher
+    # child receives that capability. window-client.elf stays a separate, deliberately
+    # one-shot binary that several kernel.c boot tests still rely on for
+    # its draw-once-and-exit contract, so it could not also be made to
+    # loop without breaking those tests.
+    vptr_write_u64(path, pack_words(1937339183, 795698548));
+    length: u64 = 30;
+    if kind == 0 {
+        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 1836213620));
+        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1818324585, 1768710957));
+        vptr_write_u64(vptr_offset_u64(path, 3), pack_words(779382373, 6712421));
+        length = 31;
+    } else if kind == 2 {
+        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 2003792482));
+        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(762471795, 1701407843));
+        vptr_write_u64(vptr_offset_u64(path, 3), pack_words(1697543278, 26220));
+    } else {
+        vptr_write_u64(vptr_offset_u64(path, 1), pack_words(795765090, 1668047203));
+        vptr_write_u64(vptr_offset_u64(path, 2), pack_words(1952541813, 1697542767));
+        vptr_write_u64(vptr_offset_u64(path, 3), 26220);
+        length = 26;
+    }
+    service_mask: u64 = 576;
+    if kind == 2 { service_mask = 1616; }
+    return MakoAbi.spawn(3359696, length, service_mask);
+}
+
+fn draw_glyph(display: u64, request_address: u64, pixel_address: u64,
+              position: u64, mask: u64, foreground: u64) -> u64 {
+    request: vptr<u64> = vptr_from_u64(request_address);
+    pixels: vptr<u64> = vptr_from_u64(pixel_address);
+    index: u64 = 0;
+    while index < 35 {
+        left: u64 = glyph_pixel(mask, index, foreground);
+        right: u64 = 4281028161;
+        if index + 1 < 35 { right = glyph_pixel(mask, index + 1, foreground); }
+        vptr_write_u64(vptr_offset_u64(pixels, index / 2),
+                       left + right * 4294967296);
+        index = index + 2;
+    }
+    vptr_write_u64(request, position - (position / 4294967296) * 4294967296);
+    vptr_write_u64(vptr_offset_u64(request, 1), position / 4294967296);
+    vptr_write_u64(vptr_offset_u64(request, 2), 5);
+    vptr_write_u64(vptr_offset_u64(request, 3), 7);
+    vptr_write_u64(vptr_offset_u64(request, 4), pixel_address);
+    vptr_write_u64(vptr_offset_u64(request, 5), 0);
+    if MakoAbi.display_submit(display, request_address) != 0 { return 1; }
+    return 0;
+}
+
+# Submit exact clipped rectangles in buffer-sized horizontal strips. This
+# keeps scene geometry pixel-accurate without allocating a full framebuffer.
+fn draw_rect(display: u64, request_address: u64, pixel_address: u64,
+             position: u64, size: u64, color: u64) -> u64 {
+    request: vptr<u64> = vptr_from_u64(request_address);
+    pixels: vptr<u64> = vptr_from_u64(pixel_address);
+    x: u64 = position - (position / 4294967296) * 4294967296;
+    y: u64 = position / 4294967296;
+    width: u64 = size - (size / 4294967296) * 4294967296;
+    height: u64 = size / 4294967296;
+    if width == 0 or height == 0 { return 0; }
+    stripe_limit: u64 = 4096 / width;
+    if stripe_limit == 0 { stripe_limit = 1; }
+    packed: u64 = color + color * 4294967296;
+    offset_y: u64 = 0;
+    while offset_y < height {
+        stripe_h: u64 = stripe_limit;
+        if offset_y + stripe_h > height { stripe_h = height - offset_y; }
+        count: u64 = width * stripe_h;
+        index: u64 = 0;
+        while index < count {
+            vptr_write_u64(vptr_offset_u64(pixels, index / 2), packed);
+            index = index + 2;
+        }
+        vptr_write_u64(request, x);
+        vptr_write_u64(vptr_offset_u64(request, 1), y + offset_y);
+        vptr_write_u64(vptr_offset_u64(request, 2), width);
+        vptr_write_u64(vptr_offset_u64(request, 3), stripe_h);
+        vptr_write_u64(vptr_offset_u64(request, 4), pixel_address);
+        vptr_write_u64(vptr_offset_u64(request, 5), 0);
+        if MakoAbi.display_submit(display, request_address) != 0 { return 1; }
+        offset_y = offset_y + stripe_h;
+    }
+    return 0;
+}
+
+# The four effect primitives below all submit a single 10-word request to
+# MakoAbi.display_submit_effect and draw straight onto the real backbuffer
+# in one kernel-side call -- no striping loop, unlike draw_rect, since
+# there is no user-space pixel buffer size limit to work around here. They
+# use their own dedicated 80-byte scratch buffer (EFFECT_REQUEST_BASE, right
+# after the window table -- see table_ptr()'s comment) rather than the
+# draw_rect/draw_glyph request buffer, which is only 64 bytes (6 words) and
+# sits immediately before the pixel-fill scratch region with no slack.
+# Word layout: kind, x, y, width, height, radius, arg1, arg2, arg3, flags.
+#
+# submit_effect packs (kind,flags), (radius,arg1), and (arg2,arg3) into
+# three u64 words each, the same low32/high32 trick position/size already
+# use -- the native backend caps functions at six parameters (verified: a
+# first attempt at seven params, then a second at nine, both failed
+# `mako native` with "more than six parameters"). kind is always 0-3 and
+# flags is always 0-1 (DISPLAY_SUBMIT_PRESENT), so packing them costs
+# nothing.
+fn effect_request_ptr() -> vptr<u64> {
+    return vptr_from_u64(3359616);
+}
+
+fn submit_effect(display: u64, kind_flags: u64, position: u64, size: u64,
+                 radius_arg1: u64, arg2_arg3: u64) -> u64 {
+    request: vptr<u64> = effect_request_ptr();
+    vptr_write_u64(request, low32(kind_flags));
+    vptr_write_u64(vptr_offset_u64(request, 1), low32(position));
+    vptr_write_u64(vptr_offset_u64(request, 2), high32(position));
+    vptr_write_u64(vptr_offset_u64(request, 3), low32(size));
+    vptr_write_u64(vptr_offset_u64(request, 4), high32(size));
+    vptr_write_u64(vptr_offset_u64(request, 5), low32(radius_arg1));
+    vptr_write_u64(vptr_offset_u64(request, 6), high32(radius_arg1));
+    vptr_write_u64(vptr_offset_u64(request, 7), low32(arg2_arg3));
+    vptr_write_u64(vptr_offset_u64(request, 8), high32(arg2_arg3));
+    vptr_write_u64(vptr_offset_u64(request, 9), high32(kind_flags));
+    return MakoAbi.display_submit_effect(display, 3359616);
+}
+
+# radius fits comfortably in 32 bits (well under the 4096-pixel display
+# limits already enforced elsewhere), so pack_words(radius, argb) never
+# loses precision -- same reasoning applies to every radius/thickness/
+# spread value packed below.
+fn draw_rounded_rect(display: u64, position: u64, size: u64, radius: u64,
+                     argb: u64, flags: u64) -> u64 {
+    return submit_effect(display, pack_words(0, flags), position, size,
+                         pack_words(radius, argb), 0);
+}
+
+# thickness/border_argb/fill_argb must be pre-packed by the caller via
+# pack_words since rounded-border needs one more value than the 6-parameter
+# budget allows: radius_thickness = pack_words(radius, thickness),
+# border_fill = pack_words(border_argb, fill_argb).
+fn draw_rounded_border(display: u64, position: u64, size: u64,
+                       radius_thickness: u64, border_fill: u64,
+                       flags: u64) -> u64 {
+    return submit_effect(display, pack_words(1, flags), position, size,
+                         radius_thickness, border_fill);
+}
+
+fn draw_gradient_v(display: u64, position: u64, size: u64, top_argb: u64,
+                   bottom_argb: u64, flags: u64) -> u64 {
+    return submit_effect(display, pack_words(2, flags), position, size,
+                         pack_words(0, top_argb), bottom_argb);
+}
+
+fn draw_shadow(display: u64, position: u64, size: u64, radius: u64,
+              spread: u64, argb: u64) -> u64 {
+    return submit_effect(display, pack_words(3, 0), position, size,
+                         pack_words(radius, argb), spread);
+}
+
+# Blit the kernel-embedded desktop wallpaper (assets/Flowers.jpg) into the
+# given rect. The kernel reads the source image from the same x/y offset, so
+# any region request stays aligned with the full-screen picture.
+fn draw_wallpaper(display: u64, position: u64, size: u64) -> u64 {
+    return submit_effect(display, pack_words(4, 0), position, size, 0, 0);
+}
+
+# Blit one Fluent titlebar-control icon: close/hover, minimize/hover,
+# maximize/hover, at its native 10x10 size.
+fn draw_ui_icon(display: u64, position: u64, icon_index: u64) -> u64 {
+    return submit_effect(display, pack_words(5, 0), position,
+                         pack_words(10, 10), pack_words(0, icon_index), 0);
+}
+
+# Blit the diamond start-button logo at its native 22x22 size.
+fn draw_start_logo(display: u64, position: u64) -> u64 {
+    return submit_effect(display, pack_words(6, 0), position,
+                         pack_words(22, 22), 0, 0);
+}
+
+# Blit an icon from the embedded Fluent shell atlas:
+# terminal, folder, browser, application, settings, home.
+fn draw_shell_icon(display: u64, position: u64, icon_index: u64) -> u64 {
+    return submit_effect(display, pack_words(7, 0), position,
+                         pack_words(22, 22), pack_words(0, icon_index), 0);
+}
+
+fn mapped_pixel(address: u64, index: u64) -> u64 {
+    word: u64 = vptr_read_u64(vptr_offset_u64(vptr_from_u64(address), index / 2));
+    if index - (index / 2) * 2 == 0 { return low32(word); }
+    return high32(word);
+}
+
+# Present the terminal's full-width logical surface as a 320x80 desktop canvas.
+# The 5:4 nearest-neighbour scale keeps text compact. Scaling uses
+# compositor-owned 320x10 tiles, keeping every
+# transfer below the ABI's 4096-pixel cap.
+fn render_terminal_surface(display: u64, request_address: u64, pixel_address: u64,
+                           source_address: u64, x: u64, y: u64) -> u64 {
+    request: vptr<u64> = vptr_from_u64(request_address);
+    pixels: vptr<u64> = vptr_from_u64(pixel_address);
+    tile: u64 = 0;
+    while tile < 8 {
+        target_index: u64 = 0;
+        while target_index < 3200 {
+            target_x: u64 = target_index - (target_index / 320) * 320;
+            target_y: u64 = tile * 10 + target_index / 320;
+            source_x: u64 = target_x * 4 / 5;
+            source_y: u64 = target_y * 4 / 5;
+            left: u64 = mapped_pixel(source_address, source_y * 256 + source_x);
+            target_index = target_index + 1;
+            target_x = target_index - (target_index / 320) * 320;
+            target_y = tile * 10 + target_index / 320;
+            source_x = target_x * 4 / 5;
+            source_y = target_y * 4 / 5;
+            right: u64 = mapped_pixel(source_address, source_y * 256 + source_x);
+            vptr_write_u64(vptr_offset_u64(pixels, (target_index - 1) / 2),
+                           left + right * 4294967296);
+            target_index = target_index + 1;
+        }
+        vptr_write_u64(request, x);
+        vptr_write_u64(vptr_offset_u64(request, 1), y + tile * 10);
+        vptr_write_u64(vptr_offset_u64(request, 2), 320);
+        vptr_write_u64(vptr_offset_u64(request, 3), 10);
+        vptr_write_u64(vptr_offset_u64(request, 4), pixel_address);
+        vptr_write_u64(vptr_offset_u64(request, 5), 0);
+        if MakoAbi.display_submit(display, request_address) != 0 { return 1; }
+        tile = tile + 1;
+    }
+    return 0;
+}
+
+# --- Window table accessors -------------------------------------------------
+# WINDOW_LIMIT slots of 8 words (64 bytes) each, starting at WINDOW_TABLE_BASE.
+# Slots are addressed by vptr offset arithmetic (offset in u64 words).
+
+fn slot_word_offset(slot: u64, word: u64) -> u64 {
+    return slot * 10 + word;
+}
+
+fn table_ptr() -> vptr<u64> {
+    return vptr_from_u64(3358976);
+}
+
+fn slot_state(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 0)));
+}
+
+fn slot_set_state(slot: u64, state: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 0)), state);
+    return 0;
+}
+
+fn slot_visible(slot: u64) -> u64 {
+    state: u64 = slot_state(slot);
+    if state == 1 or state == 3 { return 1; }
+    return 0;
+}
+
+fn slot_minimized(slot: u64) -> u64 {
+    state: u64 = slot_state(slot);
+    if state == 2 or state == 4 { return 1; }
+    return 0;
+}
+
+fn slot_id(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 1))));
+}
+
+fn slot_zorder(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 1))));
+}
+
+fn slot_set_id_zorder(slot: u64, id: u64, z: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 1)), id + z * 4294967296);
+    return 0;
+}
+
+fn slot_x(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 2))));
+}
+
+fn slot_y(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 2))));
+}
+
+fn slot_set_position(slot: u64, x: u64, y: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 2)), x + y * 4294967296);
+    return 0;
+}
+
+fn slot_width(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 3))));
+}
+
+fn slot_height(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 3))));
+}
+
+fn slot_set_size(slot: u64, width: u64, height: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 3)), width + height * 4294967296);
+    return 0;
+}
+
+fn slot_surface_id(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 4)));
+}
+
+fn slot_set_surface_id(slot: u64, surface_id: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 4)), surface_id);
+    return 0;
+}
+
+fn slot_mapped_address(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 5)));
+}
+
+fn slot_set_mapped_address(slot: u64, address: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 5)), address);
+    return 0;
+}
+
+fn slot_restore_x(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 6))));
+}
+
+fn slot_restore_y(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 6))));
+}
+
+fn slot_restore_width(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 7))));
+}
+
+fn slot_restore_height(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 7))));
+}
+
+fn slot_set_restore_geometry(slot: u64, x: u64, y: u64,
+                             width: u64, height: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 6)),
+                   x + y * 4294967296);
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 7)),
+                   width + height * 4294967296);
+    return 0;
+}
+
+# word8: open/close transition state. anim_kind: 0 = settled (fully open,
+# draw normally), 1 = opening (scale/fade in from CREATE), 2 = closing
+# (scale/fade out, slot stays occupied and gets drawn until the animation
+# finishes, then the real close happens). anim_start_phase is the
+# global anim_phase value when the transition began, so elapsed progress is
+# always (current anim_phase - anim_start_phase), matching the same
+# phase-based clock the existing breathing-glow pulse already uses instead
+# of a separate real-time source.
+fn slot_anim_kind(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 8))));
+}
+
+fn slot_anim_start_phase(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 8))));
+}
+
+fn slot_set_anim(slot: u64, kind: u64, start_phase: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 8)),
+                   start_phase + kind * 4294967296);
+    return 0;
+}
+
+# Animation duration in anim_phase ticks (the idle heartbeat advances this
+# roughly every 250ms, so 8 ticks is about a 2 second transition).
+fn anim_transition_ticks() -> u64 { return 8; }
+
+# word9: which app kind this window belongs to, for icon/titlebar chrome
+# selection in render_window/render_taskbar. The terminal (window_id 7,
+# fixed) is always app_kind_terminal() regardless of this word -- it has
+# its own dedicated rendering path already keyed on slot_id -- so this word
+# only matters for disambiguating generic-window-protocol slots (kind
+# generic vs. kind browser) that would otherwise look identical to the
+# compositor. Defaults to app_kind_generic() (0) so any slot never tagged
+# by a spawn (e.g. boot-test window-client instances, which CREATE outside
+# the launcher's spawn_app path) still renders with the plain app icon
+# rather than an uninitialized/stale value.
+fn app_kind_generic() -> u64 { return 0; }
+fn app_kind_terminal() -> u64 { return 1; }
+fn app_kind_browser() -> u64 { return 2; }
+
+# Explicit composition layers follow Yutani's useful separation of normal
+# windows, menus, and overlays while remaining native to DemonOS. Desktop
+# background/panels are drawn outside the client table, so client slots begin
+# at NORMAL. Future shell surfaces can opt into MENU or OVERLAY without
+# inventing magic z-order numbers.
+fn layer_normal() -> u64 { return 1; }
+fn layer_menu() -> u64 { return 2; }
+fn layer_overlay() -> u64 { return 3; }
+
+fn slot_app_kind(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return low32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9))));
+}
+
+fn slot_layer(slot: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    return high32(vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9))));
+}
+
+fn slot_set_app_kind(slot: u64, kind: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    current: u64 = vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)),
+                   kind + high32(current) * 4294967296);
+    return 0;
+}
+
+fn slot_set_layer(slot: u64, layer: u64) -> u64 {
+    table: vptr<u64> = table_ptr();
+    current: u64 = vptr_read_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)));
+    vptr_write_u64(vptr_offset_u64(table, slot_word_offset(slot, 9)),
+                   low32(current) + layer * 4294967296);
+    return 0;
+}
+
+fn slot_stack_key(slot: u64) -> u64 {
+    return slot_zorder(slot) + slot_layer(slot) * 1048576;
+}
+
+# Classify a pointer position against one window's frame into one of the
+# eight resize_direction_* zones, or 0 if the point isn't on a resizable
+# edge/corner at all. Corners are a 20x20 zone at each of the four window
+# corners (matching the original single SE grip's size, just now at all
+# four), checked before the plain edges so a point inside a corner square
+# never also matches an edge band. Edges are an 8px band along each side,
+# inset from the corner zones so the two never overlap. The titlebar (top
+# 32px, excluding its own corner zones) is deliberately excluded here since
+# that's the drag region, not a resize region.
+fn resize_hit_direction(hit_x: u64, hit_y: u64, hit_width: u64, hit_height: u64,
+                        live_x: u64, live_y: u64) -> u64 {
+    # Window creation only enforces a 32x32 minimum, well under the 40x40
+    # (2*20) corner-zone footprint this function assumes, so right-20/
+    # bottom-20 (and the -8 edge-band variants) would underflow to a huge
+    # u64 for a small enough window, silently disabling edge/corner resize
+    # on it rather than crashing -- still wrong, so clamp the zone sizes to
+    # what actually fits before using them.
+    right: u64 = hit_x + hit_width;
+    bottom: u64 = hit_y + hit_height;
+    corner: u64 = 20;
+    if hit_width / 2 < corner { corner = hit_width / 2; }
+    if hit_height / 2 < corner { corner = hit_height / 2; }
+    edge: u64 = 8;
+    if corner < edge { edge = corner; }
+    near_left: u64 = 0;
+    if live_x < hit_x + corner { near_left = 1; }
+    near_right: u64 = 0;
+    if live_x >= right - corner { near_right = 1; }
+    near_top: u64 = 0;
+    if live_y < hit_y + corner { near_top = 1; }
+    near_bottom: u64 = 0;
+    if live_y >= bottom - corner { near_bottom = 1; }
+    if near_bottom == 1 and near_right == 1 { return resize_direction_se(); }
+    if near_bottom == 1 and near_left == 1 { return resize_direction_sw(); }
+    if near_top == 1 and near_right == 1 { return resize_direction_ne(); }
+    if near_top == 1 and near_left == 1 { return resize_direction_nw(); }
+    if live_y >= bottom - edge and live_y < bottom and
+       live_x >= hit_x + corner and live_x < right - corner { return resize_direction_s(); }
+    if live_x >= right - edge and live_x < right and
+       live_y >= hit_y + corner and live_y < bottom - corner { return resize_direction_e(); }
+    if live_x >= hit_x and live_x < hit_x + edge and
+       live_y >= hit_y + corner and live_y < bottom - corner { return resize_direction_w(); }
+    return 0;
+}
+
+# Find the table slot holding window_id, or WINDOW_LIMIT (8) if not present.
+fn find_slot(window_id: u64) -> u64 {
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_state(slot) != 0 and slot_id(slot) == window_id { return slot; }
+        slot = slot + 1;
+    }
+    return 8;
+}
+
+fn find_free_slot() -> u64 {
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_state(slot) == 0 { return slot; }
+        slot = slot + 1;
+    }
+    return 8;
+}
+
+# The topmost (highest z-order) live slot, or 8 if the table is empty.
+fn find_top_slot() -> u64 {
+    best_slot: u64 = 8;
+    best_key: u64 = 0;
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_visible(slot) == 1 {
+            key: u64 = slot_stack_key(slot);
+            if best_slot == 8 or key > best_key {
+                best_slot = slot;
+                best_key = key;
+            }
+        }
+        slot = slot + 1;
+    }
+    return best_slot;
+}
+
+# Return the topmost visible client containing a device-space point. Cursor
+# selection, focus, clicks, and drag initiation all use this one routine so
+# they cannot disagree about which window owns a pixel.
+fn top_slot_at(x: u64, y: u64) -> u64 {
+    best_slot: u64 = 8;
+    best_key: u64 = 0;
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_visible(slot) == 1 and
+           x >= slot_x(slot) and x < slot_x(slot) + slot_width(slot) and
+           y >= slot_y(slot) and y < slot_y(slot) + slot_height(slot) {
+            key: u64 = slot_stack_key(slot);
+            if best_slot == 8 or key > best_key {
+                best_slot = slot;
+                best_key = key;
+            }
+        }
+        slot = slot + 1;
+    }
+    return best_slot;
+}
+
+# Close one compositor-owned window and return the next focused window id.
+# Surface mappings are released here so mouse, keyboard, and IPC close paths
+# cannot accidentally drift into different lifetime behavior. The slot is not
+# removed from the table immediately: it is marked closing (anim_kind 2) and
+# demoted to the bottom of the z-order so find_top_slot picks any other live
+# window as the next focus right away, while render_window keeps drawing this
+# slot -- fading it out -- until the idle heartbeat's settle scan (see
+# anim_transition_ticks()) finishes the transition and actually frees it.
+fn close_slot(slot: u64, anim_phase: u64) -> u64 {
+    surface_id: u64 = slot_surface_id(slot);
+    # Found and fixed via EDDE's own close_slot this session (see its
+    # matching comment): the fade-out animation keeps rendering this slot
+    # after this function returns, and without clearing the mapped address
+    # too, it kept reading mapped_pixel() off the page surface_unmap() had
+    # just invalidated -- a real page fault on Alt+F4 for any window with a
+    # mapped surface (e.g. the terminal), not something new to this port.
+    if surface_id != 0 {
+        MakoAbi.surface_unmap(surface_id);
+        # The mapping and the granted capability are separate resources.
+        # Once close animation uses the mapped snapshot, release the handle
+        # so the owner can reclaim the kernel surface after its own close.
+        MakoAbi.handle_close(surface_id);
+        slot_set_mapped_address(slot, 0);
+    }
+    slot_set_anim(slot, 2, anim_phase);
+    slot_set_id_zorder(slot, slot_id(slot), 0);
+    top: u64 = find_top_slot();
+    if top == 8 { return 0; }
+    return slot_id(top);
+}
+
+# Super+D is a reversible show-desktop action. If any window is visible it is
+# minimized; if all live windows are minimized, their exact normal/maximized
+# states are restored and the topmost one regains focus.
+fn toggle_show_desktop() -> u64 {
+    visible: u64 = 0;
+    slot: u64 = 0;
+    while slot < 8 {
+        if slot_visible(slot) == 1 { visible = 1; }
+        slot = slot + 1;
+    }
+    slot = 0;
+    while slot < 8 {
+        if visible == 1 and slot_visible(slot) == 1 {
+            slot_set_state(slot, slot_state(slot) + 1);
+        } else if visible == 0 and slot_minimized(slot) == 1 {
+            slot_set_state(slot, slot_state(slot) - 1);
+        }
+        slot = slot + 1;
+    }
+    if visible == 1 { return 0; }
+    top: u64 = find_top_slot();
+    if top == 8 { return 0; }
+    return slot_id(top);
+}
+
+# direction: 1 left, 2 right, 3 maximize/up, 4 restore-or-minimize/down.
+# All layouts stay inside the 624x388 work area between the two panels.
+fn snap_slot(slot: u64, direction: u64) -> u64 {
+    if slot >= 8 or slot_visible(slot) == 0 { return 0; }
+    state: u64 = slot_state(slot);
+    if direction == 4 {
+        if state == 3 {
+            slot_set_position(slot, slot_restore_x(slot), slot_restore_y(slot));
+            slot_set_size(slot, slot_restore_width(slot), slot_restore_height(slot));
+            slot_set_state(slot, 1);
+        } else {
+            slot_set_state(slot, state + 1);
+        }
+        return 0;
+    }
+    if direction == 3 {
+        if state == 3 {
+            slot_set_position(slot, slot_restore_x(slot), slot_restore_y(slot));
+            slot_set_size(slot, slot_restore_width(slot), slot_restore_height(slot));
+            slot_set_state(slot, 1);
+            return 0;
+        }
+        slot_set_restore_geometry(slot, slot_x(slot), slot_y(slot),
+                                  slot_width(slot), slot_height(slot));
+        slot_set_position(slot, 8, 36);
+        slot_set_size(slot, 624, 388);
+        slot_set_state(slot, 3);
+        return 0;
+    }
+    snap_x: u64 = 8;
+    if direction == 2 { snap_x = 324; }
+    if state == 1 and slot_x(slot) == snap_x and slot_y(slot) == 36 and
+       slot_width(slot) == 308 and slot_height(slot) == 388 {
+        slot_set_position(slot, slot_restore_x(slot), slot_restore_y(slot));
+        slot_set_size(slot, slot_restore_width(slot), slot_restore_height(slot));
+        return 0;
+    }
+    if state == 1 {
+        slot_set_restore_geometry(slot, slot_x(slot), slot_y(slot),
+                                  slot_width(slot), slot_height(slot));
+    }
+    slot_set_position(slot, snap_x, 36);
+    slot_set_size(slot, 308, 388);
+    slot_set_state(slot, 1);
+    return 0;
+}
+
+# Draw one window's full decoration (shadow, body, focused title bar,
+# minimize/maximize/close controls, resize grip) plus its content -- either
+# the real zero-copy client surface
+# if one is mapped, or flat placeholder content otherwise. Pulled out of
+# render_scene into its own function so render_scene's own stack frame stays
+# small regardless of how much per-window drawing work this does.
+fn render_window(display: u64, request_address: u64, pixel_address: u64,
+                 slot: u64, focused_window: u64, anim_and_cursor: u64) -> u64 {
+    anim_phase: u64 = low32(anim_and_cursor);
+    cursor_x: u64 = unpack_cursor_x(high32(anim_and_cursor));
+    cursor_y: u64 = unpack_cursor_y(high32(anim_and_cursor));
+    accent_theme: u64 = unpack_accent_theme(high32(anim_and_cursor));
+    win_x: u64 = slot_x(slot);
+    win_y: u64 = slot_y(slot);
+    win_width: u64 = slot_width(slot);
+    win_height: u64 = slot_height(slot);
+
+    # Open-transition progress: 0 = just created (fully covered by the
+    # materialize overlay below), anim_transition_ticks() = fully settled
+    # (overlay alpha reaches 0, drawn but invisible). Computed once here and
+    # applied as one overlay rect drawn last, rather than scaling every
+    # individual draw call's own geometry -- touching every one of this
+    # function's ~15 draw sites for a real scale transform would be a much
+    # larger, more error-prone change for a MKO backend that already emits
+    # a full inlined instruction sequence per call site (see the compositor
+    # binary-size notes on RAMFS_DATA_MAX/USERSPACE_CODE_PAGES).
+    window_anim_kind: u64 = slot_anim_kind(slot);
+    anim_elapsed: u64 = 0;
+    if window_anim_kind == 1 or window_anim_kind == 2 {
+        current_start: u64 = slot_anim_start_phase(slot);
+        if anim_phase >= current_start { anim_elapsed = anim_phase - current_start; }
+    }
+    open_overlay_alpha: u64 = 0;
+    if window_anim_kind == 1 and anim_elapsed < anim_transition_ticks() {
+        open_overlay_alpha = 224 - anim_elapsed * 224 / anim_transition_ticks();
+    }
+    # Close transition: the same backdrop-colored wash used for the open
+    # materialize effect, but growing instead of shrinking, so the window
+    # visibly dissolves into the desktop instead of vanishing on the frame
+    # its CLOSE message arrives. Kept as one more overlay alpha value (not a
+    # separate draw path) so every return site below only needs to combine
+    # open_overlay_alpha and close_overlay_alpha once instead of duplicating
+    # a second full overlay block per site.
+    close_overlay_alpha: u64 = 0;
+    if window_anim_kind == 2 {
+        close_overlay_alpha = anim_elapsed * 255 / anim_transition_ticks();
+        if close_overlay_alpha > 255 { close_overlay_alpha = 255; }
+    }
+    overlay_alpha: u64 = open_overlay_alpha;
+    if close_overlay_alpha > overlay_alpha { overlay_alpha = close_overlay_alpha; }
+
+    # Soft drop-shadow behind the whole frame, then a single rounded
+    # border+fill call for the body (radius 6, Win7-style silver frame with
+    # a light blue-gray outline) instead of the old flat offset-shadow-rect
+    # plus separate flat body rect.
+    if draw_shadow(display, pack_words(win_x, win_y), pack_words(win_width, win_height),
+                   6, 16, color_shadow()) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(win_x, win_y),
+                           pack_words(win_width, win_height),
+                           pack_words(6, 1), pack_words(color_window_border(),
+                           color_window_body()), 0) != 0 { return 91; }
+    focused: u64 = 0;
+    if slot_id(slot) == focused_window { focused = 1; }
+    title_top: u64 = color_titlebar_unfocused_top();
+    title_bottom: u64 = color_titlebar_unfocused_bottom();
+    if focused == 1 {
+        # Slow breathing glow on the focused titlebar only: a 40-tick
+        # (~2s at the 20Hz heartbeat) triangle wave nudges the top-of-
+        # gradient color brighter and back, so the active window reads as
+        # alive without any per-frame float math or extra draw calls.
+        glow: u64 = anim_pulse(anim_phase, 40, 24);
+        title_top = argb_lighten(accent_fill(accent_theme), glow);
+        title_bottom = accent_titlebar_bottom(accent_theme);
+    }
+    if draw_gradient_v(display, pack_words(win_x, win_y),
+                       pack_words(win_width, 32), title_top, title_bottom,
+                       0) != 0 { return 91; }
+    # Aero glass sheen across the top of the titlebar, drawn before any
+    # text/controls so it reads as a highlight under them, not over them.
+    if draw_gradient_v(display, pack_words(win_x, win_y),
+                       pack_words(win_width, 10), color_glass_sheen_top(),
+                       color_glass_sheen_bottom(), 0) != 0 { return 91; }
+    title_a: u64 = glyph_a();
+    title_b: u64 = glyph_p();
+    title_c: u64 = glyph_p();
+    title_d: u64 = 0;
+    if slot_id(slot) == 7 {
+        title_a = glyph_t();
+        title_b = glyph_e();
+        title_c = glyph_r();
+        title_d = glyph_m();
+    } else if slot_app_kind(slot) == app_kind_browser() {
+        title_a = glyph_w();
+        title_b = glyph_e();
+        title_c = glyph_b();
+    }
+    title_text_color: u64 = color_title_text();
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(win_x + 8, win_y + 12), title_a, title_text_color) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(win_x + 16, win_y + 12), title_b, title_text_color) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(win_x + 24, win_y + 12), title_c, title_text_color) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address,
+                  pack_words(win_x + 32, win_y + 12), title_d, title_text_color) != 0 { return 108; }
+    # macOS traffic-light color semantics in the familiar Vista/Windows
+    # right-side order. This is intentional hybrid identity, not a direct
+    # copy of either system; the established hit rectangles stay unchanged.
+    minimize_x: u64 = win_x + win_width - 76;
+    minimize_fill: u64 = color_control_minimize();
+    if cursor_x >= minimize_x and cursor_x < minimize_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 {
+        minimize_fill = argb_lighten(color_control_minimize(), 24);
+    }
+    if draw_rounded_border(display, pack_words(minimize_x, win_y + 8),
+                           pack_words(18, 16), pack_words(8, 1),
+                           pack_words(color_glass_sheen_top(), minimize_fill),
+                           0) != 0 { return 91; }
+    minimize_icon: u64 = 2;
+    if cursor_x >= minimize_x and cursor_x < minimize_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 { minimize_icon = 3; }
+    if draw_ui_icon(display, pack_words(win_x + win_width - 72, win_y + 11),
+                    minimize_icon) != 0 { return 91; }
+    maximize_x: u64 = win_x + win_width - 52;
+    maximize_fill: u64 = color_control_maximize();
+    if cursor_x >= maximize_x and cursor_x < maximize_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 {
+        maximize_fill = argb_lighten(color_control_maximize(), 24);
+    }
+    if draw_rounded_border(display, pack_words(maximize_x, win_y + 8),
+                           pack_words(18, 16), pack_words(8, 1),
+                           pack_words(color_glass_sheen_top(), maximize_fill),
+                           0) != 0 { return 91; }
+    maximize_icon: u64 = 4;
+    if cursor_x >= maximize_x and cursor_x < maximize_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 { maximize_icon = 5; }
+    if draw_ui_icon(display, pack_words(maximize_x + 4, win_y + 11),
+                    maximize_icon) != 0 { return 91; }
+    close_x: u64 = win_x + win_width - 28;
+    close_fill: u64 = color_btn_close();
+    if cursor_x >= close_x and cursor_x < close_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 {
+        close_fill = argb_lighten(color_btn_close(), 24);
+    }
+    if draw_rounded_border(display, pack_words(close_x, win_y + 8),
+                           pack_words(18, 16), pack_words(8, 1),
+                           pack_words(color_glass_sheen_top(), close_fill),
+                           0) != 0 { return 91; }
+    close_icon: u64 = 0;
+    if cursor_x >= close_x and cursor_x < close_x + 18 and
+       cursor_y >= win_y + 8 and cursor_y < win_y + 24 { close_icon = 1; }
+    if draw_ui_icon(display, pack_words(win_x + win_width - 24, win_y + 11),
+                    close_icon) != 0 { return 91; }
+    if slot_state(slot) != 3 {
+        if draw_rect(display, request_address, pixel_address,
+                     pack_words(win_x + win_width - 14, win_y + win_height - 14),
+                     pack_words(10, 10), color_resize_grip()) != 0 { return 91; }
+    }
+
+    win_mapped_address: u64 = slot_mapped_address(slot);
+    if win_mapped_address != 0 {
+        # Zero-copy path: client pixels stay out-of-band and the compositor
+        # only owns final ordering of the submit.
+        request: vptr<u64> = vptr_from_u64(request_address);
+        if slot_id(slot) == 7 or slot_app_kind(slot) == app_kind_browser() {
+            # A terminal uses the standard window geometry. Paint its entire
+            # client area as terminal space, then cover it with the complete
+            # terminal grid. The final eight scaled pixels are clipped by the
+            # standard client width.
+            if draw_rect(display, request_address, pixel_address,
+                         pack_words(win_x + 4, win_y + 36),
+                         pack_words(win_width - 8, win_height - 40),
+                         color_terminal_bg()) != 0 { return 107; }
+            if render_terminal_surface(display, request_address, pixel_address,
+                                       win_mapped_address, win_x + 4,
+                                       win_y + 36) != 0 { return 107; }
+            if overlay_alpha > 0 {
+                if draw_rounded_rect(display, pack_words(win_x, win_y),
+                                     pack_words(win_width, win_height), 6,
+                                     argb_with_alpha(color_shadow(), overlay_alpha),
+                                     0) != 0 { return 91; }
+            }
+            return 0;
+        }
+        vptr_write_u64(request, win_x + 16);
+        vptr_write_u64(vptr_offset_u64(request, 1), win_y + 48);
+        vptr_write_u64(vptr_offset_u64(request, 2), 64);
+        vptr_write_u64(vptr_offset_u64(request, 3), 64);
+        vptr_write_u64(vptr_offset_u64(request, 4), win_mapped_address);
+        vptr_write_u64(vptr_offset_u64(request, 5), 0);
+        if MakoAbi.display_submit(display, request_address) != 0 { return 107; }
+        if overlay_alpha > 0 {
+            if draw_rounded_rect(display, pack_words(win_x, win_y),
+                                 pack_words(win_width, win_height), 6,
+                                 argb_with_alpha(color_shadow(), overlay_alpha),
+                                 0) != 0 { return 91; }
+        }
+        return 0;
+    }
+    # No zero-copy mapping available for this window right now (at most
+    # USER_SURFACE_MAP_SLOTS=4 real surfaces can be mapped read-only in this
+    # process at once, matching SURFACE_LIMIT=4 system-wide). Draw flat
+    # placeholder content instead of fabricating pixels we do not have.
+    if win_width <= 12 or win_height <= 44 {
+        if overlay_alpha > 0 {
+            if draw_rounded_rect(display, pack_words(win_x, win_y),
+                                 pack_words(win_width, win_height), 6,
+                                 argb_with_alpha(color_shadow(), overlay_alpha),
+                                 0) != 0 { return 91; }
+        }
+        return 0;
+    }
+    if draw_rect(display, request_address, pixel_address,
+                 pack_words(win_x + 6, win_y + 38),
+                 pack_words(win_width - 12, win_height - 44), color_placeholder()) != 0 {
+        return 91;
+    }
+    # Blinking text caret in the placeholder body: a classic on/off blink
+    # (half the anim_phase period solid, half hidden) instead of a smooth
+    # pulse, since a caret reads as "alive" precisely because it snaps rather
+    # than fades. Only drawn once the placeholder area is tall/wide enough
+    # to hold it with real margin.
+    if win_width > 32 and win_height > 64 {
+        blink_position: u64 = anim_phase - (anim_phase / 20) * 20;
+        if blink_position < 10 {
+            if draw_rect(display, request_address, pixel_address,
+                         pack_words(win_x + 14, win_y + 46),
+                         pack_words(2, 12), color_title_text()) != 0 {
+                return 91;
+            }
+        }
+    }
+    # Window open/close transition overlay: a backdrop-colored wash over the
+    # whole frame, covering everything else this function drew, fading in on
+    # create and back out on close so a window visibly solidifies/dissolves
+    # instead of popping in or vanishing instantly. See overlay_alpha's
+    # computation near the top of this function and slot_anim_kind/
+    # slot_set_anim in the window table accessors for how the transition
+    # state is tracked, and close_slot for where a close transition starts.
+    if overlay_alpha > 0 {
+        if draw_rounded_rect(display, pack_words(win_x, win_y),
+                             pack_words(win_width, win_height), 6,
+                             argb_with_alpha(color_shadow(), overlay_alpha),
+                             0) != 0 { return 91; }
+    }
+    return 0;
+}
+
+# Legacy launcher removed: Desktop/desktop.mko owns the applications menu.
+
+# Draw the settings popover: a small panel above the gear button (see
+# render_taskbar) with three clickable accent-color swatches, the one real
+# working control this first settings pass ships (see compositor_main's
+# live_x >= 520 and live_y >= 310 hit-test for what makes these swatches
+# clickable). Picking a swatch takes effect immediately -- accent_theme is
+# in-session state only (see pending_spawn_kind's comment on why MKO has no
+# persistent storage to write a real settings file to), not saved across a
+# reboot. Box geometry: x=[520,632), y=[310,420) -- clear of both the top
+# bar (ends y=28) and the taskbar (starts y=432), and to the left edge lines
+# up with the status cluster above it for a tidy top-right stack.
+fn render_settings(display: u64, request_address: u64, pixel_address: u64,
+                   accent_theme: u64) -> u64 {
+    if draw_shadow(display, pack_words(520, 310), pack_words(112, 110), 6, 14,
+                   color_shadow()) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(520, 310), pack_words(112, 110),
+                           pack_words(6, 1), pack_words(color_window_border(),
+                           color_launcher_body()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(522, 312), pack_words(108, 10),
+                       color_glass_sheen_top(), color_glass_sheen_bottom(),
+                       0) != 0 { return 91; }
+    label_y: u64 = 320;
+    if draw_glyph(display, request_address, pixel_address, 532 + label_y * 4294967296,
+                  glyph_a(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 540 + label_y * 4294967296,
+                  glyph_c(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 548 + label_y * 4294967296,
+                  glyph_c(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 556 + label_y * 4294967296,
+                  glyph_e(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 564 + label_y * 4294967296,
+                  glyph_n(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 572 + label_y * 4294967296,
+                  glyph_t(), color_title_text()) != 0 { return 108; }
+
+    # Three swatches, one per accent_theme value (0=blue, 1=purple,
+    # 2=green), each a filled circle; the currently-active theme gets a
+    # bright ring around it instead of just being visually similar to the
+    # others, so the selection state is unambiguous at a glance.
+    swatch: u64 = 0;
+    while swatch < 3 {
+        swatch_x: u64 = 536 + swatch * 32;
+        swatch_y: u64 = 340;
+        if draw_rounded_rect(display, pack_words(swatch_x, swatch_y), pack_words(24, 24),
+                             12, accent_fill(swatch), 0) != 0 { return 91; }
+        if swatch == accent_theme {
+            if draw_rounded_border(display, pack_words(swatch_x - 3, swatch_y - 3),
+                                   pack_words(30, 30), pack_words(15, 2),
+                                   pack_words(color_title_text(), 0), 0) != 0 { return 91; }
+        }
+        swatch = swatch + 1;
+    }
+    return 0;
+}
+
+# Legacy task panel removed: Desktop/desktop.mko owns panels and tasks.
+
+# Legacy brand and shortcut renderers removed: Desktop/desktop.mko owns them.
+
+# Commit a completed startup-screen frame the same way render_scene commits
+# the desktop: a 1x1 present-flagged submit. Without this, render_loading/
+# render_login would draw correctly into the backbuffer but never actually
+# present it, so display_frames_presented() would stay frozen for the
+# entire startup sequence -- and the kernel boot test's frame-deadline
+# checks (run_users_until_frame) count real presented frames, not repaints
+# in the abstract, so a startup screen that never presents looks identical
+# to a hung compositor from the test's point of view.
+fn startup_frame_commit(display: u64, request_address: u64, pixel_address: u64) -> u64 {
+    frame_request: vptr<u64> = vptr_from_u64(request_address);
+    frame_pixel: vptr<u64> = vptr_from_u64(pixel_address);
+    vptr_write_u64(frame_pixel, color_cursor());
+    vptr_write_u64(frame_request, 639);
+    vptr_write_u64(vptr_offset_u64(frame_request, 1), 0);
+    vptr_write_u64(vptr_offset_u64(frame_request, 2), 1);
+    vptr_write_u64(vptr_offset_u64(frame_request, 3), 1);
+    vptr_write_u64(vptr_offset_u64(frame_request, 4), pixel_address);
+    vptr_write_u64(vptr_offset_u64(frame_request, 5), 1);
+    if MakoAbi.display_submit(display, request_address) != 0 { return 109; }
+    return 0;
+}
+
+# Startup loading screen. The real wallpaper is already available by the time
+# the userspace display service starts, so startup now reveals the session's
+# visual identity immediately instead of switching from an unrelated flat
+# gradient. The short progress pass represents compositor/session preparation;
+# the three state lamps correspond to display, input, and shell readiness.
+fn render_loading(display: u64, request_address: u64, pixel_address: u64,
+                  anim_phase: u64) -> u64 {
+    if draw_wallpaper(display, 0, pack_words(640, 480)) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address, 0, pack_words(640, 480),
+                 color_startup_overlay()) != 0 { return 91; }
+    if draw_shadow(display, pack_words(176, 126), pack_words(288, 224),
+                   12, 20, color_shadow()) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(176, 126), pack_words(288, 224),
+                           pack_words(12, 1), pack_words(color_window_border(),
+                           color_login_card()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(178, 128), pack_words(284, 12),
+                       color_glass_sheen_top(), color_glass_sheen_bottom(),
+                       0) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(296, 144), pack_words(48, 48),
+                           pack_words(14, 1), pack_words(color_start_border(),
+                           accent_fill(0)), 0) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(309, 157)) != 0 { return 91; }
+
+    glyph_y: u64 = 212;
+    if draw_glyph(display, request_address, pixel_address, 268 + glyph_y * 4294967296,
+                  glyph_d(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 276 + glyph_y * 4294967296,
+                  glyph_e(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 284 + glyph_y * 4294967296,
+                  glyph_m(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 292 + glyph_y * 4294967296,
+                  glyph_o(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 300 + glyph_y * 4294967296,
+                  glyph_n(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 308 + glyph_y * 4294967296,
+                  glyph_o(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 316 + glyph_y * 4294967296,
+                  glyph_s(), color_title_text()) != 0 { return 108; }
+
+    if draw_rounded_border(display, pack_words(220, 252), pack_words(200, 10),
+                           pack_words(5, 1), pack_words(color_control_hover(),
+                           color_task_normal()), 0) != 0 { return 91; }
+    fill_phase: u64 = anim_phase;
+    if fill_phase > 20 { fill_phase = 20; }
+    fill_width: u64 = 4 + fill_phase * 192 / 20;
+    if draw_rounded_rect(display, pack_words(224, 254), pack_words(fill_width, 6),
+                         3, accent_fill(0), 0) != 0 { return 91; }
+
+    # Three real session stages: display and input capabilities were opened
+    # above compositor_main; shell becomes ready as this transition finishes.
+    stage: u64 = 0;
+    while stage < 3 {
+        stage_color: u64 = color_task_minimized();
+        if fill_phase >= (stage + 1) * 5 { stage_color = color_task_icon_terminal(); }
+        if draw_rounded_rect(display, pack_words(292 + stage * 22, 280),
+                             pack_words(12, 12), 6, stage_color, 0) != 0 { return 91; }
+        stage = stage + 1;
+    }
+    caption_y: u64 = 312;
+    if draw_glyph(display, request_address, pixel_address, 288 + caption_y * 4294967296,
+                  glyph_s(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 296 + caption_y * 4294967296,
+                  glyph_e(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 304 + caption_y * 4294967296,
+                  glyph_s(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 312 + caption_y * 4294967296,
+                  glyph_s(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 320 + caption_y * 4294967296,
+                  glyph_i(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 328 + caption_y * 4294967296,
+                  glyph_o(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 336 + caption_y * 4294967296,
+                  glyph_n(), color_startup_text_muted()) != 0 { return 108; }
+    return startup_frame_commit(display, request_address, pixel_address);
+}
+
+# Native single-user session gate. login_state packs password length in its
+# low nibble and the failed-attempt flag in bit 4. The password itself never
+# enters the renderer; only masked dots do. This remains a deliberately small
+# local-account foundation (persistent multi-user policy needs disk storage),
+# but it is a real gate: input is edited, Enter/click authenticates, failure
+# remains on this screen, and Super+L returns here from the live desktop.
+fn render_login(display: u64, request_address: u64, pixel_address: u64,
+                login_state: u64, cursor_position: u64, anim_phase: u64) -> u64 {
+    password_length: u64 = login_state - (login_state / 16) * 16;
+    login_error: u64 = login_state / 16;
+    cursor_x: u64 = unpack_cursor_x(cursor_position);
+    cursor_y: u64 = unpack_cursor_y(cursor_position);
+
+    if draw_wallpaper(display, 0, pack_words(640, 480)) != 0 { return 91; }
+    if draw_rect(display, request_address, pixel_address, 0, pack_words(640, 480),
+                 color_startup_overlay()) != 0 { return 91; }
+    if draw_shadow(display, pack_words(176, 74), pack_words(288, 332),
+                   14, 22, color_shadow()) != 0 { return 91; }
+    card_border: u64 = color_window_border();
+    if login_error != 0 { card_border = color_login_error(); }
+    if draw_rounded_border(display, pack_words(176, 74), pack_words(288, 332),
+                           pack_words(14, 1), pack_words(card_border,
+                           color_login_card()), 0) != 0 { return 91; }
+    if draw_gradient_v(display, pack_words(178, 76), pack_words(284, 14),
+                       color_glass_sheen_top(), color_glass_sheen_bottom(),
+                       0) != 0 { return 91; }
+    if draw_rounded_border(display, pack_words(294, 98), pack_words(52, 52),
+                           pack_words(26, 1), pack_words(accent_border_bright(0),
+                           accent_fill(0)), 0) != 0 { return 91; }
+    if draw_start_logo(display, pack_words(309, 113)) != 0 { return 91; }
+
+    glyph_y: u64 = 170;
+    if draw_glyph(display, request_address, pixel_address, 292 + glyph_y * 4294967296,
+                  glyph_d(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 300 + glyph_y * 4294967296,
+                  glyph_e(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 308 + glyph_y * 4294967296,
+                  glyph_m(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 316 + glyph_y * 4294967296,
+                  glyph_o(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 324 + glyph_y * 4294967296,
+                  glyph_n(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 332 + glyph_y * 4294967296,
+                  glyph_o(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 340 + glyph_y * 4294967296,
+                  glyph_s(), color_title_text()) != 0 { return 108; }
+
+    # Fixed local identity. Authentication is for its editable password,
+    # while the account itself remains intentionally singular until the
+    # persistent account database milestone.
+    if draw_rounded_rect(display, pack_words(214, 202), pack_words(212, 38), 8,
+                         color_task_normal(), 0) != 0 { return 91; }
+    if draw_rounded_rect(display, pack_words(224, 211), pack_words(20, 20), 10,
+                         accent_fill(0), 0) != 0 { return 91; }
+    user_glyph_y: u64 = 218;
+    if draw_glyph(display, request_address, pixel_address, 256 + user_glyph_y * 4294967296,
+                  glyph_d(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 264 + user_glyph_y * 4294967296,
+                  glyph_e(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 272 + user_glyph_y * 4294967296,
+                  glyph_m(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 280 + user_glyph_y * 4294967296,
+                  glyph_o(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 288 + user_glyph_y * 4294967296,
+                  glyph_n(), color_title_text()) != 0 { return 108; }
+
+    pass_label_y: u64 = 256;
+    if draw_glyph(display, request_address, pixel_address, 214 + pass_label_y * 4294967296,
+                  glyph_p(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 222 + pass_label_y * 4294967296,
+                  glyph_a(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 230 + pass_label_y * 4294967296,
+                  glyph_s(), color_startup_text_muted()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 238 + pass_label_y * 4294967296,
+                  glyph_s(), color_startup_text_muted()) != 0 { return 108; }
+    field_border: u64 = accent_border_bright(0);
+    if login_error != 0 { field_border = color_login_error(); }
+    if draw_rounded_border(display, pack_words(214, 270), pack_words(212, 36),
+                           pack_words(8, 1), pack_words(field_border,
+                           color_task_normal()), 0) != 0 { return 91; }
+    dot: u64 = 0;
+    while dot < password_length {
+        if draw_rounded_rect(display, pack_words(228 + dot * 14, 284),
+                             pack_words(8, 8), 4, color_title_text(), 0) != 0 { return 91; }
+        dot = dot + 1;
+    }
+    blink: u64 = anim_phase - (anim_phase / 20) * 20;
+    if blink < 10 and password_length < 8 {
+        if draw_rect(display, request_address, pixel_address,
+                     pack_words(228 + password_length * 14, 281),
+                     pack_words(2, 14), color_startup_text_muted()) != 0 { return 91; }
+    }
+    if login_error != 0 {
+        if draw_rounded_rect(display, pack_words(404, 282), pack_words(10, 10),
+                             5, color_login_error(), 0) != 0 { return 91; }
+    }
+
+    button_fill: u64 = accent_fill(0);
+    if cursor_x >= 214 and cursor_x < 426 and cursor_y >= 326 and cursor_y < 360 {
+        button_fill = argb_lighten(button_fill, 24);
+    }
+    if draw_rounded_border(display, pack_words(214, 326), pack_words(212, 34),
+                           pack_words(8, 1), pack_words(accent_border_bright(0),
+                           button_fill), 0) != 0 { return 91; }
+    login_label_y: u64 = 339;
+    if draw_glyph(display, request_address, pixel_address, 290 + login_label_y * 4294967296,
+                  glyph_e(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 298 + login_label_y * 4294967296,
+                  glyph_n(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 306 + login_label_y * 4294967296,
+                  glyph_t(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 314 + login_label_y * 4294967296,
+                  glyph_e(), color_title_text()) != 0 { return 108; }
+    if draw_glyph(display, request_address, pixel_address, 322 + login_label_y * 4294967296,
+                  glyph_r(), color_title_text()) != 0 { return 108; }
+    return startup_frame_commit(display, request_address, pixel_address);
+}
+
+# Render every live window back-to-front by z-order (selection sort over at
+# DemonWM session renderer. The native compositor remains responsible for
+# scanout, surface ordering, damage, and the hardware cursor, but
+# deliberately contributes no DemonOS panels, shortcuts, titlebars, shadows,
+# or taskbar. Every visible surface is submitted at its protocol geometry in
+# z order; decorations in this mode are ordinary DemonX surfaces created by
+# DemonWM itself.
+fn render_demonwm_backend(display: u64, request_address: u64,
+                          pixel_address: u64) -> u64 {
+    if draw_rect(display, request_address, pixel_address,
+                 pack_words(0, 0), pack_words(640, 480),
+                 4279245080) != 0 { return 91; } # #FF101820
+    drawn_mask: u64 = 0;
+    drawn_count: u64 = 0;
+    live_count: u64 = 0;
+    scan: u64 = 0;
+    while scan < 8 {
+        if slot_visible(scan) == 1 { live_count = live_count + 1; }
+        scan = scan + 1;
+    }
+    while drawn_count < live_count {
+        pick_slot: u64 = 8;
+        pick_z: u64 = 0;
+        slot: u64 = 0;
+        while slot < 8 {
+            if slot_visible(slot) == 1 {
+                mask_bit: u64 = 1;
+                shift: u64 = 0;
+                while shift < slot { mask_bit = mask_bit * 2; shift = shift + 1; }
+                already: u64 = drawn_mask / mask_bit;
+                already = already - (already / 2) * 2;
+                if already == 0 and
+                   (pick_slot == 8 or slot_stack_key(slot) < pick_z) {
+                    pick_slot = slot;
+                    pick_z = slot_stack_key(slot);
+                }
+            }
+            slot = slot + 1;
+        }
+        if pick_slot == 8 { drawn_count = live_count; }
+        else {
+            mapped: u64 = slot_mapped_address(pick_slot);
+            if mapped != 0 {
+                request: vptr<u64> = vptr_from_u64(request_address);
+                vptr_write_u64(request, slot_x(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 1), slot_y(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 2), slot_width(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 3), slot_height(pick_slot));
+                vptr_write_u64(vptr_offset_u64(request, 4), mapped);
+                vptr_write_u64(vptr_offset_u64(request, 5), 0);
+                if MakoAbi.display_submit(display, request_address) != 0 {
+                    return 107;
+                }
+            } else {
+                if draw_rect(display, request_address, pixel_address,
+                             pack_words(slot_x(pick_slot), slot_y(pick_slot)),
+                             pack_words(slot_width(pick_slot),
+                                        slot_height(pick_slot)),
+                             4280032545) != 0 { return 91; }
+            }
+            mask_bit: u64 = 1;
+            shift: u64 = 0;
+            while shift < pick_slot { mask_bit = mask_bit * 2; shift = shift + 1; }
+            drawn_mask = drawn_mask + mask_bit;
+            drawn_count = drawn_count + 1;
+        }
+    }
+    # Individual surface submissions update the compositor backbuffer. Publish
+    # the completed frame atomically; without this final commit, scanout keeps
+    # a mixture of stale loading-screen tiles and newly drawn DemonWM surfaces.
+    return startup_frame_commit(display, request_address, pixel_address);
+}
+
+# Render every live window back-to-front by z-order (selection sort over at
+# most 8 slots is simple and fast enough for this table size), decorations
+# first, then each window's own real zero-copy client surface if it has one
+# mapped, else flat placeholder content instead of forged pixels. Per-window
+# and per-launcher drawing live in their own functions (render_window,
+# render_launcher) precisely so this function's own frame stays small: it
+# only ever holds loop bookkeeping (drawn_mask, pick_slot, ...), never any
+# window's geometry locals directly.
+# anim_and_cursor packs anim_phase (low32) and the cursor's screen position
+# (high32, via pack_cursor) into one word -- see pack_cursor's comment for
+# why this needed packing instead of two more plain parameters.
+fn render_scene(display: u64, request_address: u64, pixel_address: u64,
+                focused_window: u64, anim_and_cursor: u64,
+                search_query: u64) -> u64 {
+    # launcher_open is folded into anim_and_cursor's packed cursor/theme/
+    # settings word (see unpack_launcher_open) since this function is
+    # already at MKO's 6-parameter ceiling with search_query threaded
+    # through for the launcher search box.
+    scene_launcher_open: u64 = unpack_launcher_open(high32(anim_and_cursor));
+    packed_cursor: u64 = high32(anim_and_cursor);
+    # Live window count, computed up front so the menu bar's activity bars
+    # (Wave 10 -- a native port of ede-panel's CpuMonitor/system-monitor
+    # applet spirit, real telemetry instead of a fake CPU percentage since
+    # there is no /proc here) can reflect it. The main back-to-front window
+    # draw loop below recomputes its own copy for the z-order scan; kept
+    # separate rather than shared since that loop's live_count also drives
+    # the drawn_mask bookkeeping and changing its scope here would risk
+    # that unrelated logic.
+    bg_window_count: u64 = 0;
+    bg_scan: u64 = 0;
+    while bg_scan < 8 {
+        if slot_visible(bg_scan) == 1 { bg_window_count = bg_window_count + 1; }
+        bg_scan = bg_scan + 1;
+    }
+    if Desktop.desktop_draw_background(display, request_address, pixel_address,
+                                       packed_cursor, bg_window_count,
+                                       MakoAbi.battery_present()) != 0 { return 91; }
+    # Menu-bar uptime clock (Wave 10 of the EDE port, native port of
+    # ede-panel's Clock applet). ~100 Hz PIT ticks -> seconds; see
+    # Desktop.desktop_draw_clock for why this reads MakoAbi.ticks() instead
+    # of a real wall clock (there isn't one).
+    total_seconds: u64 = MakoAbi.ticks() / 100;
+    if Desktop.desktop_draw_clock(display, request_address, pixel_address,
+                                  total_seconds, color_title_text()) != 0 { return 108; }
+    if Desktop.desktop_draw_shortcuts(display, request_address, pixel_address,
+                                      packed_cursor) != 0 { return 91; }
+
+    # Draw windows back-to-front: repeatedly pick the lowest not-yet-drawn
+    # z-order among live slots.
+    drawn_mask: u64 = 0;
+    drawn_count: u64 = 0;
+    live_count: u64 = 0;
+    scan: u64 = 0;
+    while scan < 8 {
+        if slot_visible(scan) == 1 { live_count = live_count + 1; }
+        scan = scan + 1;
+    }
+    while drawn_count < live_count {
+        pick_slot: u64 = 8;
+        pick_z: u64 = 0;
+        slot: u64 = 0;
+        while slot < 8 {
+            if slot_visible(slot) == 1 {
+                mask_bit: u64 = 1;
+                shift: u64 = 0;
+                while shift < slot { mask_bit = mask_bit * 2; shift = shift + 1; }
+                already: u64 = drawn_mask / mask_bit;
+                already = already - (already / 2) * 2;
+                if already == 0 and
+                   (pick_slot == 8 or slot_stack_key(slot) < pick_z) {
+                    pick_slot = slot;
+                    pick_z = slot_stack_key(slot);
+                }
+            }
+            slot = slot + 1;
+        }
+        if pick_slot == 8 { drawn_count = live_count; }
+        else {
+            window_status: u64 = render_window(display, request_address, pixel_address,
+                                               pick_slot, focused_window, anim_and_cursor);
+            if window_status != 0 { return window_status; }
+
+            mask_bit: u64 = 1;
+            shift: u64 = 0;
+            while shift < pick_slot { mask_bit = mask_bit * 2; shift = shift + 1; }
+            drawn_mask = drawn_mask + mask_bit;
+            drawn_count = drawn_count + 1;
+        }
+    }
+
+    taskbar_status: u64 = Desktop.desktop_draw_task_panel(
+        display, request_address, pixel_address, focused_window, anim_and_cursor);
+    if taskbar_status != 0 { return taskbar_status; }
+
+    if scene_launcher_open == 1 {
+        launcher_status: u64 = Desktop.desktop_draw_launcher(
+            display, request_address, pixel_address, packed_cursor,
+            unpack_accent_theme(packed_cursor), search_query);
+        if launcher_status != 0 { return launcher_status; }
+    }
+    if unpack_settings_open(high32(anim_and_cursor)) == 1 {
+        settings_status: u64 = render_settings(display, request_address, pixel_address,
+                                               unpack_accent_theme(high32(anim_and_cursor)));
+        if settings_status != 0 { return settings_status; }
+    }
+    # Commit the completed scene once. The scanout cursor is reapplied by the
+    # display backend after this present, independently of scene pixels.
+    frame_request: vptr<u64> = vptr_from_u64(request_address);
+    frame_pixel: vptr<u64> = vptr_from_u64(pixel_address);
+    vptr_write_u64(frame_pixel, color_cursor());
+    vptr_write_u64(frame_request, 639);
+    vptr_write_u64(vptr_offset_u64(frame_request, 1), 0);
+    vptr_write_u64(vptr_offset_u64(frame_request, 2), 1);
+    vptr_write_u64(vptr_offset_u64(frame_request, 3), 1);
+    vptr_write_u64(vptr_offset_u64(frame_request, 4), pixel_address);
+    vptr_write_u64(vptr_offset_u64(frame_request, 5), 1);
+    if MakoAbi.display_submit(display, request_address) != 0 { return 109; }
+    return 0;
+}
+
+fn compositor_main(service_name: u64) -> u64 {
+    request_address: u64 = 3342400;
+    pixel_address: u64 = 3342464;
+    event_address: u64 = pixel_address + 64;
+    server: u64 = MakoAbi.channel_create(service_name, 18);
+
+    # Clear the window table.
+    slot: u64 = 0;
+    while slot < 8 {
+        slot_set_state(slot, 0);
+        slot = slot + 1;
+    }
+    next_z: u64 = 1;
+    focused_window: u64 = 0;
+
+    input_handle: u64 = MakoAbi.service_open(8);
+    display: u64 = MakoAbi.service_open(7);
+    dimensions: u64 = MakoAbi.display_dimensions(display);
+    width: u64 = dimensions / 1000;
+    height: u64 = dimensions - width * 1000;
+    if width == 0 or height == 0 { MakoAbi.exit(100); return 100; }
+    if width != 640 { MakoAbi.exit(width); return width; }
+    if height != 480 { MakoAbi.exit(height); return height; }
+
+    # Startup sequence state: a short session-preparation phase, then a real
+    # single-user login gate for the local "demon" account. Both are driven from
+    # inside the main loop below (see the deadline checks near "ready == 3"
+    # and the render dispatch at the bottom), not a separate blocking loop
+    # here, specifically so real window-protocol IPC arriving during startup
+    # (CREATE, etc.) is still fully processed by the same code path that
+    # handles it once the desktop is live -- only which screen gets drawn
+    # differs. Loading is wall-clock gated; authentication is input gated.
+    # boot_phase counts up on idle ticks for loading progress separately from
+    # that real deadline.
+    # The scripted boot-test harness (see MakoAbi.boot_test_mode /
+    # grub-test.cfg) bypasses both phases immediately. Its deterministic
+    # pointer/keyboard contract begins as soon as the compositor is spawned;
+    # allowing even a short login timeout would correctly consume those
+    # synthetic events as locked-session input and make the unrelated window
+    # protocol assertions race the gate. The normal run ISO is independently
+    # covered by session-login-smoke and never receives this bypass. On a real
+    # interactive boot, loading lasts about 1.5 seconds and login remains until
+    # the correct password is submitted.
+    is_test_boot: u64 = MakoAbi.boot_test_mode();
+    is_demonwm_boot: u64 = MakoAbi.demonwm_mode();
+    loading_span: u64 = 150;
+    login_span: u64 = 0;
+    if is_test_boot == 1 { loading_span = 0; login_span = 0; }
+    # DemonWM is the session shell in this boot mode. Do not expose the
+    # legacy DemonOS compositor-owned loading/login artwork in front of it:
+    # bring up the neutral backend immediately and let DemonWM own every
+    # visible desktop element from its first mapped panel onward.
+    if is_demonwm_boot == 1 { loading_span = 0; login_span = 0; }
+    boot_phase: u64 = 0;
+    loading_deadline: u64 = MakoAbi.ticks() + loading_span;
+    login_deadline: u64 = loading_deadline + login_span;
+    # The credential gate has been removed: boot always goes straight from
+    # the loading splash to the live desktop, so login_done starts (and
+    # stays) true. render_login, the Super+L relock branch, and the
+    # password-entry key handling below are now permanently unreachable
+    # rather than deleted outright, since login_done==1 already makes every
+    # login_done==0 branch dead code without touching the surrounding
+    # control flow.
+    login_done: u64 = 1;
+    login_password: u64 = 0;
+    login_password_length: u64 = 0;
+    login_error: u64 = 0;
+
+    dragging: u64 = 0;
+    # 0 = not resizing, otherwise one of the resize_direction_* constants
+    # below, selecting which edge(s)/corner the drag moves.
+    resizing: u64 = 0;
+    launcher_open: u64 = 0;
+    # Launcher search box (Wave 12): search_length is how many characters
+    # have been typed; search_query packs them 8 bits each, low byte first
+    # (see pow256's comment). Both reset whenever the launcher opens.
+    search_length: u64 = 0;
+    search_query: u64 = 0;
+    super_chord: u64 = 0;
+    # Set right before spawn_app() fires (see its own comment for why this
+    # is safe) and consumed by the CREATE handler for whichever slot the
+    # newly spawned client lands in, tagging that slot's app_kind for icon/
+    # titlebar selection -- see the word9 comment in the window-table
+    # layout notes above.
+    pending_spawn_kind: u64 = app_kind_generic();
+    # Settings popover state (see render_settings/the gear button in
+    # render_taskbar). accent_theme is the one real in-session setting this
+    # first pass ships: 0=blue (default, behavior-preserving), 1=purple,
+    # 2=green -- picked by clicking a swatch in the popover, takes effect
+    # immediately on the very next repaint since every accent-aware color
+    # call already reads this value fresh each frame.
+    settings_open: u64 = 0;
+    accent_theme: u64 = 0;
+    cursor_x: u64 = 60;
+    cursor_y: u64 = 80;
+    if MakoAbi.display_cursor_move(display, cursor_x, cursor_y, 0) != 0 {
+        MakoAbi.exit(109); return 109;
+    }
+    drag_offset_x: u64 = 0;
+    drag_offset_y: u64 = 0;
+    # Always publish one initial frame, so the display is never left blank
+    # before the compositor's first real repaint.
+    dirty: u64 = 1;
+    # Keep a low-cost 20 Hz desktop heartbeat. Input and IPC still wake the
+    # compositor immediately, but an idle timeout guarantees the displayed
+    # scene cannot become permanently stale after boot. The same heartbeat
+    # now also drives a slow animation clock: anim_phase advances by one on
+    # every idle-timeout wake (see "ready == 3" below), giving the focused
+    # window's breathing glow (anim_pulse in render_window/render_taskbar) a
+    # real, monotonic time base without a separate timer subsystem.
+    next_frame_tick: u64 = MakoAbi.ticks() + 5;
+    anim_phase: u64 = 0;
+
+    # Stay alive as the desktop service. One blocking kernel wait covers both
+    # window-control IPC and unified input, avoiding a polling/busy loop.
+    # CREATE/CLOSE/FOCUS/MOVE/POINTER/KEY are all accepted here, at any time,
+    # bounded only by table capacity -- there is no boot-time client quota.
+    while true {
+        wait_ticks: u64 = 1;
+        pacing_now: u64 = MakoAbi.ticks();
+        if pacing_now < next_frame_tick {
+            wait_ticks = next_frame_tick - pacing_now;
+        }
+        ready: u64 = MakoAbi.compositor_wait(server, input_handle,
+                                              pixel_address, event_address,
+                                              wait_ticks);
+        repaint: u64 = 0;
+        if ready == 1 {
+            update: vptr<u64> = vptr_from_u64(pixel_address);
+            update_header: u64 = vptr_read_u64(update);
+            update_low: u64 = low32(update_header);
+            update_opcode: u64 = update_low / 65536;
+            update_identity: u64 = vptr_read_u64(vptr_offset_u64(update, 1));
+            update_window: u64 = low32(update_identity);
+
+            if update_opcode == 2 {
+                # CREATE: accept dynamically, any time, bounded only by table
+                # capacity. A full table is a graceful rejection, not fatal --
+                # the compositor keeps running for everyone else.
+                free_slot: u64 = find_free_slot();
+                if free_slot != 8 and find_slot(update_window) == 8 {
+                    geometry: u64 = vptr_read_u64(vptr_offset_u64(update, 2));
+                    win_x: u64 = low32(geometry);
+                    win_y: u64 = high32(geometry);
+                    sizing: u64 = vptr_read_u64(vptr_offset_u64(update, 3));
+                    win_width: u64 = low32(sizing);
+                    win_height: u64 = high32(sizing);
+                    minimum_window: u64 = 32;
+                    if win_width >= minimum_window and
+                       win_height >= minimum_window and
+                       win_width <= 640 and win_height <= 480 and
+                       win_x + win_width <= 640 and win_y + win_height <= 480 {
+                        slot_set_state(free_slot, 1);
+                        slot_set_id_zorder(free_slot, update_window, next_z);
+                        next_z = next_z + 1;
+                        slot_set_position(free_slot, win_x, win_y);
+                        slot_set_size(free_slot, win_width, win_height);
+                        slot_set_restore_geometry(free_slot, win_x, win_y,
+                                                  win_width, win_height);
+                        slot_set_surface_id(free_slot, 0);
+                        slot_set_mapped_address(free_slot, 0);
+                        slot_set_anim(free_slot, 1, anim_phase);
+                        # Consume pending_spawn_kind (set by the launcher's
+                        # click handler right before spawn_app fired) into
+                        # this slot's word9, then reset it back to generic so
+                        # a later CREATE from an unrelated source -- a
+                        # boot-test spawn, or the terminal's own fixed-id
+                        # window -- never inherits a stale tagged kind.
+                        slot_set_app_kind(free_slot, pending_spawn_kind);
+                        slot_set_layer(free_slot, layer_normal());
+                        pending_spawn_kind = app_kind_generic();
+                        focused_window = update_window;
+
+                        # Up to USER_SURFACE_MAP_SLOTS (4) surfaces can be
+                        # mapped read-only into this process at once, which
+                        # matches SURFACE_LIMIT (4) system-wide -- so every
+                        # window that shares a surface gets a real zero-copy
+                        # mapping until that cap is hit; beyond it,
+                        # surface_map fails gracefully and the window falls
+                        # back to flat placeholder content.
+                        surface_word: u64 = vptr_read_u64(vptr_offset_u64(update, 4));
+                        surface_id: u64 = low32(surface_word);
+                        if surface_id != 0 {
+                            candidate_address: u64 = MakoAbi.surface_map(surface_id);
+                            if candidate_address != 0 and candidate_address != u64_max() {
+                                slot_set_surface_id(free_slot, surface_id);
+                                slot_set_mapped_address(free_slot, candidate_address);
+                            }
+                        }
+                        repaint = 1;
+                    }
+                }
+            } else if update_opcode == 9 {
+                # CLOSE: remove from the table, release this window's surface
+                # mapping (if any -- frees its USER_SURFACE_MAP slot for a
+                # later window), and pick a new focus.
+                target_slot: u64 = find_slot(update_window);
+                if target_slot != 8 {
+                    if focused_window == update_window {
+                        focused_window = close_slot(target_slot, anim_phase);
+                    } else { close_slot(target_slot, anim_phase); }
+                    repaint = 1;
+                }
+            } else if update_opcode == 6 {
+                # FOCUS: explicit client request to raise + focus a window.
+                target_slot: u64 = find_slot(update_window);
+                if target_slot != 8 {
+                    if slot_minimized(target_slot) == 1 {
+                        slot_set_state(target_slot, slot_state(target_slot) - 1);
+                    }
+                    slot_set_id_zorder(target_slot, update_window, next_z);
+                    next_z = next_z + 1;
+                    focused_window = update_window;
+                    repaint = 1;
+                }
+            } else if update_opcode == 10 {
+                # MOVE: geometry update for a window that must actually exist
+                # in the table right now -- no hardcoded id.
+                target_slot: u64 = find_slot(update_window);
+                if target_slot != 8 and slot_state(target_slot) == 1 {
+                    update_geometry: u64 = vptr_read_u64(vptr_offset_u64(update, 2));
+                    new_x: u64 = low32(update_geometry);
+                    new_y: u64 = high32(update_geometry);
+                    update_size: u64 = vptr_read_u64(vptr_offset_u64(update, 3));
+                    new_width: u64 = low32(update_size);
+                    new_height: u64 = high32(update_size);
+                    minimum_move_width: u64 = 160;
+                    minimum_move_height: u64 = 120;
+                    if new_width >= minimum_move_width and
+                       new_height >= minimum_move_height and
+                       new_x + new_width <= 640 and new_y + new_height <= 480 {
+                        slot_set_position(target_slot, new_x, new_y);
+                        slot_set_size(target_slot, new_width, new_height);
+                        repaint = 1;
+                    }
+                }
+            } else if update_opcode == 12 {
+                # POINTER_WARP: DemonX resolved the destination window and
+                # sends absolute desktop coordinates. Move both the software
+                # cursor state and the kernel's native overlay immediately.
+                pointer_geometry: u64 =
+                    vptr_read_u64(vptr_offset_u64(update, 2));
+                cursor_x = low32(pointer_geometry);
+                cursor_y = high32(pointer_geometry);
+                if cursor_x > 639 { cursor_x = 639; }
+                if cursor_y > 479 { cursor_y = 479; }
+                MakoAbi.display_cursor_move(display, cursor_x, cursor_y, 0);
+                repaint = 1;
+            }
+            # Unrecognized/irrelevant opcodes on the control channel are
+            # ignored rather than treated as fatal protocol violations --
+            # only a malformed/adversarial payload should be rejected, and
+            # rejection here just means "no state change", not a crash.
+        } else if ready == 2 {
+            live_event: vptr<u64> = vptr_from_u64(event_address);
+            live_word: u64 = vptr_read_u64(vptr_offset_u64(live_event, 1));
+            live_type: u64 = low32(live_word) - (low32(live_word) / 65536) * 65536;
+            live_x: u64 = high32(live_word);
+            live_y_word: u64 = vptr_read_u64(vptr_offset_u64(live_event, 2));
+            live_y: u64 = low32(live_y_word);
+            if live_type >= 3 {
+                cursor_x = live_x;
+                cursor_y = live_y;
+                # Contextual cursor icon: an active drag/resize wins outright
+                # (the icon should track what's actually happening, not
+                # flicker if the pointer strays off the exact edge zone
+                # mid-drag), otherwise a fresh hit test against the topmost
+                # window under the pointer picks a resize/hand/text icon, and
+                # the desktop default (0) covers everywhere else.
+                pointer_icon: u64 = 0;
+                if resizing != 0 { pointer_icon = resizing + 3; }
+                else if dragging == 1 { pointer_icon = 1; }
+                else {
+                    icon_slot: u64 = top_slot_at(cursor_x, cursor_y);
+                    if icon_slot != 8 {
+                        isx: u64 = slot_x(icon_slot);
+                        isy: u64 = slot_y(icon_slot);
+                        isw: u64 = slot_width(icon_slot);
+                        ish: u64 = slot_height(icon_slot);
+                        icon_direction: u64 = 0;
+                        if slot_state(icon_slot) != 3 {
+                            icon_direction = resize_hit_direction(isx, isy, isw, ish,
+                                                                  cursor_x, cursor_y);
+                        }
+                        if icon_direction != 0 { pointer_icon = icon_direction + 3; }
+                        else if cursor_x >= isx + isw - 76 and cursor_x < isx + isw - 10 and
+                                cursor_y >= isy + 8 and cursor_y < isy + 24 {
+                            pointer_icon = 1;
+                        } else if slot_id(icon_slot) == 7 and cursor_y >= isy + 36 {
+                            # Terminal content area: text-selection I-beam.
+                            pointer_icon = 2;
+                        }
+                    } else if cursor_x >= 12 and cursor_x < 84 and
+                              cursor_y >= 48 and cursor_y < 126 {
+                        pointer_icon = 1;
+                    } else if cursor_y >= 432 {
+                        # Taskbar band: start button and every live task chip
+                        # are clickable, matching compositor_main's own
+                        # live_y >= 432 hit-test band.
+                        pointer_icon = 1;
+                    }
+                }
+                # Login owns cursor semantics while the session is locked;
+                # do not expose resize/text affordances from windows hidden
+                # behind the gate.
+                if login_done == 0 {
+                    pointer_icon = 0;
+                    if cursor_x >= 214 and cursor_x < 426 and
+                       cursor_y >= 270 and cursor_y < 306 {
+                        pointer_icon = 2;
+                    } else if cursor_x >= 214 and cursor_x < 426 and
+                              cursor_y >= 326 and cursor_y < 360 {
+                        pointer_icon = 1;
+                    }
+                }
+                # Same tolerance as the key-delivery path below: a cursor
+                # move is routine, high-frequency live-loop traffic, not a
+                # one-time setup step, so a transient failure here should
+                # drop this one repaint rather than take down the whole
+                # desktop over a single missed cursor update.
+                MakoAbi.display_cursor_move(display, cursor_x, cursor_y, pointer_icon);
+                # X11 clients receive motion through DemonX's blocking display
+                # channel. Only content motion is forwarded; compositor-owned
+                # chrome, active native drags/resizes, and the login gate keep
+                # their existing native behavior.
+                if login_done == 1 and dragging == 0 and resizing == 0 {
+                    motion_slot: u64 = top_slot_at(cursor_x, cursor_y);
+                    if motion_slot != 8 and slot_id(motion_slot) >= 2097152 {
+                        motion_x: u64 = slot_x(motion_slot);
+                        motion_y: u64 = slot_y(motion_slot);
+                        if cursor_y >= motion_y + 32 {
+                            pointer_opcode_serial: u64 = pack_words(458753, 5);
+                            send_window_event(event_address + 32, pixel_address,
+                                              slot_id(motion_slot),
+                                              pointer_opcode_serial,
+                                              (cursor_x - motion_x) +
+                                              (cursor_y - motion_y) * 4294967296,
+                                              0);
+                        }
+                    }
+                }
+            }
+            if live_type == 3 { repaint = 1; }
+            key_now: u64 = MakoAbi.ticks();
+            if live_type == 1 and key_now < loading_deadline {
+                loading_deadline = key_now; repaint = 1;
+            } else if login_done == 0 {
+                # The login screen owns all input until authentication
+                # succeeds. Desktop shortcuts, taskbar clicks, and client
+                # forwarding remain unreachable behind the session gate.
+                if live_type == 1 {
+                    login_code_word: u64 = low32(live_word) / 65536;
+                    login_code: u64 = login_code_word -
+                                      (login_code_word / 65536) * 65536;
+                    login_value_word: u64 =
+                        vptr_read_u64(vptr_offset_u64(live_event, 3));
+                    login_value: u64 = high32(login_value_word);
+                    if login_code == 14 {
+                        if login_password_length > 0 {
+                            login_password = login_password / 256;
+                            login_password_length = login_password_length - 1;
+                        }
+                        login_error = 0;
+                    } else if login_code == 28 {
+                        # Big-endian packed ASCII for "demon".
+                        if login_password_length == 5 and
+                           login_password == 431198400366 {
+                            login_done = 1;
+                            login_password = 0;
+                            login_password_length = 0;
+                            login_error = 0;
+                        } else {
+                            login_error = 1;
+                            login_password = 0;
+                            login_password_length = 0;
+                        }
+                    } else if login_value >= 32 and login_value <= 126 and
+                              login_password_length < 8 {
+                        login_password = login_password * 256 + login_value;
+                        login_password_length = login_password_length + 1;
+                        login_error = 0;
+                    }
+                    repaint = 1;
+                } else if live_type == 4 and
+                          live_x >= 214 and live_x < 426 and
+                          live_y >= 326 and live_y < 360 {
+                    if login_password_length == 5 and
+                       login_password == 431198400366 {
+                        login_done = 1;
+                        login_password = 0;
+                        login_password_length = 0;
+                        login_error = 0;
+                    } else {
+                        login_error = 1;
+                        login_password = 0;
+                        login_password_length = 0;
+                    }
+                    repaint = 1;
+                }
+            } else if (live_type == 1 or live_type == 2) and login_done == 1 {
+                live_code_word: u64 = low32(live_word) / 65536;
+                live_code: u64 = live_code_word - (live_code_word / 65536) * 65536;
+                live_modifiers: u64 = low32(vptr_read_u64(vptr_offset_u64(live_event, 4)));
+                shortcut_handled: u64 = 0;
+                alt_down: u64 = live_modifiers / 4;
+                alt_down = alt_down - (alt_down / 2) * 2;
+                super_down: u64 = live_modifiers / 8;
+                super_down = super_down - (super_down / 2) * 2;
+                if launcher_open == 1 and live_type == 1 {
+                    # Launcher search box (Wave 12): captures every keydown
+                    # while the launcher is open instead of falling through
+                    # to the focused-window-forward path below (shortcut_
+                    # handled=1 at the end of this branch suppresses that).
+                    # Backspace/Enter use the same decoded character value
+                    # send_window_event already forwards to real windows
+                    # (high32 of word3); typed letters pack into
+                    # search_query (see pow256's comment). Matching is by
+                    # the first typed character only, against each row's
+                    # already-visible mnemonic letter (T/C/W/S) -- a
+                    # real, working search, just scoped to what these rows
+                    # are actually distinguishable by today; multi-character
+                    # substring matching against full app names is future
+                    # work once rows have more than a single displayed
+                    # letter to match against.
+                    typed_char: u64 = high32(vptr_read_u64(vptr_offset_u64(live_event, 3)));
+                    if live_code == 1 {
+                        # Escape (PS/2 set-1 scancode 0x01) dismisses the
+                        # launcher without spawning anything, matching every
+                        # other dismiss path (search_length/search_query
+                        # reset the same way the Enter-key branch below does).
+                        launcher_open = 0;
+                        search_length = 0; search_query = 0;
+                    } else if typed_char == 8 {
+                        if search_length > 0 {
+                            search_length = search_length - 1;
+                            place: u64 = pow256(search_length);
+                            last_char: u64 = (search_query / place) - (search_query / (place * 256)) * 256;
+                            search_query = search_query - last_char * place;
+                        }
+                    } else if typed_char == 13 or typed_char == 10 {
+                        first_char: u64 = search_query - (search_query / 256) * 256;
+                        if search_length == 0 { first_char = 0; }
+                        if first_char == 116 {
+                            pending_spawn_kind = app_kind_terminal();
+                            if find_free_slot() != 8 { spawn_app(0); }
+                        } else if first_char == 99 {
+                            pending_spawn_kind = app_kind_generic();
+                            if find_free_slot() != 8 { spawn_app(1); }
+                        } else if first_char == 119 {
+                            pending_spawn_kind = app_kind_browser();
+                            if find_free_slot() != 8 { spawn_app(2); }
+                        } else if first_char == 115 {
+                            focused_window = toggle_show_desktop();
+                        }
+                        launcher_open = 0;
+                        search_length = 0; search_query = 0;
+                    } else if typed_char >= 97 and typed_char <= 122 and search_length < 8 {
+                        search_query = search_query + typed_char * pow256(search_length);
+                        search_length = search_length + 1;
+                    }
+                    shortcut_handled = 1;
+                    repaint = 1;
+                } else if live_code == 15 and alt_down == 1 {
+                    # Alt+Tab cycles through every visible table slot and
+                    # raises the selected window, including restored clients.
+                    if live_type == 1 {
+                        start_slot: u64 = 0;
+                        current_slot: u64 = find_slot(focused_window);
+                        if current_slot != 8 { start_slot = current_slot + 1; }
+                        attempts: u64 = 0;
+                        switch_slot: u64 = 8;
+                        while attempts < 8 and switch_slot == 8 {
+                            candidate: u64 = start_slot + attempts;
+                            if candidate >= 8 { candidate = candidate - 8; }
+                            if slot_visible(candidate) == 1 { switch_slot = candidate; }
+                            attempts = attempts + 1;
+                        }
+                        if switch_slot != 8 {
+                            switch_id: u64 = slot_id(switch_slot);
+                            slot_set_id_zorder(switch_slot, switch_id, next_z);
+                            next_z = next_z + 1;
+                            focused_window = switch_id;
+                        }
+                        launcher_open = 0;
+                        repaint = 1;
+                    }
+                    shortcut_handled = 1;
+                } else if live_code == 62 and alt_down == 1 {
+                    # Alt+F4 closes the focused window through the same
+                    # surface-safe lifetime path as its titlebar button.
+                    if live_type == 1 {
+                        close_target: u64 = find_slot(focused_window);
+                        if close_target != 8 { focused_window = close_slot(close_target, anim_phase); }
+                        launcher_open = 0;
+                        repaint = 1;
+                    }
+                    shortcut_handled = 1;
+                } else if live_code == 347 or live_code == 348 {
+                    # A bare Super key toggles on release, allowing chords to
+                    # use the modifier without flashing the launcher first.
+                    if live_type == 1 { super_chord = 0; }
+                    else if super_chord == 0 {
+                        if launcher_open == 0 { launcher_open = 1; search_length = 0; search_query = 0; }
+                        else { launcher_open = 0; }
+                        repaint = 1;
+                    }
+                    shortcut_handled = 1;
+                } else if super_down == 1 {
+                    shortcut_handled = 1;
+                    if live_type == 1 {
+                        super_chord = 1;
+                        if live_code == 32 {
+                            focused_window = toggle_show_desktop();
+                            launcher_open = 0;
+                            repaint = 1;
+                        } else if live_code == 331 or live_code == 333 or
+                                  live_code == 328 or live_code == 336 {
+                            snap_target: u64 = find_slot(focused_window);
+                            snap_direction: u64 = 1;
+                            if live_code == 333 { snap_direction = 2; }
+                            if live_code == 328 { snap_direction = 3; }
+                            if live_code == 336 { snap_direction = 4; }
+                            if snap_target != 8 {
+                                snap_slot(snap_target, snap_direction);
+                                if slot_minimized(snap_target) == 1 {
+                                    new_top: u64 = find_top_slot();
+                                    if new_top == 8 { focused_window = 0; }
+                                    else { focused_window = slot_id(new_top); }
+                                }
+                            }
+                            launcher_open = 0;
+                            repaint = 1;
+                        }
+                    }
+                }
+                if focused_window != 0 and shortcut_handled == 0 {
+                    # Every window's event channel is named deterministically
+                    # from its window id ("desktop.winN"), so the compositor
+                    # can reach any dynamically created window's client --
+                    # not just a boot-time hardcoded pid (see
+                    # send_window_event). Preserve the decoded character/
+                    # value from the input ABI in word3 so terminal-style
+                    # clients can render actual text.
+                    live_value_word: u64 = vptr_read_u64(vptr_offset_u64(live_event, 3));
+                    # version 1, KEY opcode 8, serial 3.
+                    key_opcode_serial: u64 = pack_words(524289, 3);
+                    send_window_event(event_address + 32, pixel_address, focused_window,
+                                      key_opcode_serial,
+                                      live_type + live_code * 65536 + live_modifiers * 4294967296,
+                                      high32(live_value_word));
+                }
+            } else if live_type == 4 and is_demonwm_boot == 1 and live_y < 32 {
+                # Until DemonWM's retained panel surface is visible, this
+                # strip is its input proxy. Client 2 owns the WM and its
+                # first XID is 0x200001; route the ordinary native click
+                # packet through DemonX so DemonWM itself applies launch
+                # policy across the whole panel width.
+                send_window_event(event_address + 32, pixel_address, 2097153,
+                                  pack_words(720897, 4),
+                                  live_x + live_y * 4294967296, 1);
+                repaint = 1;
+            } else if live_type == 4 and launcher_open == 1 and
+                      live_x >= 28 and live_x < 210 and
+                      live_y >= 238 and live_y < 390 {
+                # The first three launcher rows spawn a real new process (see
+                # spawn_app); the fourth is a show-desktop action. A launch
+                # only asks the kernel to spawn -- it does not itself
+                # create a table slot or change focus, since the spawned
+                # client sends its own real CREATE message once it runs,
+                # through the exact same ready==1 path every other window
+                # (boot-test or interactively spawned) already goes
+                # through. find_free_slot() guards against launching past
+                # WINDOW_LIMIT for a cheap, immediate no-op instead of a
+                # spawn that could never get a table slot anyway.
+                # pending_spawn_kind records which icon/titlebar chrome the
+                # CREATE handler should tag the resulting slot with once the
+                # spawned client's own CREATE message arrives (see the
+                # word9/app_kind_* comments in the window-table layout notes).
+                if live_y < 276 {
+                    pending_spawn_kind = app_kind_terminal();
+                    if find_free_slot() != 8 { spawn_app(0); }
+                } else if live_y < 314 {
+                    pending_spawn_kind = app_kind_generic();
+                    if find_free_slot() != 8 { spawn_app(1); }
+                } else if live_y < 352 {
+                    pending_spawn_kind = app_kind_browser();
+                    if find_free_slot() != 8 { spawn_app(2); }
+                } else {
+                    focused_window = toggle_show_desktop();
+                }
+                launcher_open = 0;
+                repaint = 1;
+            } else if live_type == 4 and live_x < 112 and live_y >= 432 {
+                if launcher_open == 0 { launcher_open = 1; search_length = 0; search_query = 0; }
+                else { launcher_open = 0; }
+                repaint = 1;
+            } else if live_type == 4 and live_x >= 116 and live_x < 548 and
+                      live_y >= 432 {
+                # A taskbar button is tied directly to its window-table slot.
+                # Clicking a minimized window restores it; clicking the
+                # focused visible window minimizes it; any other click raises
+                # and focuses that window.
+                task_slot: u64 = (live_x - 116) / 54;
+                task_x: u64 = 116 + task_slot * 54;
+                if task_slot < 8 and live_x < task_x + 48 and
+                   slot_state(task_slot) != 0 {
+                    task_state: u64 = slot_state(task_slot);
+                    task_id: u64 = slot_id(task_slot);
+                    if slot_minimized(task_slot) == 1 {
+                        slot_set_state(task_slot, task_state - 1);
+                        slot_set_id_zorder(task_slot, task_id, next_z);
+                        next_z = next_z + 1;
+                        focused_window = task_id;
+                    } else if focused_window == task_id {
+                        slot_set_state(task_slot, task_state + 1);
+                        new_top: u64 = find_top_slot();
+                        if new_top == 8 { focused_window = 0; }
+                        else { focused_window = slot_id(new_top); }
+                    } else {
+                        slot_set_id_zorder(task_slot, task_id, next_z);
+                        next_z = next_z + 1;
+                        focused_window = task_id;
+                    }
+                    launcher_open = 0;
+                    repaint = 1;
+                }
+            } else if live_type == 4 and live_x >= 558 and live_x < 606 and
+                      live_y >= 432 {
+                # Gear button (see render_taskbar) toggles the settings
+                # popover the same way the Start button toggles the launcher.
+                if settings_open == 0 { settings_open = 1; }
+                else { settings_open = 0; }
+                launcher_open = 0;
+                repaint = 1;
+            } else if live_type == 4 and settings_open == 1 and
+                      live_x >= 520 and live_x < 632 and
+                      live_y >= 310 and live_y < 420 {
+                # Accent-theme swatch click (see render_settings): each
+                # swatch is a 24x24 circle at x=536+swatch*32, y=340. Widen
+                # the hit box a few pixels past the drawn circle (same
+                # forgiving-hit-target idea as every other small control in
+                # this file) rather than requiring a pixel-perfect click.
+                if live_y >= 335 and live_y < 369 {
+                    swatch_hit: u64 = 8;
+                    if live_x >= 532 and live_x < 566 { swatch_hit = 0; }
+                    else if live_x >= 564 and live_x < 598 { swatch_hit = 1; }
+                    else if live_x >= 596 and live_x < 630 { swatch_hit = 2; }
+                    if swatch_hit != 8 { accent_theme = swatch_hit; }
+                }
+                repaint = 1;
+            } else if live_type == 4 {
+                launcher_open = 0;
+                settings_open = 0;
+                # Hit-test click against every live window, topmost first, so
+                # clicking any window (title bar or content) refocuses it and
+                # raises its z-order. This replaces the old single-window
+                # scalar hit test.
+                hit_slot: u64 = top_slot_at(live_x, live_y);
+                # The desktop Demon shortcut opens the native launcher only
+                # when no window covers the tile. Window hit-testing happens
+                # first so this behaves like a real desktop icon rather than
+                # an invisible global hot zone.
+                if hit_slot == 8 and live_x >= 12 and live_x < 84 and
+                   live_y >= 48 and live_y < 126 {
+                    launcher_open = 1;
+                    search_length = 0; search_query = 0;
+                    repaint = 1;
+                }
+                if hit_slot != 8 {
+                    hit_x: u64 = slot_x(hit_slot);
+                    hit_y: u64 = slot_y(hit_slot);
+                    hit_width: u64 = slot_width(hit_slot);
+                    hit_height: u64 = slot_height(hit_slot);
+                    hit_id: u64 = slot_id(hit_slot);
+                    focused_window = hit_id;
+                    slot_set_id_zorder(hit_slot, hit_id, next_z);
+                    next_z = next_z + 1;
+                    hit_direction: u64 = 0;
+                    if slot_state(hit_slot) != 3 {
+                        hit_direction = resize_hit_direction(hit_x, hit_y, hit_width,
+                                                             hit_height, live_x, live_y);
+                    }
+                    if live_x >= hit_x + hit_width - 28 and
+                       live_x < hit_x + hit_width - 10 and
+                       live_y >= hit_y + 8 and live_y < hit_y + 24 {
+                        # Close button, drawn per-window in render_scene. Takes
+                        # priority over the top-right resize corner, since the
+                        # two zones overlap by design (the corner grip is a
+                        # generous 20px square, the button row only 16px tall).
+                        target_slot: u64 = find_slot(hit_id);
+                        if target_slot != 8 {
+                            focused_window = close_slot(target_slot, anim_phase);
+                        }
+                    } else if live_x >= hit_x + hit_width - 52 and
+                              live_x < hit_x + hit_width - 34 and
+                              live_y >= hit_y + 8 and live_y < hit_y + 24 {
+                        # Maximize fills the desktop work area above the panel;
+                        # a second click restores the exact saved geometry.
+                        snap_slot(hit_slot, 3);
+                    } else if live_x >= hit_x + hit_width - 76 and
+                              live_x < hit_x + hit_width - 58 and
+                              live_y >= hit_y + 8 and live_y < hit_y + 24 {
+                        # Preserve whether this is a normal or maximized
+                        # window so taskbar restore returns to the same mode.
+                        slot_set_state(hit_slot, slot_state(hit_slot) + 1);
+                        new_top: u64 = find_top_slot();
+                        if new_top == 8 { focused_window = 0; }
+                        else { focused_window = slot_id(new_top); }
+                    } else if hit_direction != 0 {
+                        resizing = hit_direction;
+                        drag_offset_x = live_x;
+                        drag_offset_y = live_y;
+                    } else if live_y < hit_y + 32 and slot_state(hit_slot) == 1 {
+                        dragging = 1;
+                        drag_offset_x = live_x - hit_x;
+                        drag_offset_y = live_y - hit_y;
+                    } else if hit_id != 7 {
+                        # Click landed inside the window's content area
+                        # (below the 32px titlebar, not on any chrome
+                        # control) -- not a compositor concern at that
+                        # point, so forward it to the window's own client
+                        # (see send_window_event) with content-relative
+                        # coordinates (click position minus the window's
+                        # origin) so the client doesn't need the
+                        # compositor's own notion of its screen position.
+                        # The terminal (hit_id 7) is excluded since it has
+                        # no receive loop for this opcode -- only
+                        # window-client.elf's counter-app content currently
+                        # listens for it (see window_client_main). Opcode 11
+                        # is unused on the control channel (which this is
+                        # not -- this travels on the per-window event
+                        # channel, same as KEY -- but picked to avoid
+                        # colliding in meaning with control-channel opcode
+                        # 10, MOVE, for anyone reading both).
+                        click_opcode_serial: u64 = pack_words(720897, 4);
+                        send_window_event(event_address + 32, pixel_address, hit_id,
+                                          click_opcode_serial,
+                                          (live_x - hit_x) + (live_y - hit_y) * 4294967296,
+                                          1 + (low32(live_word) / 65536) * 4294967296);
+                    }
+                    repaint = 1;
+                }
+            } else if live_type == 3 and resizing != 0 and focused_window != 0 {
+                target_slot: u64 = find_slot(focused_window);
+                if target_slot != 8 and slot_state(target_slot) == 1 {
+                    win_x: u64 = slot_x(target_slot);
+                    win_y: u64 = slot_y(target_slot);
+                    win_width: u64 = slot_width(target_slot);
+                    win_height: u64 = slot_height(target_slot);
+                    right_edge: u64 = win_x + win_width;
+                    bottom_edge: u64 = win_y + win_height;
+                    grows_east: u64 = 0;
+                    if resizing == resize_direction_e() or resizing == resize_direction_ne() or
+                       resizing == resize_direction_se() { grows_east = 1; }
+                    grows_west: u64 = 0;
+                    if resizing == resize_direction_w() or resizing == resize_direction_nw() or
+                       resizing == resize_direction_sw() { grows_west = 1; }
+                    grows_south: u64 = 0;
+                    if resizing == resize_direction_s() or resizing == resize_direction_se() or
+                       resizing == resize_direction_sw() { grows_south = 1; }
+                    grows_north: u64 = 0;
+                    if resizing == resize_direction_n() or resizing == resize_direction_ne() or
+                       resizing == resize_direction_nw() { grows_north = 1; }
+
+                    # Windows can exist below the usual 160x120 resize floor
+                    # (creation only enforces a 32x32 minimum), so every
+                    # "far edge minus 160/120" computation below must first
+                    # confirm the window is actually that big -- otherwise
+                    # the u64 subtraction underflows to a huge value, the
+                    # clamp against it becomes a no-op, and next_x/next_width
+                    # can come out of this block as a wildly wrong (still
+                    # small, but arbitrarily placed) number that every later
+                    # draw call for this window then inherits.
+                    next_x: u64 = win_x;
+                    next_width: u64 = win_width;
+                    if grows_east == 1 {
+                        next_width = 160;
+                        if win_width < 160 { next_width = win_width; }
+                        if live_x > win_x + next_width { next_width = live_x - win_x; }
+                        if next_width > 640 - win_x { next_width = 640 - win_x; }
+                    } else if grows_west == 1 and right_edge >= 160 {
+                        # The left edge moves and the right edge stays fixed:
+                        # clamp the new left edge so width never drops below
+                        # 160, then derive width from the fixed right edge.
+                        next_x = live_x;
+                        if next_x > right_edge - 160 { next_x = right_edge - 160; }
+                        next_width = right_edge - next_x;
+                    }
+
+                    next_y: u64 = win_y;
+                    next_height: u64 = win_height;
+                    if grows_south == 1 {
+                        next_height = 120;
+                        if win_height < 120 { next_height = win_height; }
+                        if live_y > win_y + next_height { next_height = live_y - win_y; }
+                        # Keep resized clients above the 48-pixel taskbar. The
+                        # panel remains reachable even after an aggressive drag.
+                        if next_height > 432 - win_y { next_height = 432 - win_y; }
+                    } else if grows_north == 1 and bottom_edge >= 120 {
+                        # Same fixed-far-edge approach as the west case, but
+                        # also kept below the 28px top panel so the titlebar
+                        # can never be dragged out of reach.
+                        next_y = live_y;
+                        if next_y < 28 { next_y = 28; }
+                        if next_y > bottom_edge - 120 { next_y = bottom_edge - 120; }
+                        next_height = bottom_edge - next_y;
+                    }
+                    slot_set_position(target_slot, next_x, next_y);
+                    slot_set_size(target_slot, next_width, next_height);
+                    repaint = 1;
+                }
+            } else if live_type == 3 and dragging == 1 and focused_window != 0 {
+                target_slot: u64 = find_slot(focused_window);
+                if target_slot != 8 and slot_state(target_slot) == 1 {
+                    win_width: u64 = slot_width(target_slot);
+                    win_height: u64 = slot_height(target_slot);
+                    next_x: u64 = 0;
+                    next_y: u64 = 28;
+                    if live_x > drag_offset_x { next_x = live_x - drag_offset_x; }
+                    # The top panel owns rows 0..27, so title bars cannot be
+                    # stranded behind it. Starting at 28 also avoids unsigned
+                    # underflow while the pointer is above the drag offset.
+                    if live_y > drag_offset_y + 28 { next_y = live_y - drag_offset_y; }
+                    if next_x > 640 - win_width { next_x = 640 - win_width; }
+                    if next_y > 432 - win_height { next_y = 432 - win_height; }
+                    slot_set_position(target_slot, next_x, next_y);
+                    repaint = 1;
+                }
+            } else if live_type == 5 {
+                if dragging == 0 and resizing == 0 {
+                    release_slot: u64 = top_slot_at(live_x, live_y);
+                    if release_slot != 8 and slot_id(release_slot) >= 2097152 {
+                        release_x: u64 = slot_x(release_slot);
+                        release_y: u64 = slot_y(release_slot);
+                        if live_y >= release_y + 32 {
+                            release_opcode_serial: u64 = pack_words(720897, 6);
+                            send_window_event(event_address + 32, pixel_address,
+                                              slot_id(release_slot),
+                                              release_opcode_serial,
+                                              (live_x - release_x) +
+                                              (live_y - release_y) * 4294967296,
+                                              2 + (low32(live_word) / 65536) * 4294967296);
+                        }
+                    }
+                }
+                dragging = 0;
+                resizing = 0;
+            }
+        } else if ready == 3 {
+            # A deadline refresh prevents the visible desktop from freezing
+            # if a hardware or emulator input wakeup is missed/coalesced.
+            # This same heartbeat also advances the animation clock, so the
+            # focused window's breathing glow keeps moving even when no
+            # input arrives. It also advances the loading/login startup
+            # phases, so a scripted/headless boot (no keyboard input) still
+            # progresses past them on a bounded timeout.
+            dirty = 1;
+            anim_phase = anim_phase + 1;
+            if boot_phase < 20 { boot_phase = boot_phase + 1; }
+            # Settle any window-open transition that's run its full course,
+            # so slot_anim_kind stops returning "still opening" (and
+            # render_window stops computing/drawing a zero-alpha overlay)
+            # once the materialize fade has actually finished. A closing
+            # transition (kind 2) settles the same way but frees the slot
+            # outright instead of just clearing the anim marker -- close_slot
+            # only demoted its z-order and marked it closing, so this is the
+            # one place the table entry is actually removed, once the fade
+            # has had its full anim_transition_ticks() to play out.
+            settle_scan: u64 = 0;
+            while settle_scan < 8 {
+                settle_kind: u64 = slot_anim_kind(settle_scan);
+                if settle_kind == 1 or settle_kind == 2 {
+                    settle_start: u64 = slot_anim_start_phase(settle_scan);
+                    settle_elapsed: u64 = 0;
+                    if anim_phase >= settle_start { settle_elapsed = anim_phase - settle_start; }
+                    if settle_elapsed >= anim_transition_ticks() {
+                        if settle_kind == 2 {
+                            slot_set_state(settle_scan, 0);
+                            # A close fade settling actually shrinks the live
+                            # window table, unlike an open fade settling (which
+                            # only clears the anim marker on an already-counted
+                            # slot) -- request the same self-report the repaint
+                            # path below sends on a real event, so
+                            # display_compositor_window_count() reflects the
+                            # closed slot as soon as its fade finishes instead
+                            # of staying stale until the next unrelated event.
+                            repaint = 1;
+                        }
+                        slot_set_anim(settle_scan, 0, 0);
+                    }
+                }
+                settle_scan = settle_scan + 1;
+            }
+        } else {
+            MakoAbi.exit(102); return 102;
+        }
+        if repaint == 1 {
+            dirty = 1;
+            # Self-report window-table state right when it actually changes
+            # (create/close/focus), not deferred to the next paint, so the
+            # kernel boot test can observe it promptly via a real syscall
+            # (see display_compositor_report) instead of scripted counters.
+            report_count: u64 = 0;
+            report_scan: u64 = 0;
+            while report_scan < 8 {
+                if slot_state(report_scan) != 0 { report_count = report_count + 1; }
+                report_scan = report_scan + 1;
+            }
+            MakoAbi.compositor_report(display, report_count, focused_window);
+        }
+        present_now: u64 = MakoAbi.ticks();
+        if is_test_boot == 1 and present_now >= login_deadline and login_done == 0 {
+            login_done = 1;
+        }
+        # Startup screens must keep repainting on their own even if nothing
+        # else marks the scene dirty (no clicks, no CREATE messages, only
+        # the periodic idle heartbeat) -- otherwise the loading bar and the
+        # loading->login->desktop transitions would only ever show up if
+        # some unrelated event happened to also fire.
+        if present_now < loading_deadline or login_done == 0 { dirty = 1; }
+        if dirty == 1 and (ready == 3 or present_now >= next_frame_tick) {
+            startup_status: u64 = 0;
+            if present_now < loading_deadline {
+                startup_status = render_loading(display, request_address, pixel_address, boot_phase);
+            } else if login_done == 0 {
+                startup_status = render_login(display, request_address, pixel_address,
+                                              login_password_length + login_error * 16,
+                                              pack_cursor(cursor_x, cursor_y), anim_phase);
+            } else if is_demonwm_boot == 1 {
+                startup_status = render_demonwm_backend(
+                    display, request_address, pixel_address);
+            } else {
+                startup_status = render_scene(display, request_address, pixel_address,
+                                              focused_window,
+                                              pack_words(anim_phase, pack_cursor_theme_and_settings(
+                                                  cursor_x, cursor_y, accent_theme, settings_open) +
+                                                  launcher_open * 8388608),
+                                              search_query);
+            }
+            # A failed draw call inside a repaint (a single bad
+            # display_submit/display_submit_effect syscall) no longer takes
+            # the whole desktop down with it. next_frame_tick still advances
+            # either way so a failure can't spin this into a tight busy-loop
+            # against compositor_wait's normal blocking cadence, but dirty
+            # only clears on success: a truly transient failure gets retried
+            # on the next ~5-tick cycle and self-heals, while a persistent
+            # one just leaves that one frame visibly stale/incomplete on
+            # screen -- still a live, usable desktop, and the visible
+            # staleness is itself the signal that something is wrong,
+            # rather than a silent swallow.
+            next_frame_tick = MakoAbi.ticks() + 5;
+            if startup_status == 0 { dirty = 0; }
+        }
+    }
+    return 0;
+}

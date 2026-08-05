@@ -270,6 +270,30 @@ static void boot_welcome(void) {
     terminal_write_line("The kernel is ready. Scheduler, syscalls, and ring 3 are online.");
 }
 
+/* Graphical boots stay in the native userspace session. Hardware IRQs wake
+   blocked compositor/client tasks; the kernel runs them until they block
+   again, discards only the mirrored kernel-console characters, then halts
+   until the next interrupt. Desktop input itself remains in the unified
+   input queue and is never consumed by an invisible MakoBox prompt. */
+__attribute__((noreturn))
+static void desktop_session_loop(uint32_t compositor_pid) {
+    serial_write("DESKTOP_DEFAULT_TARGET_OK target=desktop.target\n");
+    serial_write("DESKTOP_SESSION_READY display=compositor input=compositor console=recovery-only\n");
+    for (;;) {
+        if (scheduler_has_ready_users()) (void)userspace_run_init();
+        keyboard_discard_chars();
+        struct scheduler_task_snapshot compositor;
+        if (!scheduler_snapshot(compositor_pid, &compositor) ||
+            compositor.state == SCHEDULER_TASK_EXITED)
+            boot_fatal("Native desktop compositor exited during the session");
+        /* A userspace return or a future scheduler path must never leave IF
+           clear here.  The desktop depends on IRQ1/IRQ12/PIT to wake blocked
+           clients, so make the idle transition atomically interruptible on
+           every iteration rather than inheriting an unknown flags state. */
+        __asm__ volatile ("sti; hlt" ::: "memory");
+    }
+}
+
 static uintptr_t align_up_8(uintptr_t value) {
     return (value + 7u) & ~(uintptr_t)7u;
 }
@@ -1172,17 +1196,131 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write(" status="); serial_write_u64(doom_full_status); serial_write("\n");
         boot_status("Doom large image", "149 executable pages mapped and reclaimed");
     }
-    /* GUI/compositor stack sidelined -- see sidelined/. Every boot now goes
-       straight to a plain console: no framebuffer graphics mode, no
-       compositor, no windowing. init_system_reach_boot_target(0u) already
-       handles a "no compositor" boot correctly (it activates
-       console.service/default.target and simply skips desktop.target when
-       given pid 0), so this replaces roughly a thousand lines of scripted
-       compositor click/drag/window boot-test choreography that no longer
-       has anything to drive. The self-tests below (IPC, native MKO
-       arithmetic, device memory, init/runas/apps/git) are NOT GUI-specific
-       -- they used to run further down inside that same deleted block, so
-       they're restored here rather than dropped. */
+    /* Re-wired desktop stack (un-sidelined -- see sidelined/README.md): the
+       ring-3 Mako compositor, the DemonX X11 server, the DemonWM window
+       manager, and the xterm-style terminal client. Interactive boots spawn
+       the full session and hand off to the desktop session loop; scripted
+       boot-test boots run a lean end-to-end smoke (compositor + DemonX +
+       xterm) that replaces the old ~1000-line click/drag choreography -- the
+       xterm injects its own typed session and asserts its buffer, so the
+       whole key->compositor->DemonX->xlib->window wire path is exercised
+       without the brittle scripted choreography. */
+    uint32_t compositor_pid = 0u;
+    /* Not every ISO this kernel boots carries the desktop stack -- Quake/
+       Doom/NXEngine's own play-mode images have a real framebuffer (they
+       need one for their own rendering) but never module2 in compositor.elf/
+       demonx.elf/demonwm.elf/xterm.elf, since they're built by separate,
+       narrower Makefile targets. Only attempt the desktop stack when the
+       compositor binary is actually present; otherwise fall back to the
+       plain console path exactly as before, rather than treating a simply
+       different ISO's module list as a fatal boot error. */
+    uint32_t compositor_probe_id;
+    const bool desktop_stack_present = framebuffer_available() &&
+        ramfs_open("/system/bin/compositor.elf", 26u, false, &compositor_probe_id);
+    if (desktop_stack_present) {
+        if (capability_open(1u, CAPABILITY_SERVICE_DISPLAY) != UINT64_MAX ||
+            capability_open(2u, CAPABILITY_SERVICE_INPUT) != UINT64_MAX)
+            boot_fatal("Display/input authority leaked to bootstrap applications");
+        compositor_pid = userspace_spawn_path(0u,
+            "/system/bin/compositor.elf", 26u, "compositor",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_INPUT) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+        if (compositor_pid == 0u)
+            boot_fatal("Ring-3 compositor launch failed");
+        (void)userspace_run_init();
+        struct scheduler_task_snapshot compositor_state;
+        if (!scheduler_snapshot(compositor_pid, &compositor_state) ||
+            compositor_state.state != SCHEDULER_TASK_BLOCKED) {
+            serial_write("compositor startup state=");
+            serial_write(scheduler_state_name(compositor_state.state));
+            serial_write(" status=");
+            serial_write_u64(compositor_state.exit_code);
+            serial_write("\n");
+            boot_fatal("Compositor service did not reach receive-ready state");
+        }
+        serial_write("COMPOSITOR_SERVICE_READY\n");
+        const uint32_t demonx_pid = userspace_spawn_path(0u,
+            "/system/bin/demonx.elf", 22u, "demonx",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+        if (demonx_pid == 0u)
+            boot_fatal("DemonX server failed to spawn");
+        (void)userspace_run_init();
+        struct scheduler_task_snapshot demonx_state;
+        if (!scheduler_snapshot(demonx_pid, &demonx_state) ||
+            demonx_state.state != SCHEDULER_TASK_BLOCKED) {
+            serial_write("demonx startup state=");
+            serial_write(scheduler_state_name(demonx_state.state));
+            serial_write(" status=");
+            serial_write_u64(demonx_state.exit_code);
+            serial_write("\n");
+            boot_fatal("DemonX server did not reach receive-ready state");
+        }
+        serial_write("DEMONX_SERVER_READY transport=capability-ipc protocol=X11\n");
+        if (!test_mode && !doom_frame_test) {
+            const uint32_t demonwm_pid = userspace_spawn_path(0u,
+                "/system/bin/demonwm.elf", 23u, "demonwm",
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC));
+            if (demonwm_pid == 0u)
+                boot_fatal("Interactive DemonWM launch failed");
+            (void)userspace_run_init();
+            struct scheduler_task_snapshot demonwm_state;
+            if (!scheduler_snapshot(demonwm_pid, &demonwm_state) ||
+                demonwm_state.state != SCHEDULER_TASK_BLOCKED) {
+                serial_write("DEMONWM_STARTUP_FAILED state=");
+                serial_write(scheduler_state_name(demonwm_state.state));
+                serial_write(" exit=");
+                serial_write_u64(demonwm_state.exit_code);
+                serial_write("\n");
+                boot_fatal("DemonWM did not claim DemonX and enter its event loop");
+            }
+            const uint32_t xterm_pid = userspace_spawn_path(0u,
+                "/system/bin/xterm.elf", 21u, "xterm",
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+            if (xterm_pid == 0u)
+                boot_fatal("Interactive xterm launch failed");
+            (void)userspace_run_init();
+            serial_write("DEMONWM_SESSION_READY pid=");
+            serial_write_u64(demonwm_pid);
+            serial_write(" display=:2 wm=click-focus,raise,drag\n");
+            desktop_session_loop(compositor_pid);
+        } else {
+            const uint32_t xterm_pid = userspace_spawn_path(0u,
+                "/system/bin/xterm.elf", 21u, "xterm-smoke",
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+            if (xterm_pid == 0u || !userspace_run_init())
+                boot_fatal("xterm boot-test smoke failed to start");
+            uint64_t xterm_status = UINT64_MAX;
+            if (!scheduler_reap(0u, xterm_pid, &xterm_status) ||
+                xterm_status != 0u) {
+                serial_write("xterm smoke status=");
+                serial_write_u64(xterm_status);
+                serial_write("\n");
+                boot_fatal("xterm boot-test smoke failed");
+            }
+            serial_write("XTERM_RING3_OK pid=");
+            serial_write_u64(xterm_pid);
+            serial_write(" status=");
+            serial_write_u64(xterm_status);
+            serial_write("\n");
+            struct scheduler_task_snapshot demonx_smoke_state;
+            if (!scheduler_snapshot(demonx_pid, &demonx_smoke_state) ||
+                demonx_smoke_state.state == SCHEDULER_TASK_EXITED) {
+                serial_write("demonx state after smoke=");
+                serial_write(scheduler_state_name(demonx_smoke_state.state));
+                serial_write(" exit=");
+                serial_write_u64(demonx_smoke_state.exit_code);
+                serial_write("\n");
+                boot_fatal("DemonX died when its client disconnected");
+            }
+            serial_write("DEMONX_LIVE_AFTER_SMOKE state=blocked\n");
+            serial_write("DESKTOP_STACK_SMOKE_OK compositor+demonx+xterm\n");
+        }
+    }
     if (!ipc_self_test()) boot_fatal("Capability IPC channel lifecycle failed");
     serial_write("IPC_CHANNEL_SELF_TEST_OK\n");
     serial_write("IPC_NAMED_SERVICE_OK\n");
@@ -1235,7 +1373,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     runas_init();
     apps_init();
     git_init();
-    if (!init_system_reach_boot_target(0u) || !init_system_self_test() ||
+    if (!init_system_reach_boot_target(compositor_pid) || !init_system_self_test() ||
         !runas_self_test() || !apps_self_test() || !git_self_test())
         boot_fatal("Init, runas, apps, or Git foundation self-test failed");
     serial_write("MAKO_INIT_SYSTEM_OK\n");
@@ -1243,8 +1381,15 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write("APP_REGISTRY_OK\n");
     serial_write("C_APP_TETRIS_READY input=keyboard runtime=MAKO-ABI\n");
     serial_write("GIT_WORKTREE_OK\n");
-    serial_write("CONSOLE_TARGET_OK target=console.target\n");
-    boot_status("Init system", "8 units reached console default.target");
+    if (compositor_pid != 0u) {
+        serial_write("DESKTOP_TARGET_ACTIVE pid=");
+        serial_write_u64(compositor_pid);
+        serial_write(" state=blocked\n");
+        boot_status("Init system", "10 units reached native desktop.target");
+    } else {
+        serial_write("CONSOLE_TARGET_OK target=console.target\n");
+        boot_status("Init system", "8 units reached console default.target");
+    }
     boot_status("runas policy", "local-console administrative allowlist active");
 
     const struct makobox_state box_state = {

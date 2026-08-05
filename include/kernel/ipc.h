@@ -12,6 +12,10 @@ void ipc_init(void);
 uint64_t ipc_create(uint32_t owner_pid, const char *name, size_t name_length);
 uint64_t ipc_connect(uint32_t pid, const char *name, size_t name_length);
 bool ipc_send(uint32_t pid, uint64_t handle, const uint8_t *data, size_t length);
+/* 1 = delivered, 2 = parked on a full queue (caller must block the process),
+   0 = failed/dropped. */
+int ipc_send_block(uint32_t pid, uint64_t handle, const uint8_t *data,
+                   size_t length);
 bool ipc_receive(uint32_t pid, uint64_t handle, uint8_t *data, size_t capacity,
                  size_t *length, uint32_t *sender_pid);
 bool ipc_wait(uint32_t pid, uint64_t handle, uint64_t user_address, size_t capacity);

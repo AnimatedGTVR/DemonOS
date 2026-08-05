@@ -45,6 +45,12 @@ WINE_PE_IMPORT_CHECK_ELF := $(BUILD)/wine_pe_import_check.elf
 WINE_PE_RELOC_CHECK_ELF := $(BUILD)/wine_pe_reloc_check.elf
 DOOM_ELF := $(BUILD)/doom.elf
 DOOM_FULL_ELF := $(BUILD)/doom-full.elf
+# Desktop stack (un-sidelined): ring-3 MKO compositor, the DemonX X11 server,
+# the DemonWM window manager, and the xterm-style terminal client.
+COMPOSITOR_ELF := $(BUILD)/compositor.elf
+DEMONX_ELF := $(BUILD)/demonx.elf
+DEMONWM_ELF := $(BUILD)/demonwm.elf
+XTERM_ELF := $(BUILD)/xterm.elf
 MAKO_REPO := ../MAKO
 MAKO_SOURCE_ARCHIVE := $(BUILD)/MAKO-source.tar.zst
 MAKO_MANIFEST := $(BUILD)/mako-manifest.txt
@@ -1777,6 +1783,61 @@ $(TETRIS_ELF): $(BUILD)/tetris_entry.o $(BUILD)/tetris.o user/linker.ld
 		$(BUILD)/tetris_entry.o $(BUILD)/tetris.o -o $@
 	$(STRIP) -s $@
 
+# Desktop stack (un-sidelined, see sidelined/README.md). The compositor and
+# DemonX server run as ordinary ring-3 processes linked against user/linker.ld
+# exactly like tetris/portcheck; the xlib shim (lib/demonx/xlib.c) is the only
+# extra dependency the X11 clients link.
+
+$(BUILD)/compositor_entry.o: user/compositor.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/compositor_mko.S: user/compositor.mko user/sdk.mko Desktop/desktop.mko | $(BUILD)
+	dotnet run --project $(MAKO_REPO)/src/Mako -- native $< --kernel -o $@
+
+$(BUILD)/compositor_mko.o: $(BUILD)/compositor_mko.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(COMPOSITOR_ELF): $(BUILD)/compositor_entry.o $(BUILD)/compositor_mko.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) \
+		$(BUILD)/compositor_entry.o $(BUILD)/compositor_mko.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/demonx_server_entry.o: user/demonx_server.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/demonx_server.o: user/demonx_server.c include/demon/demonx.h include/demon/window.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(DEMONX_ELF): $(BUILD)/demonx_server_entry.o $(BUILD)/demonx_server.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) \
+		$(BUILD)/demonx_server_entry.o $(BUILD)/demonx_server.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/demonx_xlib.o: lib/demonx/xlib.c include/X11/Xlib.h include/demon/demonx.h include/demon/c_app.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/demonwm_entry.o: Desktop/demonwm/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/demonwm.o: Desktop/demonwm/demonwm.cc include/X11/Xlib.h include/demon/c_app.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(DEMONWM_ELF): $(BUILD)/demonwm_entry.o $(BUILD)/demonwm.o $(BUILD)/demonx_xlib.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) $(BUILD)/demonwm_entry.o \
+		$(BUILD)/demonwm.o $(BUILD)/demonx_xlib.o -o $@
+	$(STRIP) -s $@
+
+$(BUILD)/xterm_entry.o: apps/xterm/entry.S | $(BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/xterm.o: apps/xterm/xterm.c include/X11/Xlib.h include/demon/c_app.h include/demon/demonx.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(XTERM_ELF): $(BUILD)/xterm_entry.o $(BUILD)/xterm.o $(BUILD)/demonx_xlib.o user/linker.ld
+	$(LD) $(USER_LDFLAGS) $(BUILD)/xterm_entry.o \
+		$(BUILD)/xterm.o $(BUILD)/demonx_xlib.o -o $@
+	$(STRIP) -s $@
+
 $(BUILD)/portkit_entry.o: apps/portcheck/entry.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
@@ -1933,7 +1994,7 @@ $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) &: tools/package-mako-source.sh FORCE | 
 
 iso: $(ISO) iso-check
 
-$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
+$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(COMPOSITOR_ELF) $(DEMONX_ELF) $(DEMONWM_ELF) $(XTERM_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/grub $(ISO_ROOT)/boot/mako $(ISO_ROOT)/system/mako $(ISO_ROOT)/docs
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
@@ -1948,6 +2009,10 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF
 	cp $(CLASSICUBE_CORE_ELF) $(ISO_ROOT)/boot/mako/classicube-core.elf
 	cp $(QUAKE_CORE_ELF) $(ISO_ROOT)/boot/mako/quake-core.elf
 	cp $(NXENGINE_CORE_ELF) $(ISO_ROOT)/boot/mako/nxengine-core.elf
+	cp $(COMPOSITOR_ELF) $(ISO_ROOT)/boot/mako/compositor.elf
+	cp $(DEMONX_ELF) $(ISO_ROOT)/boot/mako/demonx.elf
+	cp $(DEMONWM_ELF) $(ISO_ROOT)/boot/mako/demonwm.elf
+	cp $(XTERM_ELF) $(ISO_ROOT)/boot/mako/xterm.elf
 	cp $(MAKO_MANIFEST) $(ISO_ROOT)/boot/mako/mako-manifest.txt
 	cp README.md $(ISO_ROOT)/boot/mako/README.md
 	cp $(MAKO_MANIFEST) $(ISO_ROOT)/system/mako/manifest.txt
@@ -2029,6 +2094,10 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/mako/doom-full.elf -type f 2>/dev/null | grep -q doom-full.elf
 	@xorriso -indev $(ISO) -find /boot/mako/classicube-core.elf -type f 2>/dev/null | grep -q classicube-core.elf
 	@xorriso -indev $(ISO) -find /boot/mako/quake-core.elf -type f 2>/dev/null | grep -q quake-core.elf
+	@xorriso -indev $(ISO) -find /boot/mako/compositor.elf -type f 2>/dev/null | grep -q compositor.elf
+	@xorriso -indev $(ISO) -find /boot/mako/demonx.elf -type f 2>/dev/null | grep -q demonx.elf
+	@xorriso -indev $(ISO) -find /boot/mako/demonwm.elf -type f 2>/dev/null | grep -q demonwm.elf
+	@xorriso -indev $(ISO) -find /boot/mako/xterm.elf -type f 2>/dev/null | grep -q xterm.elf
 	@xorriso -indev $(ISO) -find /boot/mako/README.md -type f 2>/dev/null | grep -q README.md
 	@xorriso -indev $(ISO) -find /boot/mako/mako-manifest.txt -type f 2>/dev/null | grep -q mako-manifest.txt
 	@xorriso -indev $(ISO) -find /system/mako/MAKO-source.tar.zst -type f 2>/dev/null | grep -q MAKO-source.tar.zst
@@ -2053,6 +2122,10 @@ iso-check: $(ISO)
 	@test $$(wc -c < $(PORTABLE_ELF)) -le 8192
 	@test $$(wc -c < $(TETRIS_ELF)) -le 12288
 	@test $$(wc -c < $(CXX_HELLO_ELF)) -le 16384
+	@test $$(wc -c < $(COMPOSITOR_ELF)) -le 262144
+	@test $$(wc -c < $(DEMONX_ELF)) -le 131072
+	@test $$(wc -c < $(DEMONWM_ELF)) -le 131072
+	@test $$(wc -c < $(XTERM_ELF)) -le 65536
 	@test $$(wc -c < $(MAKO_MANIFEST)) -le 8192
 	@zstd -q -t $(MAKO_SOURCE_ARCHIVE)
 	@grep -Eq '^origin=https://github.com/AnimatedGTVR/MAKO([.]git)?$$' $(MAKO_MANIFEST)
@@ -2202,7 +2275,13 @@ smoke: $(ISO)
 	@grep -q "DOOM_FULL_IMAGE_MAPPED pages=149 base=0x20000000" $(BUILD)/serial.log
 	@grep -q "DOOM_FULL_RING3_OK" $(BUILD)/serial.log
 	@grep -q "PROCESS_WAIT_CLEANUP_OK" $(BUILD)/serial.log
-	@grep -q "CONSOLE_TARGET_OK target=console.target" $(BUILD)/serial.log
+	@grep -q "DESKTOP_TARGET_ACTIVE pid=3 state=blocked" $(BUILD)/serial.log
+	@grep -q "COMPOSITOR_SERVICE_READY" $(BUILD)/serial.log
+	@grep -q "DEMONX_SERVER_READY transport=capability-ipc protocol=X11" $(BUILD)/serial.log
+	@grep -q "XTERM_SMOKE_OK grid=64x22" $(BUILD)/serial.log
+	@grep -q "XTERM_RING3_OK pid=5 status=0" $(BUILD)/serial.log
+	@grep -q "DEMONX_LIVE_AFTER_SMOKE state=blocked" $(BUILD)/serial.log
+	@grep -q "DESKTOP_STACK_SMOKE_OK compositor+demonx+xterm" $(BUILD)/serial.log
 	@grep -q "IPC_BLOCKING_USERSPACE_OK" $(BUILD)/serial.log
 	@grep -q "IPC_CHANNEL_SELF_TEST_OK" $(BUILD)/serial.log
 	@grep -q "CAPABILITY_ABI_OK" $(BUILD)/serial.log
@@ -2373,18 +2452,19 @@ footprint-check: $(KERNEL) $(BUILD)/init.o $(BUILD)/runas.o
 		test $$total -le 4096 || { echo "init/runas footprint $$total exceeds 4096-byte budget"; exit 1; }
 	@bss=$$(size $(BUILD)/init.o $(BUILD)/runas.o | awk 'NR > 1 { sum += $$3 } END { print sum }'); \
 		test $$bss -le 256 || { echo "init/runas BSS $$bss exceeds 256-byte budget"; exit 1; }
-	@# 1.25 MiB: the GUI/compositor stack is sidelined (see sidelined/), but
-	@# the Makefile's icon/wallpaper embedding pipeline (wallpaper.argb,
-	@# cursor/UI/shell icon blobs) is still linked in even though nothing
-	@# draws them anymore -- a real, known follow-up is to actually strip
-	@# that pipeline rather than just keep raising this number. Bounded so
-	@# a genuine bloat regression still fails loudly instead of growing
-	@# silently forever. Note the hard physical ceiling is separate:
-	@# kernel+modules+backbuffer must fit the 4 MiB identity-mapped window
-	@# (kernel.c's 0x400000 mapping check).
+	@# 2.0 MiB: the GUI/compositor stack is re-wired into the running system,
+	@# so the embedded blobs are live consumers of kernel memory rather than
+	@# dead weight: the wallpaper ARGB blob (~300 KiB, drawn as the desktop
+	@# background by display.c), the start logo, the fixed RAMFS backing
+	@# arena (kRamfsStorageMax, 1 MiB), the IPC channel table and the
+	@# compositor/demonx/xterm/demonwm spawn paths. Bounded so a genuine
+	@# bloat regression still fails loudly instead of growing silently
+	@# forever. The hard physical ceiling is separate: kernel+modules+
+	@# backbuffer must fit the 4 MiB identity-mapped window (kernel.c's
+	@# 0x400000 mapping check).
 	@kernel=$$(size $(KERNEL) | awk 'NR == 2 { print $$4 }'); \
-		test $$kernel -le 1310720 || { echo "kernel memory footprint $$kernel exceeds 1.25-MiB budget"; exit 1; }
-	@echo "Footprint budgets passed: init+runas <= 4 KiB, BSS <= 256 B, kernel <= 1.25 MiB"
+		test $$kernel -le 2097152 || { echo "kernel memory footprint $$kernel exceeds 2-MiB budget"; exit 1; }
+	@echo "Footprint budgets passed: init+runas <= 4 KiB, BSS <= 256 B, kernel <= 2 MiB"
 
 check: iso-check framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check
 

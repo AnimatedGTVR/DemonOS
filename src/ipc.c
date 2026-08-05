@@ -10,19 +10,31 @@
    to drain any of them -- a window-manager panel's own setup burst
    (CreateWindow, SelectInput, CreateGC, several Fill/DrawString calls,
    Raise, Map) alone is a dozen-plus messages with no reply/yield between
-   them, and ipc_send drops silently once the queue is full. 32 gives real
-   headroom for that without meaningfully growing the fixed channel table
-   (16 channels * 32 slots * ~72 bytes/message is still under 40 KiB). */
+   them. 32 gives real headroom for that without meaningfully growing the
+   fixed channel table (16 channels * 32 slots * ~72 bytes/message is still
+   under 40 KiB). Sustained overruns are no longer dropped silently:
+   ipc_send_block parks the overflow message and sleeps the sender until the
+   owner drains a slot, giving every message to the receiver (bounded-pipe
+   backpressure, see ipc_send_impl/ipc_receive). */
 #define IPC_QUEUE_DEPTH 32u
 
 struct ipc_message { uint32_t sender; uint8_t length; uint8_t data[IPC_MESSAGE_MAX]; };
 struct ipc_waiter { uint32_t pid; uint64_t address; size_t capacity; bool active, multiplex; };
+/* One staged message per channel for bounded-pipe send semantics: when a
+   client fills the queue faster than the owner drains it (e.g. an Xlib
+   client bursting requests at DemonX), ipc_send_block parks the message
+   here and sleeps the sender; ipc_receive hands it into the freed slot and
+   wakes the sender. Only one sender can be parked per channel -- a second
+   concurrent sender still drops, which matches the pre-existing datagram
+   behaviour for that (rare, tiny) case. */
+struct ipc_send_waiter { uint32_t pid; uint8_t data[IPC_MESSAGE_MAX]; uint8_t length; bool active; };
 struct ipc_channel {
     uint32_t id, owner;
     char name[IPC_NAME_MAX];
     uint8_t name_length, read, write, count;
     struct ipc_message messages[IPC_QUEUE_DEPTH];
     struct ipc_waiter waiter;
+    struct ipc_send_waiter sender;
     bool active;
 };
 static struct ipc_channel channels[IPC_CHANNEL_LIMIT];
@@ -68,22 +80,44 @@ uint64_t ipc_connect(uint32_t pid, const char *name, size_t length) {
         return capability_open_ipc(pid, channels[i].id, CAPABILITY_RIGHT_SEND | CAPABILITY_RIGHT_QUERY);
     return UINT64_MAX;
 }
-bool ipc_send(uint32_t pid, uint64_t handle, const uint8_t *data, size_t length) {
+/* Returns 1 = delivered, 0 = failed/dropped, 2 = parked (sender blocked). */
+static int ipc_send_impl(uint32_t pid, uint64_t handle, const uint8_t *data,
+                         size_t length, bool block) {
     struct ipc_channel *c = resolve(pid, handle, CAPABILITY_RIGHT_SEND);
-    if (c == NULL || data == NULL || length == 0u || length > IPC_MESSAGE_MAX) return false;
+    if (c == NULL || data == NULL || length == 0u || length > IPC_MESSAGE_MAX) return 0;
     if (c->waiter.active) {
         struct ipc_waiter waiter=c->waiter; c->waiter.active=false;
         if (waiter.multiplex) (void)input_cancel_wait(waiter.pid);
         const uint64_t result = waiter.multiplex ? 1u : length;
         const uint64_t detail = waiter.multiplex ? length : pid;
         if (length > waiter.capacity || !userspace_copy_to(waiter.pid, waiter.address, data, length) ||
-            !scheduler_wake(waiter.pid, result, detail)) { ++dropped_count; return false; }
-        ++sent_count; ++received_count; return true;
+            !scheduler_wake(waiter.pid, result, detail)) { ++dropped_count; return 0; }
+        ++sent_count; ++received_count; return 1;
     }
-    if (c->count == IPC_QUEUE_DEPTH) { ++dropped_count; return false; }
+    if (c->count == IPC_QUEUE_DEPTH) {
+        if (!block || c->sender.active) { ++dropped_count; return 0; }
+        struct ipc_send_waiter *s = &c->sender;
+        s->pid = pid; s->length = (uint8_t)length; s->active = true;
+        for (size_t i = 0u; i < length; ++i) s->data[i] = data[i];
+        return 2;
+    }
     struct ipc_message *m=&c->messages[c->write]; m->sender=pid; m->length=(uint8_t)length;
     for (size_t i=0u;i<length;++i) m->data[i]=data[i];
-    c->write=(uint8_t)((c->write+1u)%IPC_QUEUE_DEPTH); ++c->count; ++sent_count; return true;
+    c->write=(uint8_t)((c->write+1u)%IPC_QUEUE_DEPTH); ++c->count; ++sent_count; return 1;
+}
+
+bool ipc_send(uint32_t pid, uint64_t handle, const uint8_t *data, size_t length) {
+    return ipc_send_impl(pid, handle, data, length, false) == 1;
+}
+
+/* Try to deliver; on a full queue park the message and return 2 (the caller
+   then blocks the process and the message is handed over when the owner
+   drains a slot). Returns 1 on delivery, 0 on failure. Dropping is counted
+   only when delivery is genuinely impossible (parking slot already taken by
+   a second concurrent sender), so a blocked send never shows up as a loss. */
+int ipc_send_block(uint32_t pid, uint64_t handle, const uint8_t *data,
+                   size_t length) {
+    return ipc_send_impl(pid, handle, data, length, true);
 }
 bool ipc_receive(uint32_t pid, uint64_t handle, uint8_t *data, size_t capacity,
                  size_t *length, uint32_t *sender) {
@@ -93,7 +127,22 @@ bool ipc_receive(uint32_t pid, uint64_t handle, uint8_t *data, size_t capacity,
     for (size_t i=0u;i<m->length;++i) data[i]=m->data[i];
     if (length != NULL) *length = m->length;
     if (sender != NULL) *sender = m->sender;
-    c->read=(uint8_t)((c->read+1u)%IPC_QUEUE_DEPTH); --c->count; ++received_count; return true;
+    c->read=(uint8_t)((c->read+1u)%IPC_QUEUE_DEPTH); --c->count; ++received_count;
+    /* A slot just freed: hand a parked sender's staged message into it and
+       wake that sender. The handoff is invisible to both sides -- the
+       sender's syscall returns success with its message delivered, and the
+       queue stays full from the receiver's perspective, so bursts are
+       serialized through the bounded pipe instead of being dropped. */
+    if (c->sender.active) {
+        struct ipc_send_waiter parked = c->sender;
+        c->sender.active = false;
+        struct ipc_message *out=&c->messages[c->write];
+        out->sender = parked.pid; out->length = parked.length;
+        for (size_t i=0u;i<parked.length;++i) out->data[i]=parked.data[i];
+        c->write=(uint8_t)((c->write+1u)%IPC_QUEUE_DEPTH); ++c->count;
+        (void)scheduler_wake(parked.pid, parked.length, 0u);
+    }
+    return true;
 }
 bool ipc_wait(uint32_t pid, uint64_t handle, uint64_t address, size_t capacity) {
     struct ipc_channel *c=resolve(pid,handle,CAPABILITY_RIGHT_RECEIVE);
@@ -130,9 +179,21 @@ void ipc_process_cleanup(uint32_t pid) {
     for (size_t i=0u;i<IPC_CHANNEL_LIMIT;++i) {
         struct ipc_channel *c=&channels[i]; if (!c->active) continue;
         if (c->waiter.active && c->waiter.pid==pid) c->waiter.active=false;
+        if (c->sender.active && c->sender.pid==pid) {
+            /* A sender parked on a full queue exited; drop its staged
+               message so it can never be handed to the receiver. */
+            c->sender.active=false;
+        }
         if (c->owner==pid) { if (c->waiter.active) {
                 if (c->waiter.multiplex) (void)input_cancel_wait(c->waiter.pid);
                 (void)scheduler_wake(c->waiter.pid,UINT64_MAX,0u);
+            }
+            if (c->sender.active) {
+                /* The channel the sender was blocked on is gone; wake it
+                   with failure so it does not sleep forever. */
+                const uint32_t parked = c->sender.pid;
+                c->sender.active = false;
+                (void)scheduler_wake(parked, UINT64_MAX, 0u);
             }
             c->active=false; c->count=0u; c->waiter.active=false; }
         /* Queued payloads are channel-owned copies. They remain valid after a

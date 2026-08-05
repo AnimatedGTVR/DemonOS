@@ -929,10 +929,19 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
         return frame_address;
     }
     if (number == 16u) {
-        frame->rax = user_range(frame->rsi, frame->rdx) &&
-            ipc_send(scheduler_current_pid(), frame->rdi,
-                     (const uint8_t *)(uintptr_t)frame->rsi, (size_t)frame->rdx) ? frame->rdx : UINT64_MAX;
-        return frame_address;
+        if (!user_range(frame->rsi, frame->rdx) || frame->rdx == 0u ||
+            frame->rdx > IPC_MESSAGE_MAX) {
+            frame->rax = UINT64_MAX; return frame_address;
+        }
+        const int sent = ipc_send_block(scheduler_current_pid(), frame->rdi,
+                                        (const uint8_t *)(uintptr_t)frame->rsi,
+                                        (size_t)frame->rdx);
+        if (sent == 1) { frame->rax = frame->rdx; return frame_address; }
+        if (sent != 2) { frame->rax = UINT64_MAX; return frame_address; }
+        /* Queue full: the message is parked and the sender blocks until the
+           receiver drains a slot (bounded-pipe backpressure), so a client
+           bursting Xlib requests at DemonX never has them silently dropped. */
+        return scheduler_block_current(frame_address);
     }
     if (number == 17u) {
         if (!user_write_range(frame->rsi, frame->rdx) || frame->rdx == 0u || frame->rdx > IPC_MESSAGE_MAX) {

@@ -1814,7 +1814,7 @@ static void applet_ipc(void) {
     value_line("  messages sent: ", ipc_messages_sent(), NULL);
     value_line("  messages received: ", ipc_messages_received(), NULL);
     value_line("  messages dropped: ", ipc_messages_dropped(), NULL);
-    line("  message limit: 64 bytes; queue depth: 8");
+    line("  message limit: 64 bytes; queue depth: 32");
     line("  receive: blocking and non-blocking");
 }
 
