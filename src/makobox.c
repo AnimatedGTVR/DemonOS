@@ -1775,7 +1775,7 @@ static bool command_exists(const char *name) {
     static const char *const names[] = {
         "help", "uname", "status", "mem", "frames", "paging", "ticks", "ps",
         "abi", "caps", "projects", "apps", "tetris", "doom", "classicube", "quake", "quake-core",
-        "nxengine", "nxengine-core", "beep", "tone",
+        "nxengine", "nxengine-core", "nxengine-play-freeplay", "nxengine-freeplay", "beep", "tone",
         "bleeps", "git", "desktop", "runit",
         "runas", "ls", "cat", "head", "tail", "wc", "touch", "write", "rm",
         "cp", "mv", "grep", "hexdump", "strings", "df", "du", "free", "uptime",
@@ -2163,6 +2163,18 @@ static bool launch_app(const char *name) {
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO);
     }
+    if (equal(app.path, "/system/bin/nxengine-play-freeplay.elf")) {
+        /* D37 freeplay: the same real subsystems nxengine-core.elf needs
+           (storage for PortKit's arena/file shims, display+surface for
+           the real title/save-select/gameplay render, audio for real
+           sound()) -- this is the same engine, just a different, human-
+           playable entry point, not a different capability profile. */
+        capabilities |=
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO);
+    }
     uint32_t pid = userspace_spawn_path(0u, app.path, path_length, app.name,
         capabilities);
     if (pid == 0u || !userspace_run_init()) {
@@ -2213,6 +2225,8 @@ bool makobox_run(const char *command_line) {
     else if (equal(command_line, "classicube")) return launch_app("classicube");
     else if (equal(command_line, "quake") || equal(command_line, "quake-core")) return launch_app("quake-core");
     else if (equal(command_line, "nxengine") || equal(command_line, "nxengine-core")) return launch_app("nxengine-core");
+    else if (equal(command_line, "nxengine-play-freeplay") || equal(command_line, "nxengine-freeplay"))
+        return launch_app("nxengine-play-freeplay");
     else if (equal(command_line, "beep")) return applet_beep("", false);
     else if (starts_with(command_line, "beep ", &argument)) return applet_beep(argument, false);
     else if (equal(command_line, "tone")) return applet_beep("", true);

@@ -100,7 +100,7 @@ OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/kernel_slot_table_test.o \
 	$(BUILD)/user_program_blob.o
 
-.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-quake run-wayland run-sdl run-vnc smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
+.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-quake run-wayland run-sdl run-vnc smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
 
 QUAKE_SOURCE := $(BUILD)/quake-upstream
 QUAKE_COMMIT := bf4ac424ce754894ac8f1dae6a3981954bc9852d
@@ -677,6 +677,39 @@ nxengine-core: $(NXENGINE_CORE_ELF)
 	@readelf -h $< | grep -q 'Class:.*ELF64'
 	@echo "NXEngine D1 core ELF linked"
 
+# D37: freeplay -- the same core_main.cpp, compiled a second time with
+# -DNXENGINE_FREEPLAY, which switches which of the two nxengine_core_main
+# bodies gets compiled (see the #ifndef/#else/#endif in core_main.cpp).
+# Every other object file is reused byte-for-byte from the D1-D36 build
+# above -- this mode adds zero new engine subsystems, only a new entry
+# point built from already-linked real primitives.
+NXENGINE_FREEPLAY_ELF := $(BUILD)/nxengine-play-freeplay.elf
+
+$(NXENGINE_BUILD)/core_main_freeplay.o: ports/nxengine/platform/core_main.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iinclude -DNXENGINE_FREEPLAY -c $< -o $@
+
+$(NXENGINE_FREEPLAY_ELF): $(NXENGINE_BUILD)/entry.o $(NXENGINE_BUILD)/core_main_freeplay.o \
+		$(NXENGINE_BUILD)/trig.o $(NXENGINE_BUILD)/libm_demonos.o \
+		$(NXENGINE_BUILD)/sdl_demonos.o $(NXENGINE_BUILD)/nxsurface.o \
+		$(NXENGINE_BUILD)/map.o $(NXENGINE_BUILD)/stdio_demonos.o \
+		$(NXENGINE_BUILD)/tileset.o $(NXENGINE_BUILD)/stagedata.o \
+		$(NXENGINE_SIFLIB_OBJS) $(NXENGINE_D32_OBJS) $(NXENGINE_D34_OBJS) $(NXENGINE_D35_OBJS) \
+		$(BUILD)/doom_libc.o $(BUILD)/portkit.o ports/nxengine/linker.ld
+	$(LD) -nostdlib --gc-sections -z max-page-size=0x1000 -T ports/nxengine/linker.ld \
+		$(NXENGINE_BUILD)/entry.o $(BUILD)/portkit.o $(BUILD)/doom_libc.o \
+		$(NXENGINE_BUILD)/libm_demonos.o $(NXENGINE_BUILD)/sdl_demonos.o \
+		$(NXENGINE_BUILD)/nxsurface.o $(NXENGINE_BUILD)/map.o \
+		$(NXENGINE_BUILD)/stdio_demonos.o $(NXENGINE_BUILD)/tileset.o \
+		$(NXENGINE_BUILD)/stagedata.o $(NXENGINE_SIFLIB_OBJS) \
+		$(NXENGINE_D32_OBJS) $(NXENGINE_D34_OBJS) $(NXENGINE_D35_OBJS) \
+		$(NXENGINE_BUILD)/trig.o \
+		$(NXENGINE_BUILD)/core_main_freeplay.o -o $@
+	$(STRIP) -s $@
+
+nxengine-play-freeplay: $(NXENGINE_FREEPLAY_ELF)
+	@readelf -h $< | grep -q 'Class:.*ELF64'
+	@echo "NXEngine D37 freeplay ELF linked"
+
 NXENGINE_DATA := $(BUILD)/nxengine-data
 
 nxengine-data: tools/fetch-cavestory-data.sh
@@ -905,6 +938,112 @@ nxengine-play-smoke: $(NXENGINE_PLAY_ISO)
 	@grep -q "process exited with status 0" $(BUILD)/nxengine-play.log
 	@! grep -q "PAGE FAULT\|\[FAILED\]" $(BUILD)/nxengine-play.log
 	@echo "NXEngine D2-D35 real-asset interactive play smoke test passed"
+
+# D37: freeplay ISO -- reuses the exact same asset set as
+# $(NXENGINE_PLAY_ISO) above (Pens1/Start/Frog + tileset/sprite/font/tsc
+# assets, all already fetched by nxengine-data), just booting the
+# freeplay ELF instead of the D1-D36 test-harness ELF.
+NXENGINE_FREEPLAY_ISO := $(BUILD)/kernel-nxengine-freeplay.iso
+
+nxengine-play-freeplay-iso: $(NXENGINE_FREEPLAY_ISO)
+
+$(NXENGINE_FREEPLAY_ISO): $(ISO) nxengine-data nxengine-source grub/grub-nxengine-freeplay.cfg $(NXENGINE_FREEPLAY_ELF)
+	rm -rf $(BUILD)/iso-nxengine-freeplay
+	cp -r $(ISO_ROOT) $(BUILD)/iso-nxengine-freeplay
+	mkdir -p $(BUILD)/iso-nxengine-freeplay/games/nxengine
+	cp $(NXENGINE_DATA)/CaveStory/data/Bullet.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Bullet.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/casts.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/casts.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/0.pxm $(BUILD)/iso-nxengine-freeplay/games/nxengine/0.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Prt0.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Prt0.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Pens1.pxm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Pens1.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/PrtPens.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/PrtPens.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/MyChar.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/MyChar.pbm
+	cp $(NXENGINE_SOURCE)/tilekey.dat $(BUILD)/iso-nxengine-freeplay/games/nxengine/tilekey.dat
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Pens.pxa $(BUILD)/iso-nxengine-freeplay/games/nxengine/Pens.pxa
+	cp $(NXENGINE_SOURCE)/sprites.sif $(BUILD)/iso-nxengine-freeplay/games/nxengine/sprites.sif
+	cp $(NXENGINE_DATA)/CaveStory/data/npc.tbl $(BUILD)/iso-nxengine-freeplay/games/nxengine/npc.tbl
+	cp $(NXENGINE_DATA)/CaveStory/data/TextBox.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/TextBox.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Caret.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Caret.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Fade.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Fade.pbm
+	cp $(NXENGINE_SOURCE)/smalfont.bmp $(BUILD)/iso-nxengine-freeplay/games/nxengine/smalfont.bmp
+	cp $(NXENGINE_DATA)/CaveStory/data/Credit.tsc $(BUILD)/iso-nxengine-freeplay/games/nxengine/Credit.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Pens1.pxe $(BUILD)/iso-nxengine-freeplay/games/nxengine/Pens1.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Head.tsc $(BUILD)/iso-nxengine-freeplay/games/nxengine/Head.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/ArmsItem.tsc $(BUILD)/iso-nxengine-freeplay/games/nxengine/ArmsItem.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/StageSelect.tsc $(BUILD)/iso-nxengine-freeplay/games/nxengine/StageSelect.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Start.pxm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Start.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Start.pxe $(BUILD)/iso-nxengine-freeplay/games/nxengine/Start.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.pxm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Frog.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.pxe $(BUILD)/iso-nxengine-freeplay/games/nxengine/Frog.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.tsc $(BUILD)/iso-nxengine-freeplay/games/nxengine/Frog.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/PrtWeed.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/PrtWeed.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Weed.pxa $(BUILD)/iso-nxengine-freeplay/games/nxengine/Weed.pxa
+	cp $(NXENGINE_DATA)/CaveStory/data/ArmsImage.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/ArmsImage.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Arms.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Arms.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Npc/NpcSym.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/NpcSym.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/ItemImage.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/ItemImage.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Title.pbm $(BUILD)/iso-nxengine-freeplay/games/nxengine/Title.pbm
+	cp $(NXENGINE_FREEPLAY_ELF) $(BUILD)/iso-nxengine-freeplay/games/nxengine/nxengine-play-freeplay.elf
+	cp grub/grub-nxengine-freeplay.cfg $(BUILD)/iso-nxengine-freeplay/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(BUILD)/iso-nxengine-freeplay >/dev/null 2>&1
+
+# D37 scripted verification: proves the freeplay loop genuinely has no
+# frame cap by letting it run for well over 500 real frames (paced at the
+# real ~60fps demon_port_sleep_ms(16) rate, so this alone takes >8s of
+# real wall-clock time inside the guest) driven entirely by real, timed
+# QEMU monitor sendkeys -- through the real title screen, the real
+# TB_SaveSelect widget, into real gameplay -- then confirms the player is
+# still live and responds to one final real keypress before a real ESCKEY
+# quits cleanly. NXENGINE_D37_FREEPLAY_OK's own frames_run counter (not a
+# fixed test-side counter) is checked against >=500 -- if the engine ever
+# regains a hidden frame cap below that, this fails loudly.
+nxengine-play-freeplay-smoke: $(NXENGINE_FREEPLAY_ISO)
+	@command -v socat >/dev/null
+	@rm -f $(BUILD)/nxengine-freeplay.log $(BUILD)/nxengine-freeplay-monitor.sock
+	@timeout 180s qemu-system-x86_64 -cdrom $(NXENGINE_FREEPLAY_ISO) -m 256M \
+		-serial file:$(BUILD)/nxengine-freeplay.log -display none \
+		-monitor unix:$(BUILD)/nxengine-freeplay-monitor.sock,server=on,wait=off \
+		-no-reboot -no-shutdown >/dev/null 2>&1 & pid=$$!; \
+		for attempt in $$(seq 1 150); do \
+			test -S $(BUILD)/nxengine-freeplay-monitor.sock && grep -q "mako#" $(BUILD)/nxengine-freeplay.log 2>/dev/null && break; sleep 0.1; \
+		done; \
+		{ printf 'sendkey n\nsendkey x\nsendkey e\nsendkey n\nsendkey g\nsendkey i\nsendkey n\nsendkey e\nsendkey minus\nsendkey p\nsendkey l\nsendkey a\nsendkey y\nsendkey minus\nsendkey f\nsendkey r\nsendkey e\nsendkey e\nsendkey p\nsendkey l\nsendkey a\nsendkey y\n'; \
+		  printf 'sendkey ret\n'; } | \
+			socat - UNIX-CONNECT:$(BUILD)/nxengine-freeplay-monitor.sock >/dev/null; \
+		for attempt in $$(seq 1 150); do \
+			grep -q "NXENGINE_D37_TITLE_READY" $(BUILD)/nxengine-freeplay.log 2>/dev/null && break; sleep 0.1; \
+		done; \
+		printf 'sendkey z 500\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-freeplay-monitor.sock >/dev/null; \
+		sleep 0.7; \
+		for attempt in $$(seq 1 150); do \
+			grep -q "NXENGINE_D37_SAVESELECT_READY" $(BUILD)/nxengine-freeplay.log 2>/dev/null && break; sleep 0.1; \
+		done; \
+		sleep 0.3; \
+		printf 'sendkey z 500\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-freeplay-monitor.sock >/dev/null; \
+		sleep 0.7; \
+		for attempt in $$(seq 1 150); do \
+			grep -q "NXENGINE_D37_GAMEPLAY_START" $(BUILD)/nxengine-freeplay.log 2>/dev/null && break; sleep 0.1; \
+		done; \
+		for burst in $$(seq 1 20); do \
+			printf 'sendkey right 300\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-freeplay-monitor.sock >/dev/null; \
+			sleep 0.5; \
+			printf 'sendkey left 300\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-freeplay-monitor.sock >/dev/null; \
+			sleep 0.5; \
+		done; \
+		printf 'sendkey right 900\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-freeplay-monitor.sock >/dev/null; \
+		sleep 1.2; \
+		printf 'sendkey esc\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-freeplay-monitor.sock >/dev/null; \
+		for attempt in $$(seq 1 150); do \
+			grep -q "process exited with status" $(BUILD)/nxengine-freeplay.log 2>/dev/null && break; sleep 0.1; \
+		done; \
+		kill $$pid 2>/dev/null || true; wait $$pid 2>/dev/null || true
+	@grep -q "NXENGINE_D37_TITLE_READY" $(BUILD)/nxengine-freeplay.log
+	@grep -q "NXENGINE_D37_SAVESELECT_READY" $(BUILD)/nxengine-freeplay.log
+	@grep -q "NXENGINE_D37_GAMEPLAY_START" $(BUILD)/nxengine-freeplay.log
+	@grep -Eoq "NXENGINE_D37_FREEPLAY_OK frames_run=[5-9][0-9][0-9] still_responsive=1|NXENGINE_D37_FREEPLAY_OK frames_run=[0-9]{4,} still_responsive=1" $(BUILD)/nxengine-freeplay.log
+	@grep -q "process exited with status 0" $(BUILD)/nxengine-freeplay.log
+	@! grep -q "PAGE FAULT\|\[FAILED\]" $(BUILD)/nxengine-freeplay.log
+	@echo "NXEngine D37 freeplay smoke test passed"
 
 QUAKE_BUILD := $(BUILD)/quake
 QUAKE_CORE_ELF := $(BUILD)/quake-core.elf

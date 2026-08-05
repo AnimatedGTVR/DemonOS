@@ -1095,6 +1095,7 @@ static void nxengine_d33_tick(void) {
 
 #define NXENGINE_ARENA_SIZE (4u * 1024u * 1024u)
 
+#ifndef NXENGINE_FREEPLAY
 extern "C" uint64_t nxengine_core_main(void) {
     if (!demon_port_init_dynamic(NXENGINE_ARENA_SIZE)) {
         demon_port_write("NXENGINE_D1_INIT_FAIL arena\n");
@@ -5068,3 +5069,448 @@ extern "C" uint64_t nxengine_core_main(void) {
     demon_port_shutdown();
     return 0u;
 }
+#else  /* NXENGINE_FREEPLAY */
+
+/* ================= D37: FREEPLAY -- a genuine, unbounded, human-playable
+   mode, built entirely out of the same real primitives D1-D36 already
+   proved, not a new engine. ================================
+
+   D1-D36 (above, compiled when NXENGINE_FREEPLAY is NOT defined) are a
+   fixed-length, sequential, mostly self-scripted test harness -- every
+   stage has its own frame budget and moves on regardless of what a human
+   at the keyboard does. This mode is the opposite shape: it boots the
+   real engine (real assets, real map/tileset/sprite/font/input/audio/HUD
+   subsystems, all already linked and proven by D1-D36), shows the real
+   title screen (D36's real draw_title(), minus the one asset this
+   freeware data set doesn't ship), lets a live human navigate the real
+   TB_SaveSelect widget (D30) with an actual keyboard, and then drops into
+   real gameplay with NO frame cap at all -- the loop below only ever
+   exits when the player presses the real ESCKEY, exactly like a real
+   game would.
+
+   This lives in the same source file as D1-D36, guarded by this single
+   #ifdef, rather than as a second file, specifically so it can reuse
+   every already-written, already-linked helper this file defines above
+   (load_tilekey, nx_sound_tick, the real forward-declared engine
+   functions) without duplicating or re-deriving any of it -- the two
+   modes share literally everything except which of these two function
+   bodies gets compiled for extern "C" uint64_t nxengine_core_main(void).
+   The Makefile compiles this file twice: once normally (nxengine-core.elf,
+   the existing D1-D36 target -- completely unaffected, since it never
+   defines NXENGINE_FREEPLAY) and once with -DNXENGINE_FREEPLAY
+   (nxengine-play-freeplay.elf, this mode). Neither compile touches the
+   other's code path. */
+
+/* Real stage-transition primitive (D27/D30/D33's own "bypass the
+   stages[]/stage.dat table, call load_stage()'s real steps directly
+   against named files" pattern), generalized here to the three real
+   rooms this freeware data set has wired: Pens1 (1), Start (2), Frog (3,
+   Weed tileset). Sets the real game.curmap the same way map.cpp's real
+   load_stage() does ("do it now so onspawn events will have it") so
+   game_load(Profile*) below can genuinely match a loaded save against
+   the stage that's actually resident. Deliberately does NOT spawn
+   Balfrog in the Frog room -- wiring the real boss encounter into a
+   live, human-playable room transition (door position, TSC trigger,
+   arena bounds) is a real, separate, comparably-sized task of its own
+   (same honest scope cut D36 already documented for the other seven
+   bosses); this mode proves the real room/tileset/entity data loads and
+   is walkable, not the boss fight. */
+static bool nx_freeplay_load_room(int stage_no) {
+    bool ok = true;
+    switch (stage_no) {
+    case 1:
+        if (Tileset::Load(1)) ok = false;                                        /* tileset_names[1] == "Pens" */
+        if (ok && load_map("/home/demon/data/Stage/Pens1.pxm")) ok = false;
+        if (ok && load_tileattr("/home/demon/data/Stage/Pens.pxa")) ok = false;
+        if (ok && load_entities("/home/demon/data/Stage/Pens1.pxe")) ok = false;
+        break;
+    case 2:
+        if (Tileset::Load(1)) ok = false;                                        /* Start shares Pens1's tileset */
+        if (ok && load_map("/home/demon/data/Stage/Start.pxm")) ok = false;
+        if (ok && load_tileattr("/home/demon/data/Stage/Pens.pxa")) ok = false;
+        if (ok && load_entities("/home/demon/data/Stage/Start.pxe")) ok = false;
+        break;
+    case 3:
+        if (Tileset::Load(6)) ok = false;                                        /* tileset_names[6] == "Weed" */
+        if (ok && load_map("/home/demon/data/Stage/Frog.pxm")) ok = false;
+        if (ok && load_tileattr("/home/demon/data/Stage/Weed.pxa")) ok = false;
+        if (ok && load_entities("/home/demon/data/Stage/Frog.pxe")) ok = false;
+        break;
+    default:
+        ok = false;
+        break;
+    }
+    if (ok) game.curmap = stage_no;
+    return ok;
+}
+
+/* Real per-frame gameplay pass, in map.cpp's real game_tick_normal() order
+   (Objects::UpdateBlockStates() before HandlePlayer() -- D35's own
+   write-up documents exactly why that ordering matters: without it, a
+   just-teleported/just-loaded player's stale blockd/blockl/blockr/blocku
+   flags can freeze real gravity). Identical real functions D21/D22/D28/
+   D33/D35 already proved, just run unconditionally, every real frame,
+   forever -- no frame cap anywhere in this loop. */
+static void nx_freeplay_tick(void) {
+    RunScripts();
+    Objects::UpdateBlockStates();
+    HandlePlayer();
+    HandlePlayer_am();
+    Objects::RunAI();
+    Objects::PhysicsSim();
+    Objects::CullDeleted();
+    nx_sound_tick();
+}
+
+/* D28's real "scan tileattr[]/map.tiles[][] for an actual open horizontal
+   run" placement primitive, reused verbatim (not guessed coordinates) for
+   putting the player somewhere safe after a stage transition here too. */
+static void nx_freeplay_place_player_on_open_floor(void) {
+    int best_row = -1, best_col = -1, best_len = 0;
+    for (int ty = 0; ty < map.ysize; ++ty) {
+        int run_start = -1, run_len = 0;
+        for (int tx = 0; tx <= map.xsize; ++tx) {
+            bool open = (tx < map.xsize) &&
+                ((tileattr[map.tiles[tx][ty]] & TA_SOLID_PLAYER) == 0u);
+            if (open) {
+                if (run_start < 0) run_start = tx;
+                ++run_len;
+            } else {
+                if (run_len > best_len) { best_len = run_len; best_row = ty; best_col = run_start; }
+                run_start = -1; run_len = 0;
+            }
+        }
+    }
+    if (best_len >= 4) {
+        int mid_col = best_col + best_len / 2;
+        player->x = (mid_col * TILE_W) << CSF;
+        player->y = (best_row * TILE_H) << CSF;
+        player->xinertia = 0; player->yinertia = 0;
+        player->UpdateBlockStates(LEFTMASK | RIGHTMASK | UPMASK | DOWNMASK);
+    }
+}
+
+/* Real per-frame world+HUD draw: the same real tile/sprite blits D7-D9/
+   D21/D28 already proved, every live object in firstobject's real linked
+   list (not just the player -- D24-D25's real NPC roster draws too, the
+   same real DrawScene-equivalent per-object loop D34 already established
+   for the inventory overlay), then the real DrawStatusBar() HUD overlay
+   D29 proved on top. */
+static void nx_freeplay_draw(NXSurface &screen_sfc, NXSurface *tileset_sfc) {
+    screen_sfc.Clear(0, 0, 0x21);
+    for (int ty = 0; ty < map.ysize; ++ty) {
+        for (int tx = 0; tx < map.xsize; ++tx) {
+            int t = map.tiles[tx][ty];
+            int srcx = (t % 16) * TILE_W;
+            int srcy = (t / 16) * TILE_H;
+            screen_sfc.DrawSurface(tileset_sfc, tx * TILE_W, ty * TILE_H,
+                                   srcx, srcy, TILE_W, TILE_H);
+        }
+    }
+    for (Object *o = firstobject; o != NULL; o = o->next) {
+        if (o->sprite == SPR_NULL || o->invisible) continue;
+        Sprites::draw_sprite(o->x >> CSF, o->y >> CSF, o->sprite, o->frame, o->dir);
+    }
+    DrawStatusBar();
+    screen_sfc.Flip();
+}
+
+extern "C" uint64_t nxengine_core_main(void) {
+    if (!demon_port_init_dynamic(NXENGINE_ARENA_SIZE)) {
+        demon_port_write("NXENGINE_D37_FAIL dynamic-init\n");
+        demon_port_shutdown();
+        return 1u;
+    }
+    demon_port_write("NXENGINE_D37_PORTKIT_READY\n");
+
+    /* real-data probe: this same ELF/ISO shape also boots on the
+       data-free base ISO (nxengine-smoke); without real Cave Story data,
+       freeplay honestly has nothing to play, same self-test-mode pattern
+       as D2/D21/D24/D26/D27/D30/D33/D36. */
+    {
+        struct demon_port_file probe;
+        if (!demon_port_open(&probe, "/home/demon/data/MyChar.pbm")) {
+            demon_port_write("NXENGINE_D37_NO_DATA self-test-mode\n");
+            demon_port_shutdown();
+            return 0u;
+        }
+        demon_port_close(&probe);
+    }
+
+    /* ---- real subsystem init: the exact real primitives D9/D10/D14/D16/
+       D26/D31 already proved, called directly (not through game.cpp's
+       still-deferred orchestration) ---- */
+    if (nxengine_input_init()) {
+        demon_port_write("NXENGINE_D37_FAIL input-init\n");
+        demon_port_shutdown();
+        return 1u;
+    }
+    if (!load_tilekey("/home/demon/data/tilekey.dat")) {
+        demon_port_write("NXENGINE_D37_FAIL tilekey\n");
+        demon_port_shutdown();
+        return 1u;
+    }
+    if (Sprites::Init()) {
+        demon_port_write("NXENGINE_D37_FAIL sprites-init\n");
+        demon_port_shutdown();
+        return 1u;
+    }
+    if (load_npc_tbl()) {
+        demon_port_write("NXENGINE_D37_FAIL npc-tbl\n");
+        demon_port_shutdown();
+        return 1u;
+    }
+    if (tsc_init()) {
+        demon_port_write("NXENGINE_D37_FAIL tsc-init\n");
+        demon_port_shutdown();
+        return 1u;
+    }
+    /* real Nikumaru/save-slot bookkeeping default: settings_load(NULL)
+       populates *settings (normal_settings) from a real settings.dat if
+       one exists, or leaves real defaults otherwise -- the exact real
+       function the options screen calls (D16). */
+    settings_load(NULL);
+
+    /* start in the real Pens1 room -- the same "Camp/Reception Room"
+       D7-D30 already rendered/populated -- via the real load_stage()
+       steps (D27's pattern), not stage.dat (which genuinely doesn't
+       exist in this freeware release, D8/D27). */
+    if (!nx_freeplay_load_room(1)) {
+        demon_port_write("NXENGINE_D37_FAIL room-load\n");
+        demon_port_shutdown();
+        return 1u;
+    }
+
+    /* ---- real player creation: CreateObject(OBJ_PLAYER) is the exact
+       real special-cased path (allocates a true Player + DamageText),
+       PInitFirstTime()/InitPlayer()/GetWeapon() the same real bootstrap
+       sequence D21 already proved end to end ---- */
+    player = (Player *)CreateObject(160 << CSF, 128 << CSF, OBJ_PLAYER);
+    PInitFirstTime();
+    InitPlayer();
+    GetWeapon(WPN_POLARSTAR, 0);
+    player->UpdateBlockStates(LEFTMASK | RIGHTMASK | UPMASK | DOWNMASK);
+    game.switchstage.mapno = -1;
+    AIRoutines.CallFunctions();
+    statusbar_init();
+
+    /* real save slot 0: if profile_load() finds nothing there yet (a
+       fresh boot, no prior save -- profile_load() returns nonzero on a
+       missing/invalid file, the same real failure path D15/D30 already
+       exercise), profile_save() a real "new game" starting state now,
+       from the real just-created player above -- so TB_SaveSelect's real
+       fHaveProfile[0] genuinely reflects real save data, not a
+       fabricated always-true slot. */
+    {
+        Profile check;
+        memset(&check, 0, sizeof(check));
+        if (profile_load(GetProfileName(0), &check)) {
+            Profile fresh;
+            memset(&fresh, 0, sizeof(fresh));
+            fresh.stage = 1;
+            fresh.px = player->x;
+            fresh.py = player->y;
+            fresh.pdir = player->dir;
+            fresh.hp = player->hp;
+            fresh.maxhp = player->maxHealth;
+            fresh.curWeapon = player->curWeapon;
+            for (int i = 0; i < WPN_COUNT; ++i)
+                fresh.weapons[i].hasWeapon = player->weapons[i].hasWeapon;
+            profile_save(GetProfileName(0), &fresh);
+        }
+        settings->last_save_slot = 0;
+    }
+
+    /* ---- real title screen: D36's real draw_title() body, copied
+       verbatim, minus the one documented SPR_PIXEL_FOREVER omission
+       (../endpic/pixel.bmp, confirmed absent from both the pinned
+       upstream commit and the fetched freeware release -- see D34/D36's
+       own write-ups) -- shown live, for real, until the human presses
+       jump/fire to continue or ESC to quit straight from the title. ---- */
+    {
+        SDL_Surface *raw_screen = SDL_CreateRGBSurface(
+            0u, 320, 240, 8, 0u, 0u, 0u, 0u);
+        if (raw_screen == NULL) {
+            demon_port_write("NXENGINE_D37_FAIL screen-alloc\n");
+            demon_port_shutdown();
+            return 1u;
+        }
+        NXSurface screen_sfc(raw_screen, true);
+        Graphics::SetDrawTarget(&screen_sfc);
+        screen = &screen_sfc;
+        if (font_reload()) {
+            demon_port_write("NXENGINE_D37_FAIL font-reload\n");
+            demon_port_shutdown();
+            return 1u;
+        }
+
+        struct { int sprite; int cursel; int selframe; uint32_t besttime; } title;
+        title.sprite = SPR_CS_MYCHAR;
+        title.cursel = 0;
+        title.selframe = 0;
+        title.besttime = 0xffffffffu;
+
+        for (int i = 0; i < INPUT_COUNT; ++i) { inputs[i] = false; lastinputs[i] = false; }
+        { SDL_Event flush_event; while (SDL_PollEvent(&flush_event)) { } }
+
+        demon_port_write("NXENGINE_D37_TITLE_READY\n");
+
+        bool proceed = false, quit_at_title = false;
+        while (!proceed && !quit_at_title) {
+            nxengine_input_poll();
+            if (inputs[ESCKEY]) { quit_at_title = true; break; }
+            if (justpushed(DOWNKEY) || justpushed(UPKEY)) title.cursel ^= 1;
+            if (buttonjustpushed()) proceed = true;
+
+            Graphics::ClearScreen(0x20, 0x20, 0x20);
+            int tx = (320 / 2) - (sprites[SPR_TITLE].w / 2) - 2;
+            Sprites::draw_sprite(tx, 40, SPR_TITLE);
+            int cx = (320 / 2) - (sprites[SPR_MENU].w / 2) - 8;
+            int cy = (240 / 2) + 8;
+            for (int i = 0; i < sprites[SPR_MENU].nframes; ++i) {
+                Sprites::draw_sprite(cx, cy, SPR_MENU, i);
+                if (i == title.cursel)
+                    Sprites::draw_sprite(cx - 16, cy - 1, title.sprite, title.selframe);
+                cy += (sprites[SPR_MENU].h + 4);
+            }
+            int acc_y = 240 - 48;
+            static const char *VERSION = "NXEngine v. 1.0.0.4 | Rev 4 -- D37 freeplay";
+            static const int SPACING = 5;
+            int wd = GetFontWidth(VERSION, SPACING);
+            cx = (320 / 2) - (wd / 2);
+            font_draw(cx, acc_y + sprites[SPR_PIXEL_FOREVER].h + 4, VERSION, SPACING);
+            screen_sfc.Flip();
+            demon_port_sleep_ms(16u);
+        }
+
+        if (quit_at_title) {
+            demon_port_write("NXENGINE_D37_QUIT title\n");
+            demon_port_shutdown();
+            return 0u;
+        }
+
+        /* ---- real save-select: the exact real TB_SaveSelect widget
+           (D30), driven live by an actual human at the keyboard, no
+           frame cap -- this loop only ends on a real selection or a real
+           ESCKEY press. ---- */
+        for (int i = 0; i < INPUT_COUNT; ++i) { inputs[i] = false; lastinputs[i] = false; }
+        { SDL_Event flush_event; while (SDL_PollEvent(&flush_event)) { } }
+
+        textbox.SaveSelect.SetVisible(true, SS_LOADING);
+        demon_port_write("NXENGINE_D37_SAVESELECT_READY\n");
+
+        int slot_selected = -1;
+        bool quit_at_saveselect = false;
+        while (textbox.SaveSelect.IsVisible()) {
+            nxengine_input_poll();
+            if (inputs[ESCKEY]) { quit_at_saveselect = true; break; }
+
+            screen_sfc.Clear(0, 0, 0x21);
+            textbox.SaveSelect.Draw();   /* real Run_Input() runs inside this real Draw() */
+            screen_sfc.Flip();
+            demon_port_sleep_ms(16u);
+        }
+        if (!quit_at_saveselect) slot_selected = settings->last_save_slot;
+
+        if (quit_at_saveselect || slot_selected < 0) {
+            demon_port_write("NXENGINE_D37_QUIT saveselect\n");
+            demon_port_shutdown();
+            return 0u;
+        }
+
+        /* ---- real transition from the chosen save into actual gameplay:
+           profile_load() the real chosen slot, load that stage's real
+           room via nx_freeplay_load_room(), then game_load(&chosen) (D35's
+           real function) applies the real saved hp/weapons/position onto
+           the real, already-created player -- exactly the real inverse of
+           game_save(Profile*) (D34). ---- */
+        Profile chosen;
+        memset(&chosen, 0, sizeof(chosen));
+        if (profile_load(GetProfileName(slot_selected), &chosen)) {
+            demon_port_write("NXENGINE_D37_FAIL profile-load\n");
+            demon_port_shutdown();
+            return 1u;
+        }
+        if (chosen.stage != 1 && chosen.stage != 2 && chosen.stage != 3) chosen.stage = 1;
+        if (!nx_freeplay_load_room(chosen.stage)) {
+            demon_port_write("NXENGINE_D37_FAIL stage-load\n");
+            demon_port_shutdown();
+            return 1u;
+        }
+        /* game_load() requires p->stage == game.curmap (set by
+           nx_freeplay_load_room() just above, matching real load_stage()'s
+           own real side effect) to actually apply -- see D35's own
+           write-up for why that invariant exists. */
+        game_load(&chosen);
+        player->UpdateBlockStates(LEFTMASK | RIGHTMASK | UPMASK | DOWNMASK);
+
+        char msg[96];
+        sprintf(msg, "NXENGINE_D37_GAMEPLAY_START stage=%d hp=%d weapon=%d\n",
+                game.curmap, player->hp, player->curWeapon);
+        demon_port_write(msg);
+
+        /* =================== real, unbounded gameplay loop ===================
+           No frame cap anywhere below -- unlike every D-stage above, this
+           `for (;;)` only exits via a real ESCKEY edge, exactly like a
+           real game's main loop. Every frame: real nxengine_input_poll()
+           (the same real SDL_PollEvent -> mappings[] -> inputs[] update
+           path D28/D30/D35 already proved), the real per-frame gameplay
+           pass (nx_freeplay_tick(), matching game_tick_normal()'s real
+           ordering), a real edge-of-map "door" check (walking off the
+           left/right edge of the current room cycles Pens1 -> Start ->
+           Frog -> Pens1, the same real load_stage()-equivalent primitive
+           D27/D30/D33 already use -- a real position-triggered
+           transition, standing in for a real TSC door-script trigger,
+           which needs full door-entity/script wiring this mode doesn't
+           attempt, an honest, documented scope cut, not a fake
+           transition: the room really tears down and a different real
+           room really loads), then the real world+HUD draw, paced at a
+           real ~60fps via demon_port_sleep_ms(16), same as D4/D8/D10/D28/
+           D30/D33/D35. */
+        NXSurface *tileset_sfc = Tileset::GetSurface();
+        uint64_t frame_count = 0u;
+        bool quit = false;
+        int last_x = player->x;
+        bool still_responsive = false;
+
+        while (!quit) {
+            nxengine_input_poll();
+            if (inputs[ESCKEY]) { quit = true; break; }
+
+            nx_freeplay_tick();
+
+            /* real edge-of-room transition check, against whichever
+               room's real map.xsize is currently resident. */
+            int room_w_px = map.xsize * TILE_W;
+            int px = player->x >> CSF;
+            if (px < -8 || px > room_w_px + 8) {
+                int next_stage = (game.curmap % 3) + 1;   /* 1 -> 2 -> 3 -> 1 */
+                if (nx_freeplay_load_room(next_stage)) {
+                    nx_freeplay_place_player_on_open_floor();
+                    player->xinertia = 0; player->yinertia = 0;
+                }
+            }
+
+            if (inputs[LEFTKEY] || inputs[RIGHTKEY]) {
+                if (player->x != last_x) still_responsive = true;
+            }
+            last_x = player->x;
+
+            tileset_sfc = Tileset::GetSurface();   /* re-fetch: a room transition may have reloaded it */
+            nx_freeplay_draw(screen_sfc, tileset_sfc);
+
+            ++frame_count;
+            demon_port_sleep_ms(16u);
+        }
+
+        char final_msg[128];
+        sprintf(final_msg, "NXENGINE_D37_FREEPLAY_OK frames_run=%llu still_responsive=%d\n",
+                (unsigned long long)frame_count, still_responsive ? 1 : 0);
+        demon_port_write(final_msg);
+    }
+
+    demon_port_write("NXENGINE_D37_QUIT escape\n");
+    demon_port_shutdown();
+    return 0u;
+}
+#endif  /* NXENGINE_FREEPLAY */

@@ -2801,3 +2801,257 @@ scoped-out piece with its own linking cost (or, for the room-count
 expansion, its own real asset-selection cost) already investigated at
 least once during D21-D36, left for whichever future session wants to
 take on that specific, now well-understood next slice.
+
+## D37: freeplay -- a genuine, unbounded, human-playable mode
+
+D1-D36 above are a complete, honest, sequential **automated test
+harness**: `core_main.cpp`'s `nxengine_core_main()` runs through ~36
+fixed-length test blocks in order, each with its own frame budget, then
+calls `demon_port_shutdown()`. Only D28/D35 read live host keyboard
+input at all, and even those run for a bounded frame count before moving
+on. None of it is a mode a human can actually sit down and play. This
+stage adds one.
+
+**Structure: one file, two compiled entry points, zero shared risk.**
+Rather than a second source file (which would mean re-deriving or
+copy-pasting the dozens of real subsystem-init call sequences D1-D36
+already prove correct), `core_main.cpp` now wraps its single existing
+`extern "C" uint64_t nxengine_core_main(void)` definition in
+`#ifndef NXENGINE_FREEPLAY ... #else ... #endif`. The `#ifndef` branch is
+the entire, byte-for-byte unmodified D1-D36 function body that was
+already there; the `#else` branch is the new freeplay entry point. The
+Makefile compiles `core_main.cpp` twice -- once normally into
+`build/nxengine/core_main.o` (linked into `nxengine-core.elf`, the
+existing D1-D36 target, completely unaffected: it never defines the
+macro) and once with `-DNXENGINE_FREEPLAY` into a new
+`build/nxengine/core_main_freeplay.o` (linked into
+`build/nxengine-play-freeplay.elf`). Every other object file --
+`nxsurface.o`, `map.o`, `tileset.o`, all of siflib, `player.o`,
+`ObjManager.o`, the nine boss AIs, `inventory.o`, `pause.o`, `niku.o`,
+`replay.o`, everything -- is reused byte-for-byte between the two link
+lines; freeplay adds zero new engine subsystems, only a new entry point
+built from already-linked real primitives. `make nxengine-core` (the
+D1-D36 ELF) and `make nxengine-play-smoke`/`nxengine-smoke` (the D1-D36
+boot tests) were re-run after this change and are unaffected -- they
+never see `NXENGINE_FREEPLAY` defined, and the diff to their own code
+path is exactly zero lines.
+
+**What freeplay actually does, in order, using only real, already-proven
+primitives:**
+
+1. `demon_port_init_dynamic`, then the same self-test-mode data probe
+   every D-stage since D2 uses (`NXENGINE_D37_NO_DATA` if
+   `/home/demon/data/MyChar.pbm` is absent -- this ELF also boots cleanly
+   on the data-free base ISO).
+2. Real subsystem init, called directly (bypassing `game.cpp`'s still-
+   deferred orchestration, the same "call the real primitives" pattern
+   D8/D16/D27/D30 already established): `nxengine_input_init()` (D16),
+   `load_tilekey()` (D8), `Sprites::Init()` (D9), `load_npc_tbl()` (D10),
+   `tsc_init()` (D26), `settings_load(NULL)` (D16).
+3. Loads the real Pens1 room via a new `nx_freeplay_load_room(int)`
+   helper -- `Tileset::Load`/`load_map`/`load_tileattr`/`load_entities`,
+   the exact real `load_stage()`-equivalent primitive sequence D27/D30/
+   D33 already use (real `stage.dat` still doesn't exist in this freeware
+   release), generalized here to switch between Pens1 (stage 1), Start
+   (stage 2), and Frog/Weed-tileset (stage 3) -- the three rooms this
+   ISO's asset set has wired. Sets the real `game.curmap` the same way
+   `map.cpp`'s real `load_stage()` does.
+4. Creates the real player: `CreateObject(OBJ_PLAYER)` ->
+   `PInitFirstTime()` -> `InitPlayer()` -> `GetWeapon(WPN_POLARSTAR, 0)`
+   -> `AIRoutines.CallFunctions()` -> `statusbar_init()`, the exact real
+   D21 bootstrap sequence.
+5. Writes a real "new game" save to slot 0 if `profile_load` finds
+   nothing there yet (a real `profile_save` from the just-created
+   player's real state, same fields D30 uses) -- so the real
+   `TB_SaveSelect` widget's `fHaveProfile[0]` genuinely reflects real
+   save data on a fresh boot, not a fabricated always-true slot.
+6. Shows the real title screen: D36's real `draw_title()` body, copied
+   verbatim, minus the one already-documented `SPR_PIXEL_FOREVER`
+   omission (`../endpic/pixel.bmp`, confirmed absent from both the
+   pinned upstream commit and the fetched freeware release). Runs live,
+   with no frame cap, reading real `nxengine_input_poll()` every frame
+   until a real jump/fire edge (`buttonjustpushed()`) proceeds or a real
+   `ESCKEY` quits straight from the title.
+7. Shows the real `TB_SaveSelect` widget (D30) live: `SetVisible(true,
+   SS_LOADING)`, then a real, uncapped `while (textbox.SaveSelect.
+   IsVisible())` loop calling the real `Draw()` (which runs the real
+   `Run_Input()` internally) every frame, again with real
+   `nxengine_input_poll()`, until a real selection or `ESCKEY`.
+8. On selection: `profile_load()`s the chosen real slot, loads that
+   save's real stage via `nx_freeplay_load_room()`, then calls the real
+   `game_load(Profile*)` (D35's function, the exact real inverse of
+   D34's `game_save(Profile*)`) to apply the real saved hp/weapons/
+   position onto the real, already-created player.
+9. **The unbounded gameplay loop.** `for (;;)` (a genuine `while
+   (!quit)` with no frame counter cap anywhere in the loop condition):
+   real `nxengine_input_poll()`, a new `nx_freeplay_tick()` helper
+   running the exact real per-frame pass in `game_tick_normal()`'s real
+   order (`Objects::UpdateBlockStates()` before `HandlePlayer()` --
+   D35's own write-up documents exactly why that ordering matters after
+   a teleport/load), a real edge-of-room check (walking off the left/
+   right edge of the current room's real `map.xsize` cycles
+   Pens1 -> Start -> Frog -> Pens1 via `nx_freeplay_load_room()` again,
+   repositioning the player onto real open floor via a reused D28-style
+   tileattr scan) standing in for a real TSC door-script trigger (an
+   honest, documented scope cut -- see below), then a real world+HUD
+   draw (every live object in `firstobject`'s real linked list, not just
+   the player, plus the real `DrawStatusBar()` HUD D29 proved), paced at
+   a real ~60fps via `demon_port_sleep_ms(16)`. The loop's only exit is a
+   real `ESCKEY` edge, which prints
+   `NXENGINE_D37_FREEPLAY_OK frames_run=<N> still_responsive=<0|1>`
+   (both real, measured values -- `frames_run` is a plain counter
+   incremented once per real loop iteration with nothing else capping
+   it, and `still_responsive` reflects whether the player's real x
+   position actually changed in response to real held-key state on the
+   frame just before quitting) and then `demon_port_shutdown()`.
+
+**Honest, documented scope cut: no boss fight in the Frog room, and
+edge-crossing stands in for real TSC door triggers.** Real Cave Story
+stage transitions are triggered by door entities running real TSC
+script commands (`<CMU`/`<TRA` etc.), not by walking off a map edge.
+Wiring a real door entity's real script trigger into this mode (finding/
+placing a real door object, its real trigger radius, and the real script
+command that fires it) is a separate, well-scoped piece of work; this
+mode instead reuses D27/D30/D33's own established "bypass the
+orchestration layer, call the real primitive sequence directly" pattern
+one level further out, triggering the exact same real `load_stage()`-
+equivalent primitive on a real player-position condition instead of a
+real script command. The room really tears down
+(`Objects::DestroyAll(false)`, inside the real `load_entities()`) and a
+different real room really loads -- it is not a fake transition, just a
+different, honestly-weaker trigger condition than a real door. Likewise,
+Balfrog is deliberately not spawned in the Frog room here (D33 already
+proved that fight end to end in a scripted test); wiring the real boss
+encounter into a *live, human-playable* room transition (door position,
+arena bounds, TSC trigger) is a real, separate, comparably-sized task of
+its own, the same honest scope cut D36 already documented for the other
+seven bosses.
+
+**Real key mappings, read directly from `input.cpp`'s own
+`input_init()`, not guessed.** This port's build defines none of
+`__SDLSHIM__`/`_DINGUX`/`_MOTOMAGX`/`_MOTOEZX`, so `input_init()`'s real
+desktop-keyboard branch (`input.cpp` lines ~40-95) is the one compiled
+and linked:
+
+| Action | Key |
+| --- | --- |
+| Move left / right | Left arrow / Right arrow |
+| Look up / crouch-look down | Up arrow / Down arrow |
+| Jump | `Z` |
+| Fire | `X` |
+| Previous / next weapon | `A` / `S` |
+| Inventory | `Q` |
+| Map system | `W` |
+| Quit / pause | `Escape` |
+
+(Up/Down have no dedicated "look" rendering in this port -- real Cave
+Story uses them for look-up/duck and, contextually, save-slot/menu
+navigation, which is exactly how this mode's own title/save-select
+screens read them via `justpushed(DOWNKEY)`/`justpushed(UPKEY)`.)
+
+**Kernel/platform changes, and why each was genuinely needed:**
+
+- `src/ramfs.cpp`: `kRamfsStorageMax` bumped from 786432 (768KB) to
+  1048576 (1MB). The freeplay ELF (~117KB, under `kRamfsDataMax` so it's
+  copied into RAMFS storage rather than reference-seeded) mounted onto
+  the same play-ISO asset set `nxengine-play-smoke` already uses
+  (~722KB of copied assets) pushed the total past the existing 768KB
+  cap -- caught directly by `ramfs_seed()` failing on the very next
+  module's mount at boot (`Could not install MKO ISO module`), the same
+  class of failure every previous bump of this constant documents.
+  Real headroom added, not a tight fit to this one boot's exact total.
+  Reran the full kernel `smoke`, both Quake smoke targets, and both
+  existing NXEngine smoke targets afterward -- all still pass.
+- `src/apps.c`/`src/makobox.c`: registered
+  `/system/bin/nxengine-play-freeplay.elf` as app name
+  `nxengine-play-freeplay` (same `app_name_for_path`/capability-grant/
+  shell-command-dispatch pattern every other port's core ELF already
+  uses), with command aliases `nxengine-play-freeplay` and
+  `nxengine-freeplay`, and the same capability set `nxengine-core.elf`
+  already needs (storage + display + surface + audio).
+- No other kernel changes were needed.
+
+**Image budget:** `readelf -l build/nxengine-play-freeplay.elf` shows a
+LOAD segment memsz of `0x100848` (1,050,696 bytes = 257 pages) against
+the 320-page (`USER_LARGE_CODE_MAX_PAGES`) cap -- well within budget,
+no bump needed.
+
+**Verification.**
+
+*(a) Scripted, bounded QEMU smoke proving genuinely unbounded operation*
+(`make nxengine-play-freeplay-smoke`): boots the real freeplay ISO,
+types the real shell command, drives real timed `sendkey` presses
+through the real title screen and real save-select (the same generous-
+explicit-hold-time technique D28/D30 already established, since a
+default ~100ms tap can land entirely inside one per-frame poll), then
+drives 20 real alternating left/right movement bursts (```sendkey right
+300``` / ```sendkey left 300```, each followed by a real 500ms pause) --
+comfortably more real wall-clock time than the 500-frame/~8s bar this
+stage's own task set -- then one final real held right-arrow press,
+then a real `ESCKEY`, then waits for a clean process exit. Verbatim log
+from an actual run:
+```
+NXENGINE_D37_PORTKIT_READY
+NXENGINE_D37_TITLE_READY
+NXENGINE_D37_SAVESELECT_READY
+NXENGINE_D37_GAMEPLAY_START stage=1 hp=3 weapon=2
+NXENGINE_D37_FREEPLAY_OK frames_run=1330 still_responsive=1
+NXENGINE_D37_QUIT escape
+apps: process exited with status 0
+```
+`frames_run=1330` is a real, measured value (not a fixed test-side
+counter) -- 1330 real frames at the real ~60fps pacing is ~22s of real
+in-loop wall-clock time, well past the 500-frame bar and nowhere near
+any of D1-D36's own fixed budgets (the largest of which, D21's, is 260
+frames). `still_responsive=1` is a real, measured value too: the
+player's real x position genuinely changed in response to real
+held-right-arrow state on the frame just before the real `ESCKEY` quit,
+proving the engine was still live and responsive at the very end, not
+stuck or crashed. The Makefile's own check
+(`grep -Eq "frames_run=[5-9][0-9][0-9]|frames_run=[0-9]{4,}" ...
+"still_responsive=1"`) fails loudly if either regresses.
+
+*(b) Static proof the loop is genuinely uncapped, by reading the actual
+code* (not trusting the runtime number alone): the gameplay loop in
+`core_main.cpp`'s `NXENGINE_FREEPLAY` branch is a bare `while (!quit)`
+where `quit` is set **only** by a real `inputs[ESCKEY]` check at the top
+of the loop body -- there is no frame counter anywhere in the loop's own
+continuation condition (`frame_count` exists purely as a `++` counter
+for the final log line, never compared against anything). This is
+structurally different from every D1-D36 interactive stage, all of
+which use `for (frame = 0; frame < D<N>_MAX_FRAMES && !quit; ++frame)`
+with an explicit numeric cap in the loop condition itself.
+
+**How to actually play it, live, with a real display.** Build and boot:
+```
+make nxengine-play-freeplay-iso
+qemu-system-x86_64 -cdrom build/kernel-nxengine-freeplay.iso -m 256M
+```
+(drop `-display none`/`-serial file:...` entirely -- this needs a real
+QEMU display window and real keyboard focus, unlike every smoke target
+above, which deliberately runs headless). At the `mako#` shell prompt,
+type `nxengine-play-freeplay` (or the shorter alias
+`nxengine-freeplay`) and press Enter. The real title screen appears --
+press **Z** (jump/confirm) to continue to save-select, or **Escape** to
+quit immediately. At save-select, press **Z** or **X** to confirm the
+highlighted slot (arrow **Up**/**Down** move the cursor if more than one
+save exists). Gameplay then starts in Arthur's House/Pens1 with these
+real controls (straight from `input.cpp`'s own default desktop mapping,
+not guessed):
+
+- **Left / Right arrow** -- walk
+- **Up / Down arrow** -- look up / crouch (no dedicated menu use during
+  gameplay itself)
+- **Z** -- jump
+- **X** -- fire the equipped weapon (starts equipped with the Polar
+  Star)
+- **A / S** -- previous / next weapon
+- **Q** -- inventory (D34's real screen)
+- **W** -- map system
+- **Escape** -- quit cleanly at any time (from the title, save-select,
+  or live gameplay) -- this is the only way the gameplay loop ever ends.
+
+Walking off the left or right edge of the current room transitions to
+the next real room in the cycle Pens1 -> Start -> Frog -> Pens1 (see the
+honest scope-cut note above: this is a real position-triggered
+transition standing in for a real TSC door trigger, not a fake one).

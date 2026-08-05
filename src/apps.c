@@ -34,6 +34,7 @@ static const char *app_name_for_path(const char *path) {
     if (equal(path, "/system/bin/classicube-core.elf")) return "classicube";
     if (equal(path, "/system/bin/quake-core.elf")) return "quake-core";
     if (equal(path, "/system/bin/nxengine-core.elf")) return "nxengine-core";
+    if (equal(path, "/system/bin/nxengine-play-freeplay.elf")) return "nxengine-play-freeplay";
     if (equal(path, "/system/bin/calculator.elf")) return "calculator";
     if (equal(path, "/system/bin/demonwm.elf")) return "demonwm";
     if (equal(path, "/system/bin/filemanager.elf")) return "filemanager";

@@ -58,8 +58,15 @@ constexpr size_t kRamfsDataMax = 196608u;
 // the D33 Balfrog stage added the Frog arena files plus the NpcSym.pbm
 // sprite sheet the Weed tileset's destroyable blocks need, pushing the
 // copied set to ~667KB -- caught the same way, by ramfs_seed() failing
-// on NpcSym.pbm's mount.
-constexpr size_t kRamfsStorageMax = 786432u;
+// on NpcSym.pbm's mount. Bumped again to 1MB: the NXEngine D37 freeplay
+// mode (docs/nxengine-port.md) mounts a second real ELF
+// (nxengine-play-freeplay.elf, ~117KB, under kRamfsDataMax so it's
+// copied, not reference-seeded) onto the same play-ISO asset set
+// nxengine-play-smoke already uses (~722KB) -- caught the same way, by
+// ramfs_seed() failing on the module right after it (NpcSym.pbm) once
+// the running total crossed 786432. Real headroom for future ports
+// again, not a tight fit.
+constexpr size_t kRamfsStorageMax = 1048576u;
 
 // The part of the old struct ramfs_file that isn't name/used bookkeeping
 // (bounded_table now owns that half). Default-constructing this via
