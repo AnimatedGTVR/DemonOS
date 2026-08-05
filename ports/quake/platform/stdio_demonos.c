@@ -98,6 +98,37 @@ FILE *fopen (const char *path, const char *mode)
 		f->write_buf = d_write_bufs[i];
 		f->write_len = 0;
 	}
+	else if (mode[0] == 'r' && mode[1] == '+')
+	{
+		/* D35 (NXEngine replay.cpp's begin_record/begin_playback update-
+		   in-place round trip): "r+" needs an existing file opened for
+		   both reading and writing, position at the start, real prior
+		   content preserved unless overwritten -- distinct from "w"
+		   (truncate/create) and "a" (position at the end). Reuses the
+		   same in-memory write-buffer design "a" already established
+		   (real content is only a bounded DEMON_WRITE_BUF_SIZE prefix
+		   read up front; every real "r+" caller in this codebase --
+		   profile.cpp's save-file writer via GetProfileName, and now
+		   replay.cpp -- only ever seeks/writes within that same small,
+		   fixed-size header region, never past it). Real fopen("r+", ...)
+		   itself fails if the file doesn't already exist; matched here
+		   via demon_port_open's own real success/failure return. */
+		size_t existing = 0;
+
+		if (!demon_port_open (&f->port, path))
+			return NULL;
+		existing = f->port.size;
+		if (existing > DEMON_WRITE_BUF_SIZE)
+			existing = DEMON_WRITE_BUF_SIZE;
+		(void)demon_port_seek (&f->port, 0);
+		existing = demon_port_read (&f->port, d_write_bufs[i], existing);
+		f->writing = 1;
+		f->base = 0;
+		f->pos = 0;
+		f->limit = -1;
+		f->write_buf = d_write_bufs[i];
+		f->write_len = existing;
+	}
 	else if (mode[0] == 'a')
 	{
 		size_t existing = 0;

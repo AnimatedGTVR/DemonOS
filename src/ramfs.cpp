@@ -29,8 +29,16 @@ namespace {
 // this ceiling with "Native PortKit anonymous-memory test failed" --
 // portcheck.elf's own dynamically-created test file had no free slot
 // left, not a memory problem. Headroom for future ports, not just this
-// one.
-constexpr size_t kRamfsFiles = 48u;
+// one. Bumped from 48: the NXEngine D33 stage (docs/nxengine-port.md)
+// added five more real Cave Story Frog-arena assets to the play-smoke
+// boot (Frog.pxm/Frog.pxe/Frog.tsc/PrtWeed.pbm/Weed.pxa), and the D33
+// Balfrog fight then calls settings_save()/profile_save() like every
+// earlier stage -- 47 boot-seeded files + profile.dat left no free slot
+// for settings.dat, surfacing as "Couldn't open file settings.dat."
+// at the D16 probe. Raised to 56 for real headroom, matching the D26
+// precedent of padding for future ports rather than tight-fitting one
+// boot's exact count.
+constexpr size_t kRamfsFiles = 56u;
 constexpr size_t kRamfsNameMax = 63u;
 constexpr size_t kRamfsDataMax = 196608u;
 // See src/ramfs.c's original comment trail on this constant before
@@ -46,8 +54,12 @@ constexpr size_t kRamfsDataMax = 196608u;
 // by ramfs_seed() failing on Credit.tsc's mount ("Could not install MKO
 // ISO module"), the same class of failure the kRamfsFiles bump's comment
 // above describes. Bumped to 640KB, real headroom for future ports, not
-// a tight fit to this one boot's exact total.
-constexpr size_t kRamfsStorageMax = 655360u;
+// a tight fit to this one boot's exact total. Bumped again to 768KB:
+// the D33 Balfrog stage added the Frog arena files plus the NpcSym.pbm
+// sprite sheet the Weed tileset's destroyable blocks need, pushing the
+// copied set to ~667KB -- caught the same way, by ramfs_seed() failing
+// on NpcSym.pbm's mount.
+constexpr size_t kRamfsStorageMax = 786432u;
 
 // The part of the old struct ramfs_file that isn't name/used bookkeeping
 // (bounded_table now owns that half). Default-constructing this via

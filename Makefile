@@ -514,6 +514,113 @@ $(NXENGINE_BUILD)/StageSelect.o: $(NXENGINE_SOURCE)/TextBox/StageSelect.cpp nxen
 $(NXENGINE_BUILD)/tsc.o: $(NXENGINE_SOURCE)/tsc.cpp nxengine-source | $(NXENGINE_BUILD)
 	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
 
+# D32: the real stage-boss system. stageboss.cpp (the real
+# StageBossManager: SetType/Type/SetState/Run/RunAftermove/OnMapEntry/
+# OnMapExit), all nine real ai/boss/*.cpp AIs (registered through the same
+# real INITFUNC/AIRoutines mechanism D22-D23 wired up -- their static
+# init objects run via .init_array at boot), ai/IrregularBBox.cpp (the
+# shield system Heavy Press and Ballos use), ai/sym/sym.cpp (the shared
+# small-helper library the boss AIs call: ai_animate4/ai_smokecloud/
+# SpawnObjectAtActionPoint/EmFireAngledShot/hitdetect/transfer_damage,
+# superseding the D13-era hand-rolled copies -- those had to go so this
+# stage's Heavy Press fight doesn't mix two conflicting implementations
+# of the same functions), and autogen/AssignSprites.cpp (the real sprite
+# assignment table Game::init calls; gives OBJ_HEAVY_PRESS its real
+# SPR_HEAVY_PRESS per-frame bboxes, without which OnMapEntry's bbox reads
+# would overrun SPR_NULL's single frame). All real, unmodified, all
+# needing only the already-linked object/map/sprite/player/sound/tile
+# seams -- the same bet as every prior stage, now proven by D32's fight.
+# Note stageboss.cpp needs SDL.h like the other ../nx.h includers.
+NXENGINE_D32_OBJS := $(NXENGINE_BUILD)/stageboss.o \
+	$(NXENGINE_BUILD)/IrregularBBox.o $(NXENGINE_BUILD)/sym.o \
+	$(NXENGINE_BUILD)/AssignSprites.o \
+	$(NXENGINE_BUILD)/balfrog.o $(NXENGINE_BUILD)/ballos.o \
+	$(NXENGINE_BUILD)/core.o $(NXENGINE_BUILD)/heavypress.o \
+	$(NXENGINE_BUILD)/ironhead.o $(NXENGINE_BUILD)/omega.o \
+	$(NXENGINE_BUILD)/sisters.o $(NXENGINE_BUILD)/undead_core.o \
+	$(NXENGINE_BUILD)/x.o
+
+$(NXENGINE_BUILD)/stageboss.o: $(NXENGINE_SOURCE)/stageboss.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/IrregularBBox.o: $(NXENGINE_SOURCE)/ai/IrregularBBox.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/sym.o: $(NXENGINE_SOURCE)/ai/sym/sym.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/AssignSprites.o: $(NXENGINE_SOURCE)/autogen/AssignSprites.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/balfrog.o: $(NXENGINE_SOURCE)/ai/boss/balfrog.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/ballos.o: $(NXENGINE_SOURCE)/ai/boss/ballos.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/core.o: $(NXENGINE_SOURCE)/ai/boss/core.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/heavypress.o: $(NXENGINE_SOURCE)/ai/boss/heavypress.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/ironhead.o: $(NXENGINE_SOURCE)/ai/boss/ironhead.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/omega.o: $(NXENGINE_SOURCE)/ai/boss/omega.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/sisters.o: $(NXENGINE_SOURCE)/ai/boss/sisters.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/undead_core.o: $(NXENGINE_SOURCE)/ai/boss/undead_core.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/x.o: $(NXENGINE_SOURCE)/ai/boss/x.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+# D34: three new, real, self-contained translation units -- the real
+# in-game inventory screen (inventory.cpp), the real pause screen
+# (pause/pause.cpp), and the real 290.rec Nikumaru-counter save/load pair
+# (niku.cpp), which niku_save (game_save's sibling, <STC) now calls for
+# real instead of the old stub. Standalone-compiled + nm -u'd each before
+# linking (see docs/nxengine-port.md's D34 write-up): inventory.cpp's only
+# genuinely new symbol was DrawScene (game.cpp, given a real bounded
+# reimplementation directly in core_main.cpp -- see the comment there);
+# everything else (weapon_slide/DrawWeaponLevel/DrawWeaponAmmo from
+# statusbar.cpp, StartScript/StopScripts/GetCurrentScript from tsc.cpp,
+# justpushed/buttonjustpushed from input.cpp, TextBox::Draw/DrawFrame,
+# Sprites::draw_sprite) was already linked since D17/D21/D26/D29.
+# pause/pause.cpp needed nothing new beyond Game::pause/Game::reset
+# (both real now, see core_main.cpp). niku.cpp needed nothing beyond
+# fileopen/fread/fwrite/fclose/random/stat/staterr, all already linked.
+NXENGINE_D34_OBJS := $(NXENGINE_BUILD)/inventory.o \
+	$(NXENGINE_BUILD)/pause.o $(NXENGINE_BUILD)/niku.o
+
+$(NXENGINE_BUILD)/inventory.o: $(NXENGINE_SOURCE)/inventory.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/pause.o: $(NXENGINE_SOURCE)/pause/pause.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+$(NXENGINE_BUILD)/niku.o: $(NXENGINE_SOURCE)/niku.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
+# D35: real demo/replay recording + playback. replay.cpp links unmodified
+# -- standalone-compile + nm -u (see docs/nxengine-port.md's D35 write-up)
+# showed every dependency already satisfied by prior stages except
+# common/FileBuffer.cpp (the small buffered-file writer replay.cpp's real
+# RLE input-log format uses; its own DBuffer dependency was already
+# linked since D11's siflib pull) and game_load(Profile*)/flipacceltime,
+# both supplied directly in core_main.cpp (see the comment there).
+NXENGINE_D35_OBJS := $(NXENGINE_BUILD)/FileBuffer.o $(NXENGINE_BUILD)/replay.o
+
+$(NXENGINE_BUILD)/FileBuffer.o: $(NXENGINE_SOURCE)/common/FileBuffer.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -c $< -o $@
+
+$(NXENGINE_BUILD)/replay.o: $(NXENGINE_SOURCE)/replay.cpp nxengine-source | $(NXENGINE_BUILD)
+	g++ $(NXENGINE_CXXFLAGS) -Iports/nxengine/platform/SDL -include stdio.h -c $< -o $@
+
 $(NXENGINE_BUILD)/stdio_demonos.o: ports/quake/platform/stdio_demonos.c | $(NXENGINE_BUILD)
 	$(CC) -std=gnu89 -Os -ffreestanding -fno-builtin -fno-stack-protector \
 		-fno-pie -fno-pic -ffunction-sections -fdata-sections -m64 -mno-red-zone \
@@ -553,7 +660,7 @@ $(NXENGINE_CORE_ELF): $(NXENGINE_BUILD)/entry.o $(NXENGINE_BUILD)/core_main.o \
 		$(NXENGINE_BUILD)/sdl_demonos.o $(NXENGINE_BUILD)/nxsurface.o \
 		$(NXENGINE_BUILD)/map.o $(NXENGINE_BUILD)/stdio_demonos.o \
 		$(NXENGINE_BUILD)/tileset.o $(NXENGINE_BUILD)/stagedata.o \
-		$(NXENGINE_SIFLIB_OBJS) \
+		$(NXENGINE_SIFLIB_OBJS) $(NXENGINE_D32_OBJS) $(NXENGINE_D34_OBJS) $(NXENGINE_D35_OBJS) \
 		$(BUILD)/doom_libc.o $(BUILD)/portkit.o ports/nxengine/linker.ld
 	$(LD) -nostdlib --gc-sections -z max-page-size=0x1000 -T ports/nxengine/linker.ld \
 		$(NXENGINE_BUILD)/entry.o $(BUILD)/portkit.o $(BUILD)/doom_libc.o \
@@ -561,6 +668,7 @@ $(NXENGINE_CORE_ELF): $(NXENGINE_BUILD)/entry.o $(NXENGINE_BUILD)/core_main.o \
 		$(NXENGINE_BUILD)/nxsurface.o $(NXENGINE_BUILD)/map.o \
 		$(NXENGINE_BUILD)/stdio_demonos.o $(NXENGINE_BUILD)/tileset.o \
 		$(NXENGINE_BUILD)/stagedata.o $(NXENGINE_SIFLIB_OBJS) \
+		$(NXENGINE_D32_OBJS) $(NXENGINE_D34_OBJS) $(NXENGINE_D35_OBJS) \
 		$(NXENGINE_BUILD)/trig.o \
 		$(NXENGINE_BUILD)/core_main.o -o $@
 	$(STRIP) -s $@
@@ -604,8 +712,16 @@ $(NXENGINE_PLAY_ISO): $(ISO) nxengine-data nxengine-source grub/grub-nxengine-pl
 	cp $(NXENGINE_DATA)/CaveStory/data/StageSelect.tsc $(BUILD)/iso-nxengine-play/games/nxengine/StageSelect.tsc
 	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Start.pxm $(BUILD)/iso-nxengine-play/games/nxengine/Start.pxm
 	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Start.pxe $(BUILD)/iso-nxengine-play/games/nxengine/Start.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.pxm $(BUILD)/iso-nxengine-play/games/nxengine/Frog.pxm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.pxe $(BUILD)/iso-nxengine-play/games/nxengine/Frog.pxe
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Frog.tsc $(BUILD)/iso-nxengine-play/games/nxengine/Frog.tsc
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/PrtWeed.pbm $(BUILD)/iso-nxengine-play/games/nxengine/PrtWeed.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Stage/Weed.pxa $(BUILD)/iso-nxengine-play/games/nxengine/Weed.pxa
 	cp $(NXENGINE_DATA)/CaveStory/data/ArmsImage.pbm $(BUILD)/iso-nxengine-play/games/nxengine/ArmsImage.pbm
 	cp $(NXENGINE_DATA)/CaveStory/data/Arms.pbm $(BUILD)/iso-nxengine-play/games/nxengine/Arms.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Npc/NpcSym.pbm $(BUILD)/iso-nxengine-play/games/nxengine/NpcSym.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/ItemImage.pbm $(BUILD)/iso-nxengine-play/games/nxengine/ItemImage.pbm
+	cp $(NXENGINE_DATA)/CaveStory/data/Title.pbm $(BUILD)/iso-nxengine-play/games/nxengine/Title.pbm
 	cp grub/grub-nxengine-play.cfg $(BUILD)/iso-nxengine-play/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(BUILD)/iso-nxengine-play >/dev/null 2>&1
 
@@ -686,6 +802,11 @@ nxengine-play-smoke: $(NXENGINE_PLAY_ISO)
 		sleep 1.5; \
 		printf 'sendkey z 900\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-play-monitor.sock >/dev/null; \
 		sleep 1.5; \
+		for attempt in $$(seq 1 120); do \
+			grep -q "NXENGINE_D35_INTERACTIVE_READY" $(BUILD)/nxengine-play.log 2>/dev/null && break; sleep 0.1; \
+		done; \
+		printf 'sendkey right 900\n' | socat - UNIX-CONNECT:$(BUILD)/nxengine-play-monitor.sock >/dev/null; \
+		sleep 1.5; \
 		for attempt in $$(seq 1 400); do \
 			grep -q "process exited with status" $(BUILD)/nxengine-play.log 2>/dev/null && break; sleep 0.1; \
 		done; \
@@ -759,9 +880,31 @@ nxengine-play-smoke: $(NXENGINE_PLAY_ISO)
 	@grep -q "AC97_AUDIO_READY rate=44100 channels=2 bits=16" $(BUILD)/nxengine-play.log
 	@grep -Eq "NXENGINE_D31_AUDIO_OK audio_open=1 total_sound_calls=[1-9][0-9]* total_submit_ok=[1-9][0-9]* total_samples_queued=[1-9][0-9]* trigger_snd=[0-9]+ trigger_calls=1 trigger_submits=1 trigger_samples_queued=[1-9][0-9]*" $(BUILD)/nxengine-play.log
 	@grep -q "NXENGINE_D31_SUBSYSTEMS_READY audio" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D32_BOSS_OK boss=heavy_press state=102 hp=600 shields=2 butes=1 lightning_charge=1 lightning_strike=1 sounds_fired=[1-9][0-9]* map_tiles_changed=1" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D32_SUBSYSTEMS_READY boss" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D33_BALFROG_OK jump_sprite=1 shot=1 minifrog=1 landing_smoke=1 mouth_target=1 quake=30 fight_sounds=[1-9][0-9]* death_frames=[1-9][0-9]*" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D33_SUBSYSTEMS_READY balfrog" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D34_MIDGAME_SAVE_OK slot=2 stage=[0-9]+ hp=[0-9]+ weapon=[0-9]+ niku=0x1234" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D34_INVENTORY_OK items_shown=[1-9][0-9]* curwpn_slot=[0-9]+" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D34_MODE_OK transitions=4" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D34_SUBSYSTEMS_READY inventory_pause_save_modes" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D35_INTERACTIVE_READY" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D35_REPLAY_OK recorded_frames=[0-9]+ live_final_x=-?[0-9]+ live_final_y=-?[0-9]+ replay_final_x=-?[0-9]+ replay_final_y=-?[0-9]+ match=1" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D35_SUBSYSTEMS_READY replay" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_BOSS_OK boss=ironhead .* hp_changed=1" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_BOSS_OK boss=omega .* hp_changed=1" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_BOSS_OK boss=sisters .* hp_changed=1" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_BOSS_OK boss=core .* hp_changed=1" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_BOSS_OK boss=undead_core .* hp_changed=1" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_BOSS_OK boss=monster_x .* hp_changed=1" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_BOSS_OK boss=ballos .* hp_changed=1" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D36_ALLBOSSES_OK bosses_verified=7" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D36_SUBSYSTEMS_READY allbosses" $(BUILD)/nxengine-play.log
+	@grep -Eq "NXENGINE_D36_TITLE_OK title_pixels_changed=1 .* pixel_forever_omitted=1" $(BUILD)/nxengine-play.log
+	@grep -q "NXENGINE_D36_TITLE_SUBSYSTEMS_READY title" $(BUILD)/nxengine-play.log
 	@grep -q "process exited with status 0" $(BUILD)/nxengine-play.log
 	@! grep -q "PAGE FAULT\|\[FAILED\]" $(BUILD)/nxengine-play.log
-	@echo "NXEngine D2-D31 real-asset interactive play smoke test passed"
+	@echo "NXEngine D2-D35 real-asset interactive play smoke test passed"
 
 QUAKE_BUILD := $(BUILD)/quake
 QUAKE_CORE_ELF := $(BUILD)/quake-core.elf

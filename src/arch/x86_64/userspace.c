@@ -39,8 +39,13 @@
    D27/D28/D29 all flagged this cap as tightening with each new stage and
    this is the first one to actually need a bump. Raised by 4 pages
    (16KB) -- enough real headroom for another stage or two of similar
-   size (D30 itself only added ~1.4KB), not a speculative 2x/10x jump. */
-#define USER_LARGE_CODE_MAX_PAGES 260u
+   size (D30 itself only added ~1.4KB), not a speculative 2x/10x jump.
+   D32 (the real stage-boss system: stageboss.cpp + the nine boss AI
+   files under ai/boss plus IrregularBBox/sym/AssignSprites) grew the
+   memsize to 269 pages, over the 260-page cap, so raised to 320
+   (1.25MB) -- real headroom for the remaining boss-adjacent work, still
+   one contiguous 1.25MB large-code region per process. */
+#define USER_LARGE_CODE_MAX_PAGES 320u
 #define USER_SURFACE_MAP 0x380000u
 /* 16 pages (64 KiB) matches the old 256x64 SURFACE_MAX_WIDTH/HEIGHT
    ceiling (see include/kernel/surface.h). Raising SURFACE_MAX_WIDTH/HEIGHT
