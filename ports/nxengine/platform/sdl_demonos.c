@@ -384,36 +384,44 @@ int SDL_Flip(SDL_Surface *screen) {
            larger console-font glyphs around the game's own small font.
            Fix: paint the *real* full screen black once, up front, before
            ever submitting the smaller centered game image. */
+        /* A one-shot allocation for the real full screen (e.g. 640x480x4
+           bytes ~= 1.2MB) risked silently failing against this port's
+           4MB dynamic arena, which by this point already holds sprites/
+           tiles/textbox state -- demon_port_malloc returning NULL would
+           have skipped this whole blank without any error, leaving the
+           border never actually cleared (every real per-frame Flip only
+           ever touches the smaller centered game rect). display_submit
+           (src/display.c) reads directly from request.pixels/width/
+           height/x/y -- it has no dependency on demon_surface_create/
+           write at all (those exist for a separate surface-sharing
+           path) -- so the real fix is simply to call it multiple times,
+           each covering one horizontal strip of the real screen, off a
+           small fixed stack buffer. No arena allocation needed at all. */
         if (demon_display_info(nx_display, &nx_info) != 0u &&
-            nx_info.width > 0u && nx_info.height > 0u) {
-            uint64_t blank_surface = demon_surface_create(nx_surface_factory,
-                                                            nx_info.width, nx_info.height);
-            if (blank_surface != UINT64_MAX) {
-                size_t blank_pixels = (size_t)nx_info.width * (size_t)nx_info.height;
-                uint32_t *blank = demon_port_malloc(blank_pixels * sizeof(uint32_t));
-                if (blank != NULL) {
-                    /* framebuffer_blit alpha-blends rather than overwrites
-                       (src.framebuffer.c's blend(): alpha==0 returns the
-                       destination unchanged) -- a memset(0) fill is fully
-                       transparent black, not opaque black, and would
-                       silently no-op over whatever was already on screen.
-                       Real opaque black needs the alpha byte set. */
-                    for (size_t bi = 0u; bi < blank_pixels; ++bi) blank[bi] = 0xFF000000u;
-                    if (demon_surface_write(blank_surface, blank, blank_pixels, 0u) ==
-                        blank_pixels) {
-                        (void)demon_surface_damage(blank_surface, 0u, 0u,
-                                                    nx_info.width, nx_info.height);
-                        struct nx_display_submit blank_request;
-                        blank_request.x = 0u;
-                        blank_request.y = 0u;
-                        blank_request.width = nx_info.width;
-                        blank_request.height = nx_info.height;
-                        blank_request.pixels = (uint64_t)(uintptr_t)blank;
-                        blank_request.flags = 1u;
-                        (void)demon_display_submit(nx_display, &blank_request);
-                    }
-                    demon_port_free(blank);
-                }
+            nx_info.width > 0u && nx_info.height > 0u &&
+            nx_info.width <= 1024u) {
+            /* This port's user stack is 128 pages (512KB total, see
+               USERSPACE_STACK_PAGES in include/kernel/userspace.h) --
+               keep this comfortably small relative to that regardless
+               of the real screen's width, rather than sizing for a
+               worst-case wide display. */
+            enum { BLANK_CHUNK_ROWS = 4u };
+            uint32_t blank_chunk[1024u * BLANK_CHUNK_ROWS];
+            uint64_t chunk_pixels = nx_info.width * (uint64_t)BLANK_CHUNK_ROWS;
+            for (uint64_t i = 0u; i < chunk_pixels; ++i) blank_chunk[i] = 0xFF000000u;
+            uint64_t y = 0u;
+            while (y < nx_info.height) {
+                uint64_t rows = nx_info.height - y;
+                if (rows > BLANK_CHUNK_ROWS) rows = BLANK_CHUNK_ROWS;
+                struct nx_display_submit blank_request;
+                blank_request.x = 0u;
+                blank_request.y = y;
+                blank_request.width = nx_info.width;
+                blank_request.height = rows;
+                blank_request.pixels = (uint64_t)(uintptr_t)blank_chunk;
+                blank_request.flags = (y + rows >= nx_info.height) ? 1u : 0u;
+                if (demon_display_submit(nx_display, &blank_request) != 0u) break;
+                y += rows;
             }
         }
         nx_surface = demon_surface_create(nx_surface_factory,
