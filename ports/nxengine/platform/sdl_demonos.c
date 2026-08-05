@@ -392,7 +392,13 @@ int SDL_Flip(SDL_Surface *screen) {
                 size_t blank_pixels = (size_t)nx_info.width * (size_t)nx_info.height;
                 uint32_t *blank = demon_port_malloc(blank_pixels * sizeof(uint32_t));
                 if (blank != NULL) {
-                    memset(blank, 0, blank_pixels * sizeof(uint32_t));
+                    /* framebuffer_blit alpha-blends rather than overwrites
+                       (src.framebuffer.c's blend(): alpha==0 returns the
+                       destination unchanged) -- a memset(0) fill is fully
+                       transparent black, not opaque black, and would
+                       silently no-op over whatever was already on screen.
+                       Real opaque black needs the alpha byte set. */
+                    for (size_t bi = 0u; bi < blank_pixels; ++bi) blank[bi] = 0xFF000000u;
                     if (demon_surface_write(blank_surface, blank, blank_pixels, 0u) ==
                         blank_pixels) {
                         (void)demon_surface_damage(blank_surface, 0u, 0u,
