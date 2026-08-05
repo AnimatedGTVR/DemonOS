@@ -373,13 +373,43 @@ int SDL_Flip(SDL_Surface *screen) {
         if (nx_display == UINT64_MAX || nx_surface_factory == UINT64_MAX)
             return -1;
         /* demon_display_info's out-param write can fail for large-app
-           processes (user_write_range doesn't recognize the large-code
-           image range a static struct like nx_info lives in -- the same
-           gap Quake's vid_demonos.c already works around). Not fatal:
-           nx_info stays zeroed, which just means no centering offset
-           below, and demon_surface_create/demon_display_submit don't
-           need it at all. */
-        (void)demon_display_info(nx_display, &nx_info);
+           processes in general (see the comment on user_write_range in
+           src/arch/x86_64/userspace.c), but confirmed via a real runtime
+           check that it succeeds here and reports the real screen size
+           (e.g. 640x480) -- bigger than this port's fixed 320x240 game
+           canvas. Our own submit below only ever writes the centered
+           320x240 rect, so the surrounding border was never touched and
+           kept showing whatever the text console had drawn there before
+           this process took the display -- visible as leftover, much
+           larger console-font glyphs around the game's own small font.
+           Fix: paint the *real* full screen black once, up front, before
+           ever submitting the smaller centered game image. */
+        if (demon_display_info(nx_display, &nx_info) != 0u &&
+            nx_info.width > 0u && nx_info.height > 0u) {
+            uint64_t blank_surface = demon_surface_create(nx_surface_factory,
+                                                            nx_info.width, nx_info.height);
+            if (blank_surface != UINT64_MAX) {
+                size_t blank_pixels = (size_t)nx_info.width * (size_t)nx_info.height;
+                uint32_t *blank = demon_port_malloc(blank_pixels * sizeof(uint32_t));
+                if (blank != NULL) {
+                    memset(blank, 0, blank_pixels * sizeof(uint32_t));
+                    if (demon_surface_write(blank_surface, blank, blank_pixels, 0u) ==
+                        blank_pixels) {
+                        (void)demon_surface_damage(blank_surface, 0u, 0u,
+                                                    nx_info.width, nx_info.height);
+                        struct nx_display_submit blank_request;
+                        blank_request.x = 0u;
+                        blank_request.y = 0u;
+                        blank_request.width = nx_info.width;
+                        blank_request.height = nx_info.height;
+                        blank_request.pixels = (uint64_t)(uintptr_t)blank;
+                        blank_request.flags = 1u;
+                        (void)demon_display_submit(nx_display, &blank_request);
+                    }
+                    demon_port_free(blank);
+                }
+            }
+        }
         nx_surface = demon_surface_create(nx_surface_factory,
                                           (uint64_t)screen->w, (uint64_t)screen->h);
         if (nx_surface == UINT64_MAX) return -1;

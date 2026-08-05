@@ -5336,6 +5336,43 @@ extern "C" uint64_t nxengine_core_main(void) {
             return 1u;
         }
         NXSurface screen_sfc(raw_screen, true);
+
+        /* real palette fix: SDL_CreateRGBSurface zero-initializes a fresh
+           8bpp surface's palette (all-black, see sdl_demonos.c's
+           format_create), and unlike every real loaded sprite sheet --
+           which upstream's own NXSurface::Scale() copies a real palette
+           onto when it creates a new surface -- nothing ever gave this
+           freshly-created screen surface a real palette. SDL_GetRGB's
+           real RGB lookup for an indexed pixel goes through the
+           DESTINATION surface's own palette (sdl_demonos.c), not the
+           source sprite's, so every prior D-stage's visual test passed
+           by checking raw index bytes in memory (D29's HUD proof, etc)
+           without ever exercising this real index-to-RGB path -- it took
+           an actual human looking at a real QEMU window (title screen
+           rendering as solid near-black) to surface it. Fix: copy the
+           real palette off an already-loaded real sprite sheet (any
+           sheet works -- all of Cave Story's .pbm files share one global
+           256-color palette by convention), the same real technique
+           Scale() already uses. */
+        {
+            NXSurface *palette_source =
+                Sprites::get_spritesheet(sprites[SPR_TITLE].spritesheet);
+            if (palette_source != NULL && palette_source->GetSDLSurface() != NULL) {
+                SDL_Color real_palette[256];
+                for (int i = 0; i < 256; ++i) {
+                    SDL_GetRGB((uint32_t)i, palette_source->GetSDLSurface()->format,
+                               &real_palette[i].r, &real_palette[i].g, &real_palette[i].b);
+                }
+                SDL_SetColors(raw_screen, real_palette, 0, 256);
+                char pmsg[96];
+                sprintf(pmsg, "NXENGINE_D37_PALETTE_OK idx1=%u,%u,%u idx2=%u,%u,%u idx3=%u,%u,%u\n",
+                        real_palette[1].r, real_palette[1].g, real_palette[1].b,
+                        real_palette[2].r, real_palette[2].g, real_palette[2].b,
+                        real_palette[3].r, real_palette[3].g, real_palette[3].b);
+                demon_port_write(pmsg);
+            }
+        }
+
         Graphics::SetDrawTarget(&screen_sfc);
         screen = &screen_sfc;
         if (font_reload()) {
