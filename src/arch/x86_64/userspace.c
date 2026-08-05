@@ -648,13 +648,32 @@ bool userspace_surface_mapping_readonly(uint32_t pid, uint32_t surface_id) {
     return valid;
 }
 
+/* Set (in the display_submit syscall handler below) to the pid of
+   whichever process most recently submitted a real frame to the
+   display, and cleared on that process's exit. While set, that
+   process's own demon_port_write output (used pervasively for real
+   engine status/error logging, e.g. NXEngine's stat()/staterr()) is
+   still sent to the serial log but no longer mirrored into the
+   kernel's own graphical text terminal -- otherwise every such log
+   line's trailing '\n' triggers terminal_write's newline() ->
+   terminal_graphical_refresh(), which does a full framebuffer_clear()
+   plus an 80x25 redraw at the terminal's own much larger 7x14 glyph
+   cells, stomping over whatever the app had just drawn at its own
+   resolution/font size on the very same shared framebuffer. Found by
+   reading this file after NXEngine's D37 freeplay mode kept showing
+   stale/garbled oversized text fragments over its own real, correctly
+   rendered graphics no matter how the app-side drawing was fixed. */
+static uint32_t display_owner_pid;
+
 static uint64_t write_user_text(uint64_t address, uint64_t length) {
     if (!user_range(address, length)) return UINT64_MAX;
     const char *text = (const char *)(uintptr_t)address;
+    const bool suppress_terminal_mirror =
+        display_owner_pid != 0u && display_owner_pid == scheduler_current_pid();
     for (uint64_t i = 0; i < length; ++i) {
         char output[2] = { text[i], '\0' };
         serial_write(output);
-        terminal_write(output);
+        if (!suppress_terminal_mirror) terminal_write(output);
     }
     return length;
 }
@@ -717,6 +736,7 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
     }
     if (number == 2u) {
         last_exit_status = frame->rdi;
+        if (display_owner_pid == scheduler_current_pid()) display_owner_pid = 0u;
         ipc_process_cleanup(scheduler_current_pid());
         capabilities_close_all(scheduler_current_pid());
         return scheduler_on_exit(frame_address, frame->rdi);
@@ -965,7 +985,11 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
            invalid complete source range here. */
         if (bytes / sizeof(uint32_t) != count ||
             !user_range(request.pixels, bytes)) frame->rax = UINT64_MAX;
-        else frame->rax = display_submit_from_user(&request) ? 0u : UINT64_MAX;
+        else {
+            const bool submitted = display_submit_from_user(&request);
+            if (submitted) display_owner_pid = scheduler_current_pid();
+            frame->rax = submitted ? 0u : UINT64_MAX;
+        }
         return frame_address;
     }
     if (number == 20u) {
