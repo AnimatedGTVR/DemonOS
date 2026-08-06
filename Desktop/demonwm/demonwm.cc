@@ -166,7 +166,20 @@ public:
                 last_clock_minute_ = minute;
                 drawPanel(minute);
             }
-            if (!XNextEvent(display_, &event)) return 214u;
+            /* XNextEvent returns 0 on success and -1 only on a real
+               transport failure (see lib/demonx/xlib.c) -- the leading `!`
+               this line had inverted that, so run() exited with 214 the
+               instant it received its very first real event, before ever
+               reaching the switch below to actually handle it. Since
+               DemonWM is the one part of the desktop stack the scripted
+               boot-test never spawns (test_mode skips straight to a
+               standalone xterm self-test), this path had never been
+               exercised until a real interactive hardware-input session
+               caught it: xterm's MapRequest was the first event delivered,
+               and DemonWM silently exited on it every single time, so
+               manage() was never called and xterm's window was never
+               reparented/mapped. */
+            if (XNextEvent(display_, &event)) return 214u;
             switch (event.type) {
             case MapRequest:
                 manage(event.xmaprequest.window);
