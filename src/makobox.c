@@ -602,83 +602,233 @@ static char edit_read_char(void) {
     }
 }
 
-#define EDIT_MAX_LINES 128u
-#define EDIT_LINE_CAPACITY 96u
+// A real full-screen editor, nano-style: terminal.h exposes direct cell
+// addressing (terminal_put_char/terminal_present) precisely so a UI like
+// this can own the whole 80x25 grid and redraw it in place instead of
+// scrolling a line at a time. Line capacity is capped at the terminal's own
+// width so no line ever needs horizontal scrolling -- everything fits one
+// screen row exactly.
+#define EDITOR_MAX_LINES 200u
+#define EDITOR_LINE_CAPACITY 80u
 
-// A real line editor, not a curses-style full-screen one: this console is
-// an append-only scroll (see terminal.h -- no cursor-addressing API exists
-// here, unlike xterm's own framebuffer-backed "edit" which owns a DemonX
-// surface it can redraw in place), so "single '.' line ends input" is the
-// natural fit, matching classic teletype editors rather than faking a
-// full-screen UI this console can't actually support.
-static void applet_edit(const char *path) {
-    if (path[0] == '\0') { line("usage: edit <path>"); return; }
-    const uint8_t *existing_data;
-    size_t existing_length;
-    if (open_file_view(path, &existing_data, &existing_length)) {
-        line("--- current contents ---");
-        applet_cat(path);
-        line("--- end ---");
-    } else {
-        line("(new file)");
+struct editor_state {
+    char lines[EDITOR_MAX_LINES][EDITOR_LINE_CAPACITY];
+    size_t line_count;
+    size_t cursor_row;
+    size_t cursor_column;
+    size_t scroll_top;
+    bool modified;
+    char path[GIT_NAME_MAX + 1u];
+};
+
+static size_t editor_line_length(const struct editor_state *editor, size_t index) {
+    size_t length = 0u;
+    while (length + 1u < EDITOR_LINE_CAPACITY && editor->lines[index][length] != '\0') ++length;
+    return length;
+}
+
+static void editor_load(struct editor_state *editor, const char *path) {
+    size_t path_length = 0u;
+    while (path_length < sizeof(editor->path) - 1u && path[path_length] != '\0') {
+        editor->path[path_length] = path[path_length];
+        ++path_length;
     }
-    line("Enter new content, one line at a time. End with a single '.' line.");
-    static char lines[EDIT_MAX_LINES][EDIT_LINE_CAPACITY];
-    size_t line_count = 0u;
-    for (;;) {
-        terminal_write("> ");
-        serial_write("> ");
-        char text_line[EDIT_LINE_CAPACITY];
-        size_t length = 0u;
-        for (;;) {
-            const char value = edit_read_char();
-            if (value == '\n') {
-                terminal_write_line("");
-                serial_write("\n");
-                text_line[length] = '\0';
-                break;
-            }
-            if (value == '\b') {
-                if (length > 0u) {
-                    --length;
-                    terminal_backspace();
-                    serial_write("\b \b");
-                }
-                continue;
-            }
-            if (length + 1u < sizeof(text_line)) {
-                text_line[length++] = value;
-                text_line[length] = '\0';
-                const char echo[2] = { value, '\0' };
-                terminal_write(echo);
-                serial_write(echo);
+    editor->path[path_length] = '\0';
+    editor->line_count = 0u;
+    editor->cursor_row = 0u;
+    editor->cursor_column = 0u;
+    editor->scroll_top = 0u;
+    editor->modified = false;
+    const uint8_t *data;
+    size_t length;
+    if (open_file_view(path, &data, &length)) {
+        size_t column = 0u;
+        for (size_t i = 0u; i < length && editor->line_count < EDITOR_MAX_LINES; ++i) {
+            if (data[i] == '\n') {
+                editor->lines[editor->line_count][column] = '\0';
+                ++editor->line_count;
+                column = 0u;
+            } else if (column + 1u < EDITOR_LINE_CAPACITY) {
+                editor->lines[editor->line_count][column++] = (char)data[i];
             }
         }
-        if (text_line[0] == '.' && text_line[1] == '\0') break;
-        if (line_count >= EDIT_MAX_LINES) {
-            line("edit: too many lines, stopping input early");
-            break;
+        if (column > 0u && editor->line_count < EDITOR_MAX_LINES) {
+            editor->lines[editor->line_count][column] = '\0';
+            ++editor->line_count;
         }
-        size_t copy_length = 0u;
-        while (text_line[copy_length] != '\0' && copy_length + 1u < EDIT_LINE_CAPACITY)
-            ++copy_length;
-        for (size_t i = 0u; i < copy_length; ++i) lines[line_count][i] = text_line[i];
-        lines[line_count][copy_length] = '\0';
-        ++line_count;
     }
-    static char buffer[EDIT_MAX_LINES * EDIT_LINE_CAPACITY];
+    if (editor->line_count == 0u) {
+        editor->lines[0][0] = '\0';
+        editor->line_count = 1u;
+    }
+}
+
+static bool editor_save(struct editor_state *editor) {
+    static char buffer[EDITOR_MAX_LINES * EDITOR_LINE_CAPACITY];
     size_t total = 0u;
-    for (size_t i = 0u; i < line_count; ++i) {
-        for (const char *p = lines[i]; *p != '\0'; ++p) buffer[total++] = *p;
+    for (size_t i = 0u; i < editor->line_count; ++i) {
+        const size_t length = editor_line_length(editor, i);
+        for (size_t c = 0u; c < length; ++c) buffer[total++] = editor->lines[i][c];
         buffer[total++] = '\n';
     }
     uint32_t object_id;
-    if (!ramfs_open(path, string_length(path), true, &object_id) ||
-        !ramfs_write(object_id, (const uint8_t *)buffer, total)) {
-        line("edit: could not save file");
+    if (!ramfs_open(editor->path, string_length(editor->path), true, &object_id) ||
+        !ramfs_write(object_id, (const uint8_t *)buffer, total))
+        return false;
+    editor->modified = false;
+    return true;
+}
+
+// Rows: 0 is the title bar, the last row is the shortcut hint, everything
+// between is editable text -- same layout convention nano itself uses.
+static void editor_render(struct editor_state *editor, const char *status) {
+    const size_t rows = terminal_rows();
+    const size_t columns = terminal_columns();
+    const size_t text_rows = rows - 2u;
+    if (editor->cursor_row < editor->scroll_top) editor->scroll_top = editor->cursor_row;
+    if (editor->cursor_row >= editor->scroll_top + text_rows)
+        editor->scroll_top = editor->cursor_row - text_rows + 1u;
+    terminal_set_color(0x00u, 0x0Fu);
+    char title[EDITOR_LINE_CAPACITY + 16u];
+    size_t title_length = 0u;
+    title[title_length++] = ' ';
+    for (const char *p = editor->path; *p != '\0' && title_length + 1u < sizeof(title); ++p)
+        title[title_length++] = *p;
+    if (editor->modified) {
+        static const char marker[] = " [modified]";
+        for (const char *p = marker; *p != '\0' && title_length + 1u < sizeof(title); ++p)
+            title[title_length++] = *p;
+    }
+    for (size_t c = 0u; c < columns; ++c)
+        terminal_put_char(0u, c, c < title_length ? title[c] : ' ');
+    terminal_set_color(0x0Fu, 0x00u);
+    for (size_t visible_row = 0u; visible_row < text_rows; ++visible_row) {
+        const size_t line_index = editor->scroll_top + visible_row;
+        const size_t length = line_index < editor->line_count ? editor_line_length(editor, line_index) : 0u;
+        for (size_t c = 0u; c < columns; ++c)
+            terminal_put_char(visible_row + 1u, c,
+                line_index < editor->line_count && c < length ? editor->lines[line_index][c] : ' ');
+    }
+    terminal_set_color(0x00u, 0x0Fu);
+    size_t status_length = 0u;
+    while (status[status_length] != '\0' && status_length + 1u < columns) ++status_length;
+    for (size_t c = 0u; c < columns; ++c)
+        terminal_put_char(rows - 1u, c, c < status_length ? status[c] : ' ');
+    terminal_set_color(0x0Fu, 0x00u);
+    const size_t cursor_screen_row = editor->cursor_row - editor->scroll_top + 1u;
+    const size_t cursor_line_length = editor_line_length(editor, editor->cursor_row);
+    const char cursor_char = editor->cursor_column < cursor_line_length ?
+        editor->lines[editor->cursor_row][editor->cursor_column] : ' ';
+    terminal_set_color(0x00u, 0x07u);
+    terminal_put_char(cursor_screen_row, editor->cursor_column, cursor_char);
+    terminal_set_color(0x0Fu, 0x00u);
+    terminal_present();
+}
+
+static void editor_insert_char(struct editor_state *editor, char value) {
+    const size_t length = editor_line_length(editor, editor->cursor_row);
+    if (length + 1u >= EDITOR_LINE_CAPACITY) return;
+    char *text_line = editor->lines[editor->cursor_row];
+    for (size_t i = length; i > editor->cursor_column; --i) text_line[i] = text_line[i - 1u];
+    text_line[editor->cursor_column] = value;
+    text_line[length + 1u] = '\0';
+    ++editor->cursor_column;
+    editor->modified = true;
+}
+
+static void editor_split_line(struct editor_state *editor) {
+    if (editor->line_count >= EDITOR_MAX_LINES) return;
+    for (size_t i = editor->line_count; i > editor->cursor_row + 1u; --i) {
+        for (size_t c = 0u; c < EDITOR_LINE_CAPACITY; ++c) editor->lines[i][c] = editor->lines[i - 1u][c];
+    }
+    char *current = editor->lines[editor->cursor_row];
+    char *next = editor->lines[editor->cursor_row + 1u];
+    const size_t length = editor_line_length(editor, editor->cursor_row);
+    size_t copied = 0u;
+    for (size_t c = editor->cursor_column; c < length; ++c) next[copied++] = current[c];
+    next[copied] = '\0';
+    current[editor->cursor_column] = '\0';
+    ++editor->line_count;
+    ++editor->cursor_row;
+    editor->cursor_column = 0u;
+    editor->modified = true;
+}
+
+static void editor_backspace(struct editor_state *editor) {
+    if (editor->cursor_column > 0u) {
+        char *text_line = editor->lines[editor->cursor_row];
+        const size_t length = editor_line_length(editor, editor->cursor_row);
+        for (size_t i = editor->cursor_column - 1u; i < length; ++i) text_line[i] = text_line[i + 1u];
+        --editor->cursor_column;
+        editor->modified = true;
         return;
     }
-    value_line("saved ", (uint64_t)total, " bytes");
+    if (editor->cursor_row == 0u) return;
+    const size_t previous_length = editor_line_length(editor, editor->cursor_row - 1u);
+    const size_t current_length = editor_line_length(editor, editor->cursor_row);
+    // Combined line would not fit in one screen-width row -- leave both
+    // lines and the cursor untouched rather than merge only part of one.
+    if (previous_length + current_length + 1u >= EDITOR_LINE_CAPACITY) return;
+    for (size_t c = 0u; c < current_length; ++c)
+        editor->lines[editor->cursor_row - 1u][previous_length + c] = editor->lines[editor->cursor_row][c];
+    editor->lines[editor->cursor_row - 1u][previous_length + current_length] = '\0';
+    for (size_t i = editor->cursor_row; i + 1u < editor->line_count; ++i) {
+        for (size_t c = 0u; c < EDITOR_LINE_CAPACITY; ++c) editor->lines[i][c] = editor->lines[i + 1u][c];
+    }
+    --editor->line_count;
+    --editor->cursor_row;
+    editor->cursor_column = previous_length;
+    editor->modified = true;
+}
+
+static void applet_edit(const char *path) {
+    if (path[0] == '\0') { line("usage: edit <path>"); return; }
+    static struct editor_state editor;
+    editor_load(&editor, path);
+    terminal_write("\f");
+    const char *status = "^O Save   ^X Exit   Arrow keys move";
+    editor_render(&editor, status);
+    for (;;) {
+        const char value = edit_read_char();
+        if (value == 0x0Fu) { // Ctrl+O
+            status = editor_save(&editor) ? "Saved" : "Save failed";
+        } else if (value == 0x18u) { // Ctrl+X
+            if (editor.modified) editor_save(&editor);
+            break;
+        } else if (value == '\n') {
+            editor_split_line(&editor);
+            status = "^O Save   ^X Exit   Arrow keys move";
+        } else if (value == '\b') {
+            editor_backspace(&editor);
+            status = "^O Save   ^X Exit   Arrow keys move";
+        } else if (value == KEYBOARD_CHAR_LEFT) {
+            if (editor.cursor_column > 0u) --editor.cursor_column;
+            else if (editor.cursor_row > 0u) {
+                --editor.cursor_row;
+                editor.cursor_column = editor_line_length(&editor, editor.cursor_row);
+            }
+        } else if (value == KEYBOARD_CHAR_RIGHT) {
+            if (editor.cursor_column < editor_line_length(&editor, editor.cursor_row)) ++editor.cursor_column;
+            else if (editor.cursor_row + 1u < editor.line_count) { ++editor.cursor_row; editor.cursor_column = 0u; }
+        } else if (value == KEYBOARD_CHAR_HISTORY_UP) {
+            if (editor.cursor_row > 0u) {
+                --editor.cursor_row;
+                const size_t length = editor_line_length(&editor, editor.cursor_row);
+                if (editor.cursor_column > length) editor.cursor_column = length;
+            }
+        } else if (value == KEYBOARD_CHAR_HISTORY_DOWN) {
+            if (editor.cursor_row + 1u < editor.line_count) {
+                ++editor.cursor_row;
+                const size_t length = editor_line_length(&editor, editor.cursor_row);
+                if (editor.cursor_column > length) editor.cursor_column = length;
+            }
+        } else if (value >= 32 && value <= 126) {
+            editor_insert_char(&editor, value);
+            status = "^O Save   ^X Exit   Arrow keys move";
+        }
+        editor_render(&editor, status);
+    }
+    terminal_write("\f");
 }
 
 static void write_hex_byte(uint8_t value) {

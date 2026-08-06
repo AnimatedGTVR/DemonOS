@@ -292,6 +292,10 @@ void interrupt_keyboard_handler(void) {
             keyboard_queue_char(KEYBOARD_CHAR_HISTORY_UP);
         if (!released && code == 0x50u)
             keyboard_queue_char(KEYBOARD_CHAR_HISTORY_DOWN);
+        if (!released && code == 0x4Bu)
+            keyboard_queue_char(KEYBOARD_CHAR_LEFT);
+        if (!released && code == 0x4Du)
+            keyboard_queue_char(KEYBOARD_CHAR_RIGHT);
         publish_key((uint16_t)(0x100u | code), released, '\0');
         out8(0x20u, 0x20u);
         return;
@@ -322,6 +326,11 @@ void interrupt_keyboard_handler(void) {
         const bool letter = unshifted[code] >= 'a' && unshifted[code] <= 'z';
         const bool use_shift = letter ? keyboard_shift != keyboard_caps_lock : keyboard_shift;
         character = use_shift ? shifted[code] : unshifted[code];
+        // Standard terminal convention: Ctrl+A..Z produces control codes
+        // 0x01..0x1A (Ctrl+H/I/J/M land on backspace/tab/newline/CR, exactly
+        // as on any real terminal -- not a collision, that's the same
+        // convention). Used by MakoBox's "edit" applet for ^O save / ^X exit.
+        if (keyboard_ctrl && letter) character = (char)(unshifted[code] - 'a' + 1);
         keyboard_queue_char(character);
     }
     publish_key(code, released, character);

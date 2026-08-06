@@ -2,6 +2,7 @@
 #define KERNEL_TERMINAL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 void terminal_init(void);
@@ -15,5 +16,13 @@ void terminal_backspace(void);
 void terminal_graphical_enable(void);
 void terminal_graphical_refresh(void);
 bool terminal_graphical_active(void);
+
+// Direct cell access for full-screen UIs (e.g. MakoBox's "edit" command)
+// that manage their own cursor and redraw a whole screen at a time, rather
+// than appending through terminal_write's own scrolling cursor.
+size_t terminal_rows(void);
+size_t terminal_columns(void);
+void terminal_put_char(size_t row, size_t column, char character);
+void terminal_present(void);
 
 #endif

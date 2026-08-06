@@ -12,6 +12,11 @@ bool keyboard_read_char(char *value);
 void keyboard_discard_chars(void);
 #define KEYBOARD_CHAR_HISTORY_UP ((char)0x11)
 #define KEYBOARD_CHAR_HISTORY_DOWN ((char)0x12)
+// 0x1E/0x1F are unreachable through any other path this driver produces --
+// Ctrl+letter only covers 'a'..'z' (see interrupt_keyboard_handler), which
+// tops out at 0x1A, and no punctuation Ctrl-combo is translated.
+#define KEYBOARD_CHAR_LEFT ((char)0x1E)
+#define KEYBOARD_CHAR_RIGHT ((char)0x1F)
 bool keyboard_controller_ready(void);
 uint64_t keyboard_irq_count(void);
 uint64_t keyboard_character_count(void);

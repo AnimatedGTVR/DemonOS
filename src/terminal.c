@@ -49,19 +49,27 @@ static bool graphical_render_safe(void) {
     return current_cr3 == graphical_kernel_cr3;
 }
 
-// Only the handful of VGA foreground codes boot_status/boot_fatal/
-// boot_progress actually use (see kernel.c's BOOT_COLOR_* constants) get a
-// real color here; every other foreground nibble keeps rendering as
-// PLAIN_FG, so ordinary uncolored output looks exactly as it always has.
-// The recovery console stays otherwise plain per this file's own header
-// comment -- this is real status information (did this boot step pass or
-// fail), not decoration.
+// Only the handful of VGA color codes boot_status/boot_fatal/boot_progress
+// (see kernel.c's BOOT_COLOR_* constants) and MakoBox's "edit" full-screen
+// UI actually use get a real color here; every other nibble keeps rendering
+// as PLAIN_FG/PLAIN_BG, so ordinary uncolored output looks exactly as it
+// always has. The recovery console stays otherwise plain per this file's
+// own header comment -- these are real status/UI signals, not decoration.
 static uint32_t vga_foreground_rgb(uint8_t foreground) {
     switch (foreground & 0x0Fu) {
     case 0x0Au: return 0xFF55FF55u; /* green:  [  OK  ] */
     case 0x0Cu: return 0xFFFF5555u; /* red:    [FAILED] */
     case 0x0Eu: return 0xFFFFFF55u; /* yellow: [ .... ] */
+    case 0x00u: return 0xFF000000u; /* black: inverted title/status/cursor text */
     default: return PLAIN_FG;
+    }
+}
+
+static uint32_t vga_background_rgb(uint8_t background) {
+    switch (background & 0x0Fu) {
+    case 0x0Fu: return 0xFFC0C0C0u; /* light grey: edit's title/status bars */
+    case 0x07u: return 0xFF808080u; /* mid grey: edit's cursor highlight */
+    default: return PLAIN_BG;
     }
 }
 
@@ -70,11 +78,11 @@ static void graphical_cell(size_t y, size_t x) {
     const int32_t pixel_x = GRAPHICAL_X + (int32_t)x * GRAPHICAL_CELL_WIDTH;
     const int32_t pixel_y = GRAPHICAL_Y + (int32_t)y * GRAPHICAL_CELL_HEIGHT;
     const uint16_t cell = cells[y * VGA_WIDTH + x];
+    const uint8_t attribute = (uint8_t)(cell >> 8u);
     framebuffer_fill_rect((struct framebuffer_rect){pixel_x, pixel_y,
-        GRAPHICAL_CELL_WIDTH, GRAPHICAL_CELL_HEIGHT}, PLAIN_BG);
+        GRAPHICAL_CELL_WIDTH, GRAPHICAL_CELL_HEIGHT}, vga_background_rgb(attribute >> 4u));
     char text[2] = {(char)(cell & 0xffu), '\0'};
-    framebuffer_text(pixel_x, pixel_y + 2, text, 1u,
-        vga_foreground_rgb((uint8_t)(cell >> 8u)));
+    framebuffer_text(pixel_x, pixel_y + 2, text, 1u, vga_foreground_rgb(attribute));
 }
 
 static void store_cell(size_t y, size_t x, uint16_t value) {
@@ -207,6 +215,21 @@ void terminal_write_hex(uint64_t value) {
         output[index + 2u] = digits[(value >> shift) & 0xFu];
     }
     terminal_write(output);
+}
+
+size_t terminal_rows(void) { return VGA_HEIGHT; }
+size_t terminal_columns(void) { return VGA_WIDTH; }
+
+void terminal_put_char(size_t row_index, size_t column_index, char character) {
+    if (!output_enabled || row_index >= VGA_HEIGHT || column_index >= VGA_WIDTH) return;
+    const uint8_t byte = (uint8_t)character;
+    const char visible = byte >= 32u && byte <= 126u ? (char)byte : ' ';
+    store_cell(row_index, column_index, entry(visible));
+    graphical_cell(row_index, column_index);
+}
+
+void terminal_present(void) {
+    if (graphical_render_safe()) framebuffer_present();
 }
 
 void terminal_backspace(void) {
