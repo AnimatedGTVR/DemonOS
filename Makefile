@@ -2132,9 +2132,10 @@ $(DESKTOP_ISO): $(ISO) freedoom-assets quake-data grub/grub-desktop.cfg
 	grub-mkrescue -o $@ $(BUILD)/iso-desktop >/dev/null 2>&1
 
 run-desktop: $(DESKTOP_ISO)
-	@echo "Mouse: using the reliable XWayland QEMU backend; Ctrl+Alt+G releases it"
+	@echo "Mouse: real USB tablet (absolute position) -- host cursor tracks the guest pointer directly, no grab needed"
 	env GDK_BACKEND=x11 qemu-system-x86_64 -cdrom $(DESKTOP_ISO) -m 256M -serial stdio \
 		$(QEMU_AUDIO_RUN) \
+		-usb -device usb-tablet \
 		-display gtk,grab-on-hover=on,zoom-to-fit=on \
 		-no-reboot -no-shutdown
 
@@ -2190,9 +2191,10 @@ iso-check: $(ISO)
 qemu: run
 
 run: $(RUN_ISO)
-	@echo "Mouse: using the reliable XWayland QEMU backend; Ctrl+Alt+G releases it"
+	@echo "Mouse: real USB tablet (absolute position) -- host cursor tracks the guest pointer directly, no grab needed"
 	env GDK_BACKEND=x11 qemu-system-x86_64 -cdrom $(RUN_ISO) -m 256M -serial stdio \
 		$(QEMU_AUDIO_RUN) \
+		-usb -device usb-tablet \
 		-display gtk,grab-on-hover=on,zoom-to-fit=on \
 		-no-reboot -no-shutdown
 

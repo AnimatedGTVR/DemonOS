@@ -26,6 +26,7 @@
 #include <kernel/serial.h>
 #include <kernel/surface.h>
 #include <kernel/terminal.h>
+#include <kernel/usb_uhci.h>
 #include <kernel/userspace.h>
 
 #include <stddef.h>
@@ -1019,6 +1020,25 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     boot_status("Hardware IRQs", mouse_controller_ready() ?
         "PIC, PIT, keyboard, and PS/2 mouse enabled" :
         "PIC, PIT, and keyboard enabled; mouse unavailable");
+    /* Real wall-clock delays (USB port reset/settle) only advance once the
+       PIT is actually ticking, so this must come after
+       interrupts_hardware_start() above, never before it -- usb_uhci_start's
+       own busy-wait loops would spin forever against a timer that's not
+       running yet. Optional like AHCI just above: no UHCI controller (or no
+       usb-tablet attached to it) is a real, expected case on every ISO that
+       doesn't pass -usb -device usb-tablet to QEMU, not a boot failure. */
+    if (framebuffer_available()) {
+        const struct framebuffer_info *usb_display = framebuffer_get_info();
+        size_t usb_dma_capacity = 0u;
+        const uint64_t usb_dma = allocate_contiguous(2u * 4096u, &usb_dma_capacity);
+        if (usb_dma != 0u && usb_uhci_start((uintptr_t)usb_dma, usb_dma_capacity,
+                usb_display->width, usb_display->height)) {
+            serial_write("USB_UHCI_TABLET_ONLINE\n");
+            boot_status("USB tablet", "UHCI controller + absolute-position HID report path online");
+        } else {
+            boot_status("USB tablet", "no UHCI controller or no usb-tablet attached; PS/2 mouse only");
+        }
+    }
     boot_progress("Allocating isolated userspace process pools");
     struct userspace_memory processes[SCHEDULER_PROCESS_LIMIT - 1u];
     size_t code_page_total = 0u;
@@ -1295,8 +1315,14 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             boot_fatal("Ring-3 compositor launch failed");
         (void)userspace_run_init();
         struct scheduler_task_snapshot compositor_state;
+        /* READY tolerated alongside BLOCKED for the same reason
+           src/init.c's start_index (index==8) does: the compositor's own
+           ~50ms idle-heartbeat timeout can in principle have already fired
+           by the time this runs, which is normal operation, not a failure
+           to reach the receive-ready state. */
         if (!scheduler_snapshot(compositor_pid, &compositor_state) ||
-            compositor_state.state != SCHEDULER_TASK_BLOCKED) {
+            (compositor_state.state != SCHEDULER_TASK_BLOCKED &&
+             compositor_state.state != SCHEDULER_TASK_READY)) {
             serial_write("compositor startup state=");
             serial_write(scheduler_state_name(compositor_state.state));
             serial_write(" status=");
