@@ -1,0 +1,7 @@
+[package]
+name = "demon-abi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "demon_abi"

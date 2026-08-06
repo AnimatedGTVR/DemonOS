@@ -51,6 +51,13 @@ COMPOSITOR_ELF := $(BUILD)/compositor.elf
 DEMONX_ELF := $(BUILD)/demonx.elf
 DEMONWM_ELF := $(BUILD)/demonwm.elf
 XTERM_ELF := $(BUILD)/xterm.elf
+# Rust replacement compositor, Stage 0: proves a real freestanding no_std
+# Rust binary (nightly + -Z build-std=core, custom target-user.json, linked
+# with rust/linker.ld at the same 0x20000000 large-app base as nxengine/
+# quake/doom) actually runs under this kernel's real ELF64 loader and
+# syscall ABI -- not just that it compiles. Real compositor logic comes in
+# later stages once this proves the toolchain end to end.
+RUST_HELLO_ELF := $(BUILD)/rust-hello.elf
 MAKO_REPO := ../MAKO
 MAKO_SOURCE_ARCHIVE := $(BUILD)/MAKO-source.tar.zst
 MAKO_MANIFEST := $(BUILD)/mako-manifest.txt
@@ -1802,6 +1809,11 @@ $(COMPOSITOR_ELF): $(BUILD)/compositor_entry.o $(BUILD)/compositor_mko.o user/li
 		$(BUILD)/compositor_entry.o $(BUILD)/compositor_mko.o -o $@
 	$(STRIP) -s $@
 
+$(RUST_HELLO_ELF): rust/hello/src/main.rs rust/hello/Cargo.toml rust/demon-abi/src/lib.rs rust/demon-abi/Cargo.toml rust/target-user.json rust/linker.ld rust/.cargo/config.toml | $(BUILD)
+	cd rust/hello && PATH="$(HOME)/.cargo/bin:$$PATH" cargo build -Z build-std=core -Z json-target-spec --target ../target-user.json --release
+	cp rust/hello/target/target-user/release/hello $@
+	$(STRIP) -s $@
+
 $(BUILD)/demonx_server_entry.o: user/demonx_server.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
@@ -1994,7 +2006,7 @@ $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) &: tools/package-mako-source.sh FORCE | 
 
 iso: $(ISO) iso-check
 
-$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(COMPOSITOR_ELF) $(DEMONX_ELF) $(DEMONWM_ELF) $(XTERM_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
+$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(COMPOSITOR_ELF) $(DEMONX_ELF) $(DEMONWM_ELF) $(XTERM_ELF) $(RUST_HELLO_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/grub $(ISO_ROOT)/boot/mako $(ISO_ROOT)/system/mako $(ISO_ROOT)/docs
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
@@ -2010,6 +2022,7 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF
 	cp $(QUAKE_CORE_ELF) $(ISO_ROOT)/boot/mako/quake-core.elf
 	cp $(NXENGINE_CORE_ELF) $(ISO_ROOT)/boot/mako/nxengine-core.elf
 	cp $(COMPOSITOR_ELF) $(ISO_ROOT)/boot/mako/compositor.elf
+	cp $(RUST_HELLO_ELF) $(ISO_ROOT)/boot/mako/rust-hello.elf
 	cp $(DEMONX_ELF) $(ISO_ROOT)/boot/mako/demonx.elf
 	cp $(DEMONWM_ELF) $(ISO_ROOT)/boot/mako/demonwm.elf
 	cp $(XTERM_ELF) $(ISO_ROOT)/boot/mako/xterm.elf
@@ -2278,6 +2291,8 @@ smoke: $(ISO)
 	@grep -q "ELF64_MKO_LOAD_OK" $(BUILD)/serial.log
 	@grep -q "PROCESS_ISOLATION_OK" $(BUILD)/serial.log
 	@grep -q "DYNAMIC_SPAWN_OK pid=3 status=0" $(BUILD)/serial.log
+	@grep -q "RUST_HELLO_READY toolchain=nightly target=x86_64-unknown-none-elf" $(BUILD)/serial.log
+	@grep -q "RUST_RUNTIME_SPAWN_OK pid=3 status=0" $(BUILD)/serial.log
 	@grep -q "PORTKIT_READY allocator libc wad-validation reuse large-files seek timing input" $(BUILD)/serial.log
 	@grep -q "PORTKIT_RING3_OK pid=3 status=0" $(BUILD)/serial.log
 	@grep -q "CLASSICUBE_CORE_RING3_OK" $(BUILD)/serial.log

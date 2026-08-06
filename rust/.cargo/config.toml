@@ -1,0 +1,10 @@
+[target.'cfg(target_os = "none")']
+rustflags = [
+  "-C", "link-arg=-T",
+  "-C", "link-arg=/home/animatedpc/Work/KernelProject/rust/linker.ld",
+  "-C", "link-arg=--no-dynamic-linker",
+]
+
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]

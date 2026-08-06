@@ -1124,6 +1124,32 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write("CXX_RUNTIME_SPAWN_OK pid="); serial_write_u64(cxx_hello_pid);
     serial_write(" status="); serial_write_u64(cxx_hello_status); serial_write("\n");
     boot_status("C++ runtime (Wave 0)", "heap alloc, vtable dispatch, and clean exit passed");
+    /* Rust compositor rewrite, Stage 0 (see rust/hello): proves a real
+       freestanding no_std Rust binary -- nightly + -Z build-std=core, a
+       custom target spec, linked at the same 0x20000000 large-app base
+       nxengine/quake/doom already use -- actually runs under this kernel's
+       real ELF64 loader and raw int-0x80 syscall ABI, not just that it
+       compiles. Spawned and reaped exactly like cxx-hello.elf above; later
+       stages replace this with real compositor logic, not a new proof.
+       Only $(ISO)/grub-test.cfg currently carries rust-hello.elf -- Quake/
+       NXEngine's own separate play-mode ISOs have their own narrower
+       module lists and don't, so (same lesson as the desktop stack's
+       earlier compositor.elf regression) this must check the binary is
+       actually present before treating a missing file as a fatal error. */
+    uint32_t rust_hello_probe_id;
+    if (ramfs_open("/system/bin/rust-hello.elf", 26u, false, &rust_hello_probe_id)) {
+        const uint32_t rust_hello_pid = userspace_spawn_path(0u, "/system/bin/rust-hello.elf", 26u,
+            "rust-hello", CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+                          CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS));
+        if (rust_hello_pid == 0u || !userspace_run_init())
+            boot_fatal("Rust runtime proof-of-concept spawn failed");
+        uint64_t rust_hello_status = UINT64_MAX;
+        if (!scheduler_reap(0u, rust_hello_pid, &rust_hello_status) || rust_hello_status != 0u)
+            boot_fatal("Rust runtime proof-of-concept did not exit cleanly");
+        serial_write("RUST_RUNTIME_SPAWN_OK pid="); serial_write_u64(rust_hello_pid);
+        serial_write(" status="); serial_write_u64(rust_hello_status); serial_write("\n");
+        boot_status("Rust runtime (Stage 0)", "no_std freestanding binary ran under real MAKO-ABI");
+    }
     const uint32_t portcheck_pid = userspace_spawn_path(0u,
         "/system/bin/portcheck.elf", 25u, "portcheck",
         CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
