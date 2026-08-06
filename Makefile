@@ -2017,7 +2017,7 @@ $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) &: tools/package-mako-source.sh FORCE | 
 
 iso: $(ISO) iso-check
 
-$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(COMPOSITOR_ELF) $(DEMONX_ELF) $(DEMONWM_ELF) $(XTERM_ELF) $(RUST_HELLO_ELF) $(RUST_COMPOSITOR_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
+$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(DEMONX_ELF) $(DEMONWM_ELF) $(XTERM_ELF) $(RUST_HELLO_ELF) $(RUST_COMPOSITOR_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/grub $(ISO_ROOT)/boot/mako $(ISO_ROOT)/system/mako $(ISO_ROOT)/docs
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
@@ -2032,7 +2032,6 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF
 	cp $(CLASSICUBE_CORE_ELF) $(ISO_ROOT)/boot/mako/classicube-core.elf
 	cp $(QUAKE_CORE_ELF) $(ISO_ROOT)/boot/mako/quake-core.elf
 	cp $(NXENGINE_CORE_ELF) $(ISO_ROOT)/boot/mako/nxengine-core.elf
-	cp $(COMPOSITOR_ELF) $(ISO_ROOT)/boot/mako/compositor.elf
 	cp $(RUST_HELLO_ELF) $(ISO_ROOT)/boot/mako/rust-hello.elf
 	cp $(RUST_COMPOSITOR_ELF) $(ISO_ROOT)/boot/mako/rust-compositor.elf
 	cp $(DEMONX_ELF) $(ISO_ROOT)/boot/mako/demonx.elf
@@ -2147,7 +2146,7 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/mako/doom-full.elf -type f 2>/dev/null | grep -q doom-full.elf
 	@xorriso -indev $(ISO) -find /boot/mako/classicube-core.elf -type f 2>/dev/null | grep -q classicube-core.elf
 	@xorriso -indev $(ISO) -find /boot/mako/quake-core.elf -type f 2>/dev/null | grep -q quake-core.elf
-	@xorriso -indev $(ISO) -find /boot/mako/compositor.elf -type f 2>/dev/null | grep -q compositor.elf
+	@xorriso -indev $(ISO) -find /boot/mako/rust-compositor.elf -type f 2>/dev/null | grep -q rust-compositor.elf
 	@xorriso -indev $(ISO) -find /boot/mako/demonx.elf -type f 2>/dev/null | grep -q demonx.elf
 	@xorriso -indev $(ISO) -find /boot/mako/demonwm.elf -type f 2>/dev/null | grep -q demonwm.elf
 	@xorriso -indev $(ISO) -find /boot/mako/xterm.elf -type f 2>/dev/null | grep -q xterm.elf
@@ -2175,7 +2174,7 @@ iso-check: $(ISO)
 	@test $$(wc -c < $(PORTABLE_ELF)) -le 8192
 	@test $$(wc -c < $(TETRIS_ELF)) -le 12288
 	@test $$(wc -c < $(CXX_HELLO_ELF)) -le 16384
-	@test $$(wc -c < $(COMPOSITOR_ELF)) -le 262144
+	@test $$(wc -c < $(RUST_COMPOSITOR_ELF)) -le 262144
 	@test $$(wc -c < $(DEMONX_ELF)) -le 131072
 	@test $$(wc -c < $(DEMONWM_ELF)) -le 131072
 	@test $$(wc -c < $(XTERM_ELF)) -le 65536
@@ -2305,8 +2304,7 @@ smoke: $(ISO)
 	@grep -q "DYNAMIC_SPAWN_OK pid=3 status=0" $(BUILD)/serial.log
 	@grep -q "RUST_HELLO_READY toolchain=nightly target=x86_64-unknown-none-elf" $(BUILD)/serial.log
 	@grep -q "RUST_RUNTIME_SPAWN_OK pid=3 status=0" $(BUILD)/serial.log
-	@grep -q "RUST_COMPOSITOR_FRAME_OK" $(BUILD)/serial.log
-	@grep -q "RUST_COMPOSITOR_SPAWN_OK pid=3 status=0" $(BUILD)/serial.log
+	@grep -q "RUST_COMPOSITOR_READY" $(BUILD)/serial.log
 	@grep -q "PORTKIT_READY allocator libc wad-validation reuse large-files seek timing input" $(BUILD)/serial.log
 	@grep -q "PORTKIT_RING3_OK pid=3 status=0" $(BUILD)/serial.log
 	@grep -q "CLASSICUBE_CORE_RING3_OK" $(BUILD)/serial.log

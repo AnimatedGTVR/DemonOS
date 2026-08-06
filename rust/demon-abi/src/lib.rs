@@ -277,6 +277,10 @@ pub struct DisplaySubmit {
 
 pub const INPUT_KEY_DOWN: u16 = 1;
 pub const INPUT_KEY_UP: u16 = 2;
+pub const INPUT_MOUSE_MOVE: u16 = 3;
+pub const INPUT_MOUSE_BUTTON_DOWN: u16 = 4;
+pub const INPUT_MOUSE_BUTTON_UP: u16 = 5;
+pub const INPUT_MOUSE_SCROLL: u16 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -364,3 +368,19 @@ impl Default for WindowMessage {
 // Real compile-time proof this matches the C struct's real, wire-verified
 // size -- the same static_assert window.h itself carries.
 const _: () = assert!(core::mem::size_of::<WindowMessage>() == 64);
+
+// ---------------------------------------------------------------------
+// DemonX bridge constants, mirrored from user/demonx_server.c (the fixed
+// channel it listens for native input forwarding on) and from every X11
+// window's id namespace as DemonX itself assigns it (client 1's first XID
+// is 0x200000 == 2097152; DemonWM is always client 2, whose first XID is
+// 0x200001 == 2097153 and doubles as the fixed proxy target for clicks on
+// its own top panel strip, which is not a tracked compositor window).
+// Neither constant is derived from anything the compositor negotiates at
+// runtime -- both sides simply agree on them ahead of time, the same way
+// WINDOW_SERVICE is agreed on ahead of time instead of being discovered.
+// ---------------------------------------------------------------------
+
+pub const DEMONX_DISPLAY_CHANNEL: &[u8] = b"demonx.display.0";
+pub const DEMONX_WINDOW_ID_BASE: u32 = 2_097_152;
+pub const DEMONWM_PANEL_PROXY_ID: u32 = 2_097_153;
