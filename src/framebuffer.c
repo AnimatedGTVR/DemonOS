@@ -280,6 +280,57 @@ void framebuffer_text(int32_t x, int32_t y, const char *text,
     }
 }
 
+/* Compact 4x5 uppercase/digit font -- same character set as the 5x7 font
+   above, hand-designed at a genuinely smaller native pixel size rather
+   than just scaling the existing glyphs down (there is no sub-1 scale
+   factor; this is a real second font, not a derived one). Each row is a
+   4-bit value, bit 3 = leftmost column. Used by MakoBox's console, which
+   wanted smaller text than the 5x7 font's native size can provide. */
+struct compact_glyph { char value; uint8_t rows[5]; };
+static const struct compact_glyph compact_font[] = {
+ {' ',{0,0,0,0,0}}, {'-',{0,0,15,0,0}}, {'.',{0,0,0,0,4}},
+ {'#',{5,15,5,15,5}}, {'>',{8,4,2,4,8}},
+ {'<',{1,2,4,2,1}}, {'_',{0,0,0,0,15}},
+ {'[',{12,8,8,8,12}}, {']',{3,1,1,1,3}},
+ {'|',{4,4,4,4,4}},
+ {':',{0,4,0,4,0}}, {'/',{1,2,4,8,0}},
+ {'0',{6,9,9,9,6}}, {'1',{2,6,2,2,7}}, {'2',{6,9,2,4,15}},
+ {'3',{14,1,6,1,14}}, {'4',{9,9,15,1,1}}, {'5',{15,8,14,1,14}},
+ {'6',{6,8,14,9,6}}, {'7',{15,1,2,4,4}}, {'8',{6,9,6,9,6}},
+ {'9',{6,9,7,1,6}}, {'A',{6,9,15,9,9}}, {'B',{14,9,14,9,14}},
+ {'C',{7,8,8,8,7}}, {'D',{14,9,9,9,14}}, {'E',{15,8,14,8,15}},
+ {'F',{15,8,14,8,8}}, {'G',{7,8,11,9,7}}, {'H',{9,9,15,9,9}},
+ {'I',{15,4,4,4,15}}, {'J',{3,1,1,9,6}}, {'K',{9,10,12,10,9}},
+ {'L',{8,8,8,8,15}}, {'M',{9,15,15,9,9}}, {'N',{9,13,11,9,9}},
+ {'O',{6,9,9,9,6}}, {'P',{14,9,14,8,8}}, {'Q',{6,9,9,6,1}},
+ {'R',{14,9,14,10,9}}, {'S',{7,8,6,1,14}}, {'T',{15,4,4,4,4}},
+ {'U',{9,9,9,9,6}}, {'V',{9,9,9,6,4}}, {'W',{9,9,15,15,9}},
+ {'X',{9,6,4,6,9}}, {'Y',{9,9,6,4,4}}, {'Z',{15,2,4,8,15}},
+};
+
+static const uint8_t *compact_glyph_rows(char value) {
+    if (value >= 'a' && value <= 'z') value = (char)(value - 'a' + 'A');
+    for (size_t i = 0u; i < sizeof(compact_font) / sizeof(compact_font[0]); ++i)
+        if (compact_font[i].value == value) return compact_font[i].rows;
+    return compact_font[0].rows;
+}
+
+void framebuffer_text_compact(int32_t x, int32_t y, const char *text,
+                              uint32_t scale, uint32_t argb) {
+    if (!enabled || text == NULL || scale == 0u || scale > 8u) return;
+    int32_t cursor = x;
+    while (*text != '\0') {
+        const uint8_t *rows = compact_glyph_rows(*text++);
+        for (uint32_t gy = 0u; gy < 5u; ++gy)
+            for (uint32_t gx = 0u; gx < 4u; ++gx)
+                if ((rows[gy] & (1u << (3u - gx))) != 0u)
+                    framebuffer_fill_rect((struct framebuffer_rect){
+                        cursor + (int32_t)(gx * scale), y + (int32_t)(gy * scale),
+                        (int32_t)scale, (int32_t)scale}, argb);
+        cursor += (int32_t)(5u * scale);
+    }
+}
+
 static uint32_t scale_channel(uint32_t value, uint8_t bits) {
     if (bits >= 8u) return value;
     return (value * ((1u << bits) - 1u) + 127u) / 255u;

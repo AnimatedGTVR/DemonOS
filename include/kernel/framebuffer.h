@@ -48,6 +48,11 @@ void framebuffer_blit(int32_t x, int32_t y, const uint32_t *pixels,
                       uint32_t width, uint32_t height, uint32_t source_pitch);
 void framebuffer_text(int32_t x, int32_t y, const char *text,
                       uint32_t scale, uint32_t argb);
+// A genuinely smaller font (4x5 native pixels vs the 5x7 above), not a
+// scaled-down version of it -- for callers that want smaller text than
+// framebuffer_text's own scale=1 floor can provide (see MakoBox's console).
+void framebuffer_text_compact(int32_t x, int32_t y, const char *text,
+                              uint32_t scale, uint32_t argb);
 /* Registers a region as needing a real scanout copy on the next
    framebuffer_present -- callers that write the backbuffer array directly
    through a graphics_surface (bypassing framebuffer_blit's own damage
