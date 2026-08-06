@@ -1870,6 +1870,26 @@ static int parse_request(const char *reply_name) {
             focus_notify(previous, DEMONX_FOCUS_OUT) != 0)
             (void)send_outgoing(reply_name);
         focused_window = window->id;
+        /* X11-level FocusIn/FocusOut above only reaches the client itself.
+           The native compositor tracks its own, separate notion of which
+           window receives native KEY/POINTER forwarding (see
+           compositor_wait's real dispatch loop), and nothing here ever told
+           it a focus change happened -- so it kept routing input to
+           whichever window had most recently sent CREATE (typically
+           DemonWM's own reparenting frame, never the client content window
+           XSetInputFocus actually targets). Push the same real CREATE/MOVE/
+           CLOSE-style native message so the compositor's focused window
+           tracking matches DemonX's. */
+        if (ensure_desktop_handles()) {
+            struct demon_window_message native_focus = {
+                .version = DEMON_WINDOW_PROTOCOL_VERSION,
+                .opcode = DEMON_WINDOW_FOCUS,
+                .serial = ++compositor_serial,
+                .window_id = window->id,
+            };
+            (void)syscall3(SYSCALL_CHANNEL_SEND, compositor_handle,
+                (uint64_t)(uintptr_t)&native_focus, sizeof(native_focus));
+        }
         return focus_notify(window, DEMONX_FOCUS_IN);
     }
     if (opcode == DEMONX_GET_WINDOW_ATTRIBUTES &&
@@ -1981,9 +2001,19 @@ static int parse_request(const char *reply_name) {
         return 0;
     }
     if (opcode == DEMONX_SELECT_INPUT && incoming.payload_length == 12u) {
-        window->event_mask = read32(&incoming.payload[8]);
-        window->event_client =
-            window->event_mask != 0u ? incoming.client_id : 0u;
+        const uint32_t mask = read32(&incoming.payload[8]);
+        /* Additive, not a replace: a window manager's later SelectInput on
+           a client it now manages (watchWindow's own Structure/Button/
+           Motion/Focus/Property interest) must not erase the bits the
+           client itself already registered (its own KeyPress/KeyRelease,
+           typically), or the required-mask check every native input
+           dispatch does below would start rejecting events the client
+           genuinely still wants. See key_event_client's own comment for
+           the matching event_client half of this. */
+        window->event_mask |= mask;
+        if (mask != 0u) window->event_client = incoming.client_id;
+        if ((mask & (DEMONX_KEY_PRESS_MASK | DEMONX_KEY_RELEASE_MASK)) != 0u)
+            window->key_event_client = incoming.client_id;
         return 0;
     }
     if (opcode == DEMONX_CONFIGURE_WINDOW && incoming.payload_length >= 12u) {
@@ -2199,9 +2229,10 @@ static int process_native_input(const struct demon_window_message *message,
     } else {
         return 1;
     }
-    if (grab_client == 0u && window->event_client == 0u) return 1;
+    const uint32_t owner_client = is_key ? window->key_event_client : window->event_client;
+    if (grab_client == 0u && owner_client == 0u) return 1;
     const uint32_t destination_client =
-        grab_client != 0u ? grab_client : window->event_client;
+        grab_client != 0u ? grab_client : owner_client;
     clear_outgoing(destination_client);
     outgoing.flags = DEMONX_FLAG_EVENT;
     outgoing.payload_length = 32u;

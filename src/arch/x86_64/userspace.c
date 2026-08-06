@@ -46,28 +46,37 @@
    (1.25MB) -- real headroom for the remaining boss-adjacent work, still
    one contiguous 1.25MB large-code region per process. */
 #define USER_LARGE_CODE_MAX_PAGES 320u
-#define USER_SURFACE_MAP 0x380000u
-/* 16 pages (64 KiB) matches the old 256x64 SURFACE_MAX_WIDTH/HEIGHT
-   ceiling (see include/kernel/surface.h). Raising SURFACE_MAX_WIDTH/HEIGHT
-   to 640x480 means a window wider than what 16 pages can hold (anything
-   over 256x64, e.g. a full-width panel) still gets a real surface and a
-   real compositor-side share, but map_surface_readonly's page_count check
-   here rejects mapping it into this process's own address space, so the
-   compositor falls back to a flat placeholder for it. Tried raising this
-   to fit larger windows (24, 32 pages) and got back a corrupted frame
-   both times -- something about this constant's relationship to the rest
-   of the process's single low page table isn't What the surrounding
-   comments assume, and needs real investigation, not another guess, before
-   moving it again. Left at the known-safe value pending that follow-up. */
-#define USER_SURFACE_MAP_PAGES 16u
-#define USER_SURFACE_MAP_SIZE (USER_SURFACE_MAP_PAGES * 4096u)
-/* Multiple simultaneous windows each need their own mapped client surface.
-   Slots are laid out contiguously after USER_SURFACE_MAP, still inside the
-   2 MiB region covered by the process's single low page table. */
+/* The old USER_SURFACE_MAP (0x380000, 16 pages/64 KiB per slot) lived
+   inside the SAME 2 MiB low page table as this process's own stack
+   (USER_STACK_PAGE..USER_ADDRESS_END) -- real, provable overlap, not a
+   theory: with USER_STACK_PAGE=0x335000 and USER_ADDRESS_END=0x3B5000,
+   the four 16-page slots at 0x380000..0x3C0000 sat almost entirely inside
+   that live stack range. 16 pages also predated SURFACE_MAX_WIDTH/HEIGHT
+   being raised to 640x480 (see include/kernel/surface.h): anything over
+   the old 256x64 ceiling (e.g. DemonWM's real 628x28 panel, 18 pages)
+   still got a real surface and a real compositor-side share, but
+   map_surface_readonly's page_count check rejected mapping it, so the
+   compositor fell back to a flat placeholder for every real window. A
+   prior attempt to just raise the page count to 24 or 32 while keeping
+   the same base got back a corrupted frame both times -- unsurprising in
+   hindsight, since that only pushed the slots further into (or past) the
+   overlapping stack range rather than removing the overlap.
+   The real fix: each slot now gets its own dedicated 2 MiB page table at
+   a fresh virtual base with no other occupant, using the exact same
+   on-demand-page-table pattern large_code_load already uses for
+   USER_LARGE_CODE_BASE. USER_SURFACE_MAP_BASE's directory index (0x18000000
+   >> 21 = 192) sits well clear of USER_ANON_BASE's dynamic range (128..~140,
+   see anonymous_release's table-count math) and below USER_LARGE_CODE_BASE's
+   own index (256). Each slot is one whole page table (512 entries), so
+   USER_SURFACE_MAP_PAGES can now be the real SURFACE_MAX_WIDTH*
+   SURFACE_MAX_HEIGHT/1024 ceiling (640*480*4 bytes = 300 pages) without
+   ever crossing into a second table or any other region. */
+#define USER_SURFACE_MAP_BASE 0x18000000u
+#define USER_SURFACE_MAP_PAGES 300u
 #define USER_SURFACE_MAP_SLOTS 4u
-#define USER_SURFACE_MAP_SLOT_STRIDE (USER_SURFACE_MAP_PAGES * 4096u)
+#define USER_SURFACE_MAP_SLOT_STRIDE 0x200000u
 #define USER_SURFACE_MAP_REGION_SIZE (USER_SURFACE_MAP_SLOTS * USER_SURFACE_MAP_SLOT_STRIDE)
-#define USER_SURFACE_MAP_SLOT_BASE(slot) (USER_SURFACE_MAP + (slot) * USER_SURFACE_MAP_SLOT_STRIDE)
+#define USER_SURFACE_MAP_SLOT_BASE(slot) (USER_SURFACE_MAP_BASE + (slot) * USER_SURFACE_MAP_SLOT_STRIDE)
 
 struct tss64 {
     uint32_t reserved0;
@@ -118,6 +127,10 @@ static size_t anonymous_reserved_pages[SCHEDULER_PROCESS_LIMIT];
 static uint64_t large_code_frames[SCHEDULER_PROCESS_LIMIT][USER_LARGE_CODE_MAX_PAGES];
 static size_t large_code_page_count[SCHEDULER_PROCESS_LIMIT];
 static uint64_t large_code_page_table[SCHEDULER_PROCESS_LIMIT];
+/* One dedicated page table per (pid, slot), allocated lazily on that
+   slot's first real mapping and reused for every later surface that
+   slot maps/unmaps -- see USER_SURFACE_MAP_BASE's comment above. */
+static uint64_t surface_map_page_table[SCHEDULER_PROCESS_LIMIT][USER_SURFACE_MAP_SLOTS];
 extern uint64_t mako_frame_allocate(uintptr_t state_address);
 /* Set once from kernel_main (see multiboot_test_mode in kernel.c) before any
    userspace task runs, and never changed afterward. Exposed read-only to
@@ -478,9 +491,9 @@ static bool user_range(uint64_t address, uint64_t length) {
        real investigation of slot lifecycle/reuse before tightening this
        again, not another guess. */
     return pid != 0u && pid < SCHEDULER_PROCESS_LIMIT &&
-        any_surface_mapped(pid) && address >= USER_SURFACE_MAP &&
-        address <= USER_SURFACE_MAP + USER_SURFACE_MAP_REGION_SIZE &&
-        length <= USER_SURFACE_MAP + USER_SURFACE_MAP_REGION_SIZE - address;
+        any_surface_mapped(pid) && address >= USER_SURFACE_MAP_BASE &&
+        address <= USER_SURFACE_MAP_BASE + USER_SURFACE_MAP_REGION_SIZE &&
+        length <= USER_SURFACE_MAP_BASE + USER_SURFACE_MAP_REGION_SIZE - address;
 }
 
 // Destinations the kernel is allowed to write into on a user process's
@@ -551,19 +564,30 @@ bool userspace_copy_to(uint32_t pid, uint64_t address, const uint8_t *data, size
     return true;
 }
 
-static void edit_surface_ptes(uint32_t pid, size_t slot, uintptr_t physical_address,
+static bool edit_surface_ptes(uint32_t pid, size_t slot, uintptr_t physical_address,
                                size_t page_count, bool present) {
     uint64_t original_cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
     if (original_cr3 != kernel_address_space)
         __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
-    uint64_t *pt1 = (uint64_t *)(uintptr_t)process_memory[pid].page_table;
-    const size_t first = (USER_SURFACE_MAP_SLOT_BASE(slot) - 0x200000u) / 4096u;
-    for (size_t page = 0u; page < USER_SURFACE_MAP_PAGES; ++page)
-        pt1[first + page] = present && page < page_count ?
-            physical_address + page * 4096u + 5u : 0u;
+    if (surface_map_page_table[pid][slot] == 0u) {
+        const uint64_t table = anonymous_frame_take();
+        if (table != 0u) {
+            surface_map_page_table[pid][slot] = table;
+            uint64_t *directory = (uint64_t *)(uintptr_t)process_memory[pid].page_directory;
+            directory[USER_SURFACE_MAP_SLOT_BASE(slot) >> 21u] = table + 7u;
+        }
+    }
+    const uint64_t table = surface_map_page_table[pid][slot];
+    if (table != 0u) {
+        uint64_t *pt = (uint64_t *)(uintptr_t)table;
+        for (size_t page = 0u; page < USER_SURFACE_MAP_PAGES; ++page)
+            pt[page] = present && page < page_count ?
+                physical_address + page * 4096u + 5u : 0u;
+    }
     if (original_cr3 != kernel_address_space)
         __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
+    return table != 0u;
 }
 
 static bool map_surface_readonly(uint32_t pid, uint32_t object_id,
@@ -585,7 +609,10 @@ static bool map_surface_readonly(uint32_t pid, uint32_t object_id,
         page_count == 0u || page_count > USER_SURFACE_MAP_PAGES ||
         (physical_address & 4095u) != 0u ||
         !surface_retain(object_id)) return false;
-    edit_surface_ptes(pid, (size_t)free_slot, physical_address, page_count, true);
+    if (!edit_surface_ptes(pid, (size_t)free_slot, physical_address, page_count, true)) {
+        (void)surface_release(object_id);
+        return false;
+    }
     mapped_surface[pid][free_slot] = object_id;
     *user_address = USER_SURFACE_MAP_SLOT_BASE(free_slot);
     return true;
@@ -595,7 +622,7 @@ static bool unmap_surface_id(uint32_t pid, uint32_t object_id) {
     if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT || object_id == 0u) return false;
     for (size_t slot = 0u; slot < USER_SURFACE_MAP_SLOTS; ++slot) {
         if (mapped_surface[pid][slot] != object_id) continue;
-        edit_surface_ptes(pid, slot, 0u, 0u, false);
+        (void)edit_surface_ptes(pid, slot, 0u, 0u, false);
         mapped_surface[pid][slot] = 0u;
         (void)surface_release(object_id);
         return true;
@@ -607,15 +634,36 @@ bool userspace_unmap_surface(uint32_t pid, uint32_t surface_id) {
     return unmap_surface_id(pid, surface_id);
 }
 
+/* Full process teardown: clears every live mapping (as edit_surface_ptes
+   already does), then also releases the dedicated per-slot page tables
+   themselves (see USER_SURFACE_MAP_BASE's comment) and their directory
+   entries, mirroring large_code_release's own frame/PDE cleanup -- a
+   slot's page table is reused across many different surfaces over the
+   process's life (see edit_surface_ptes's lazy allocate-once check), so
+   only process exit actually frees the table frame, not an ordinary
+   unmap. */
 static void unmap_surface(uint32_t pid) {
     if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT) return;
     for (size_t slot = 0u; slot < USER_SURFACE_MAP_SLOTS; ++slot) {
         const uint32_t object_id = mapped_surface[pid][slot];
         if (object_id == 0u) continue;
-        edit_surface_ptes(pid, slot, 0u, 0u, false);
+        (void)edit_surface_ptes(pid, slot, 0u, 0u, false);
         mapped_surface[pid][slot] = 0u;
         (void)surface_release(object_id);
     }
+    uint64_t original_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
+    uint64_t *directory = (uint64_t *)(uintptr_t)process_memory[pid].page_directory;
+    for (size_t slot = 0u; slot < USER_SURFACE_MAP_SLOTS; ++slot) {
+        if (surface_map_page_table[pid][slot] == 0u) continue;
+        directory[USER_SURFACE_MAP_SLOT_BASE(slot) >> 21u] = 0u;
+        anonymous_frame_release(surface_map_page_table[pid][slot]);
+        surface_map_page_table[pid][slot] = 0u;
+    }
+    if (original_cr3 != kernel_address_space)
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(original_cr3) : "memory");
 }
 
 bool userspace_surface_mapping_readonly(uint32_t pid, uint32_t surface_id) {
@@ -633,11 +681,10 @@ bool userspace_surface_mapping_readonly(uint32_t pid, uint32_t surface_id) {
     __asm__ volatile ("mov %%cr3, %0" : "=r"(original_cr3));
     if (original_cr3 != kernel_address_space)
         __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_address_space) : "memory");
-    const uint64_t *pt1 = (const uint64_t *)(uintptr_t)process_memory[pid].page_table;
-    const size_t first = (USER_SURFACE_MAP_SLOT_BASE((size_t)found_slot) - 0x200000u) / 4096u;
-    bool valid = expected_physical != 0u;
-    for (size_t page = 0u; page < USER_SURFACE_MAP_PAGES; ++page) {
-        const uint64_t entry = pt1[first + page];
+    const uint64_t *pt = (const uint64_t *)(uintptr_t)surface_map_page_table[pid][found_slot];
+    bool valid = expected_physical != 0u && pt != NULL;
+    for (size_t page = 0u; valid && page < USER_SURFACE_MAP_PAGES; ++page) {
+        const uint64_t entry = pt[page];
         if (page < expected_pages)
             valid = valid && (entry & 7u) == 5u &&
                 (entry & ~4095ull) == expected_physical + page * 4096u;

@@ -154,6 +154,19 @@ struct demonx_window {
     uint16_t window_class;
     uint32_t event_mask;
     uint32_t event_client;
+    /* event_client is last-writer-wins across every SelectInput caller (see
+       demonx_server.c's non-root DEMONX_SELECT_INPUT handler), which is
+       correct for the window-manager's own structural/button interest in a
+       client it manages (Desktop/demonwm/demonwm.cc's watchWindow) but was
+       silently stealing KEY delivery from the client that actually owns
+       keyboard input: watchWindow's own mask never requests KeyPress/
+       KeyReleaseMask, yet its later SelectInput call still overwrote
+       event_client to the window manager, so no keystroke ever reached a
+       managed window's real client once DemonWM started watching it.
+       key_event_client tracks the same "who last selected this" idea but
+       scoped to just the key-press/-release bits, so a WM's later,
+       Key-less SelectInput call can never override it. */
+    uint32_t key_event_client;
     uint32_t owner_client;
     uint32_t surface_handle;
     uint32_t compositor_surface;
