@@ -781,12 +781,28 @@ static void editor_backspace(struct editor_state *editor) {
     editor->modified = true;
 }
 
+// Forward-delete is backspace one position to the right: move there first
+// (onto the next line if already at end-of-line) then delete backwards,
+// reusing the exact same in-line-shift and line-merge logic.
+static void editor_delete_forward(struct editor_state *editor) {
+    const size_t length = editor_line_length(editor, editor->cursor_row);
+    if (editor->cursor_column < length) {
+        ++editor->cursor_column;
+        editor_backspace(editor);
+    } else if (editor->cursor_row + 1u < editor->line_count) {
+        ++editor->cursor_row;
+        editor->cursor_column = 0u;
+        editor_backspace(editor);
+    }
+}
+
 static void applet_edit(const char *path) {
     if (path[0] == '\0') { line("usage: edit <path>"); return; }
     static struct editor_state editor;
     editor_load(&editor, path);
     terminal_write("\f");
-    const char *status = "^O Save   ^X Exit   Arrow keys move";
+    static const char *const default_status = "^O Save  ^X Exit  Home/End  Del  Arrows move";
+    const char *status = default_status;
     editor_render(&editor, status);
     for (;;) {
         const char value = edit_read_char();
@@ -797,10 +813,17 @@ static void applet_edit(const char *path) {
             break;
         } else if (value == '\n') {
             editor_split_line(&editor);
-            status = "^O Save   ^X Exit   Arrow keys move";
+            status = default_status;
         } else if (value == '\b') {
             editor_backspace(&editor);
-            status = "^O Save   ^X Exit   Arrow keys move";
+            status = default_status;
+        } else if (value == KEYBOARD_CHAR_DELETE) {
+            editor_delete_forward(&editor);
+            status = default_status;
+        } else if (value == KEYBOARD_CHAR_HOME) {
+            editor.cursor_column = 0u;
+        } else if (value == KEYBOARD_CHAR_END) {
+            editor.cursor_column = editor_line_length(&editor, editor.cursor_row);
         } else if (value == KEYBOARD_CHAR_LEFT) {
             if (editor.cursor_column > 0u) --editor.cursor_column;
             else if (editor.cursor_row > 0u) {
@@ -824,7 +847,7 @@ static void applet_edit(const char *path) {
             }
         } else if (value >= 32 && value <= 126) {
             editor_insert_char(&editor, value);
-            status = "^O Save   ^X Exit   Arrow keys move";
+            status = default_status;
         }
         editor_render(&editor, status);
     }

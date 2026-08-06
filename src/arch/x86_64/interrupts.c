@@ -296,6 +296,12 @@ void interrupt_keyboard_handler(void) {
             keyboard_queue_char(KEYBOARD_CHAR_LEFT);
         if (!released && code == 0x4Du)
             keyboard_queue_char(KEYBOARD_CHAR_RIGHT);
+        if (!released && code == 0x47u)
+            keyboard_queue_char(KEYBOARD_CHAR_HOME);
+        if (!released && code == 0x4Fu)
+            keyboard_queue_char(KEYBOARD_CHAR_END);
+        if (!released && code == 0x53u)
+            keyboard_queue_char(KEYBOARD_CHAR_DELETE);
         publish_key((uint16_t)(0x100u | code), released, '\0');
         out8(0x20u, 0x20u);
         return;

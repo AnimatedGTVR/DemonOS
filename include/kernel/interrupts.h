@@ -17,6 +17,9 @@ void keyboard_discard_chars(void);
 // tops out at 0x1A, and no punctuation Ctrl-combo is translated.
 #define KEYBOARD_CHAR_LEFT ((char)0x1E)
 #define KEYBOARD_CHAR_RIGHT ((char)0x1F)
+#define KEYBOARD_CHAR_HOME ((char)0x1B)
+#define KEYBOARD_CHAR_END ((char)0x1C)
+#define KEYBOARD_CHAR_DELETE ((char)0x7F)
 bool keyboard_controller_ready(void);
 uint64_t keyboard_irq_count(void);
 uint64_t keyboard_character_count(void);
