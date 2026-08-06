@@ -24,6 +24,7 @@ enum input_modifiers {
     INPUT_MOD_CAPS_LOCK = 1u << 1,
     INPUT_MOD_ALT = 1u << 2,
     INPUT_MOD_SUPER = 1u << 3,
+    INPUT_MOD_CTRL = 1u << 4,
 };
 
 /* Set-1 extended scan codes retain their E0 prefix in bit 8. Keeping the

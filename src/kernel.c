@@ -202,12 +202,23 @@ static bool allocate_process_memory(struct userspace_memory *memory,
     return true;
 }
 
+/* Standard 4-bit VGA text-mode color codes. terminal_init's own default is
+   0x0Fu (foreground 0xF, background 0x0), so BOOT_COLOR_DEFAULT restores
+   exactly that after a colored status marker, rather than guessing at a
+   plain value that might drift from terminal.c's actual default later. */
+#define BOOT_COLOR_DEFAULT 0x0Fu
+#define BOOT_COLOR_GREEN 0x0Au
+#define BOOT_COLOR_RED 0x0Cu
+#define BOOT_COLOR_YELLOW 0x0Eu
+
 __attribute__((noreturn))
 static void boot_fatal(const char *message) {
     serial_write("[FAILED] ");
     serial_write(message);
     serial_write("\n");
+    terminal_set_color(BOOT_COLOR_RED, 0u);
     terminal_write("[FAILED] ");
+    terminal_set_color(BOOT_COLOR_DEFAULT, 0u);
     terminal_write_line(message);
     for (;;) __asm__ volatile ("cli; hlt");
 }
@@ -221,7 +232,9 @@ static void boot_status(const char *name, const char *detail) {
     }
     serial_write("\n");
 
+    terminal_set_color(BOOT_COLOR_GREEN, 0u);
     terminal_write("[  OK  ] ");
+    terminal_set_color(BOOT_COLOR_DEFAULT, 0u);
     terminal_write(name);
     if (detail != NULL) {
         terminal_write(" -- ");
@@ -237,7 +250,9 @@ static void boot_progress(const char *detail) {
     serial_write("[ .... ] ");
     serial_write(detail);
     serial_write("\n");
+    terminal_set_color(BOOT_COLOR_YELLOW, 0u);
     terminal_write("[ .... ] ");
+    terminal_set_color(BOOT_COLOR_DEFAULT, 0u);
     terminal_write_line(detail);
 }
 

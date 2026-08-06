@@ -49,14 +49,32 @@ static bool graphical_render_safe(void) {
     return current_cr3 == graphical_kernel_cr3;
 }
 
+// Only the handful of VGA foreground codes boot_status/boot_fatal/
+// boot_progress actually use (see kernel.c's BOOT_COLOR_* constants) get a
+// real color here; every other foreground nibble keeps rendering as
+// PLAIN_FG, so ordinary uncolored output looks exactly as it always has.
+// The recovery console stays otherwise plain per this file's own header
+// comment -- this is real status information (did this boot step pass or
+// fail), not decoration.
+static uint32_t vga_foreground_rgb(uint8_t foreground) {
+    switch (foreground & 0x0Fu) {
+    case 0x0Au: return 0xFF55FF55u; /* green:  [  OK  ] */
+    case 0x0Cu: return 0xFFFF5555u; /* red:    [FAILED] */
+    case 0x0Eu: return 0xFFFFFF55u; /* yellow: [ .... ] */
+    default: return PLAIN_FG;
+    }
+}
+
 static void graphical_cell(size_t y, size_t x) {
     if (!graphical_render_safe()) return;
     const int32_t pixel_x = GRAPHICAL_X + (int32_t)x * GRAPHICAL_CELL_WIDTH;
     const int32_t pixel_y = GRAPHICAL_Y + (int32_t)y * GRAPHICAL_CELL_HEIGHT;
+    const uint16_t cell = cells[y * VGA_WIDTH + x];
     framebuffer_fill_rect((struct framebuffer_rect){pixel_x, pixel_y,
         GRAPHICAL_CELL_WIDTH, GRAPHICAL_CELL_HEIGHT}, PLAIN_BG);
-    char text[2] = {(char)(cells[y * VGA_WIDTH + x] & 0xffu), '\0'};
-    framebuffer_text(pixel_x, pixel_y + 2, text, 1u, PLAIN_FG);
+    char text[2] = {(char)(cell & 0xffu), '\0'};
+    framebuffer_text(pixel_x, pixel_y + 2, text, 1u,
+        vga_foreground_rgb((uint8_t)(cell >> 8u)));
 }
 
 static void store_cell(size_t y, size_t x, uint16_t value) {

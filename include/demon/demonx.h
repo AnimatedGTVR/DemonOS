@@ -69,6 +69,12 @@ enum demonx_core_opcode {
     DEMONX_FREE_CURSOR = 95u,
     DEMONX_DEFINE_CURSOR = 96u,
     DEMONX_KILL_CLIENT = 113u,
+    /* DemonX-specific extension, not a real X11 core opcode -- core opcodes
+       only go up to 127, so 200 can never collide with one this server
+       later grows real support for. Draws text at an integer pixel scale
+       (see demonx_draw_string_scaled/draw_text_scaled) for clients like
+       xterm that want adjustable font size without a real X font server. */
+    DEMONX_POLY_TEXT8_SCALED = 200u,
 };
 
 #define DEMONX_PASSIVE_GRAB_LIMIT 8u

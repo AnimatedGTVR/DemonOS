@@ -42,6 +42,7 @@ static bool keyboard_shift;
 static bool keyboard_caps_lock;
 static bool keyboard_alt;
 static bool keyboard_super;
+static bool keyboard_ctrl;
 static bool keyboard_extended;
 static volatile uint64_t mouse_irqs;
 static volatile uint64_t mouse_packets;
@@ -180,6 +181,7 @@ static bool ps2_keyboard_start(void) {
     keyboard_caps_lock = false;
     keyboard_alt = false;
     keyboard_super = false;
+    keyboard_ctrl = false;
     keyboard_extended = false;
     return true;
 }
@@ -215,7 +217,8 @@ static void publish_key(uint16_t code, bool released, char character) {
         .modifiers = (keyboard_shift ? INPUT_MOD_SHIFT : 0u) |
             (keyboard_caps_lock ? INPUT_MOD_CAPS_LOCK : 0u) |
             (keyboard_alt ? INPUT_MOD_ALT : 0u) |
-            (keyboard_super ? INPUT_MOD_SUPER : 0u)};
+            (keyboard_super ? INPUT_MOD_SUPER : 0u) |
+            (keyboard_ctrl ? INPUT_MOD_CTRL : 0u)};
     (void)input_publish(&event);
 }
 
@@ -282,6 +285,7 @@ void interrupt_keyboard_handler(void) {
         const uint8_t code = (uint8_t)(scan & 0x7Fu);
         if (code == 0x5Bu || code == 0x5Cu) keyboard_super = !released;
         if (code == 0x38u) keyboard_alt = !released;
+        if (code == 0x1Du) keyboard_ctrl = !released;
         if (!released && code == 0x48u)
             keyboard_queue_char(KEYBOARD_CHAR_HISTORY_UP);
         if (!released && code == 0x50u)
@@ -300,6 +304,12 @@ void interrupt_keyboard_handler(void) {
     }
     if (code == 0x38u) {
         keyboard_alt = !released;
+        publish_key(code, released, '\0');
+        out8(0x20u, 0x20u);
+        return;
+    }
+    if (code == 0x1Du) {
+        keyboard_ctrl = !released;
         publish_key(code, released, '\0');
         out8(0x20u, 0x20u);
         return;

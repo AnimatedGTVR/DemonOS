@@ -1465,6 +1465,34 @@ int XDrawString(Display *display, Drawable drawable, GC gc, int x, int y,
     return send_packet(display);
 }
 
+/* DemonX-specific extension, not a real Xlib call (no such thing exists in
+   real X11 -- real font scaling there comes from loading a differently
+   sized font, which this server's single hardcoded 5x7 bitmap font has no
+   equivalent of). Mirrors XDrawString's packet layout with one extra byte
+   (scale) inserted after length; see DEMONX_POLY_TEXT8_SCALED's comment. */
+int demonx_draw_string_scaled(Display *display, Drawable drawable, GC gc,
+                              int x, int y, const char *text, int length,
+                              uint8_t scale) {
+    if (display != &singleton || !singleton_open || gc == NULL || !gc->used ||
+        text == NULL || length < 0 || length > 240)
+        return 0;
+    const uint16_t request_length =
+        (uint16_t)((18u + (unsigned int)length + 3u) & ~3u);
+    begin_packet(display, request_length, 0u);
+    display->packet.payload[0] = DEMONX_POLY_TEXT8_SCALED;
+    write16(&display->packet.payload[2], request_length / 4u);
+    write32(&display->packet.payload[4], drawable);
+    write32(&display->packet.payload[8], gc->id);
+    write16(&display->packet.payload[12], (uint16_t)x);
+    write16(&display->packet.payload[14], (uint16_t)y);
+    display->packet.payload[16] = (uint8_t)length;
+    display->packet.payload[17] = scale;
+    for (int index = 0; index < length; ++index)
+        display->packet.payload[18u + (unsigned int)index] =
+            (uint8_t)text[index];
+    return send_packet(display);
+}
+
 void XmbDrawString(Display *display, Drawable drawable, XFontSet font_set,
                    GC gc, int x, int y, const char *text, int length) {
     if (font_set != &font_set_slot || !font_set_slot.used) return;

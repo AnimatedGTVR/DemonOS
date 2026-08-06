@@ -790,6 +790,67 @@ static int draw_text(uint32_t drawable_id, const struct demonx_gc *gc,
     return 1;
 }
 
+/* Same glyph plotting as draw_text, but each source bit becomes a scale x
+   scale block of destination pixels instead of one pixel. x/y/character
+   advance are all real screen-pixel positions/steps the caller has already
+   worked out for the current scale (see xterm.c's font_scale-aware layout
+   math) -- this function only needs to know how big to blow up one glyph
+   pixel, not anything about the caller's own grid. Capped at 8x: five
+   columns * 8 comfortably fits a small stack buffer, and no real terminal
+   font size needs more than that. */
+static int draw_text_scaled(uint32_t drawable_id, const struct demonx_gc *gc,
+                            int16_t x, int16_t baseline,
+                            const uint8_t *text, uint8_t length, uint8_t scale) {
+    uint32_t surface, width, height;
+    struct demonx_window *window;
+    if (scale == 0u || scale > 8u) return -4;
+    if (!drawable_surface(drawable_id, &surface, &width, &height, &window))
+        return -1;
+    const uint64_t mapped = syscall1(SYSCALL_SURFACE_MAP, surface);
+    if (mapped == SYSCALL_FAILURE) return -2;
+    const int32_t top = (int32_t)baseline - 7 * (int32_t)scale;
+    uint32_t send_pixels[8u * 5u];
+    for (uint8_t character = 0u; character < length; ++character) {
+        const uint8_t *glyph = glyph_columns(text[character]);
+        if (glyph == NULL) continue;
+        const int32_t base_x = (int32_t)x + character * 6 * (int32_t)scale;
+        const uint32_t span = 5u * scale;
+        for (uint32_t row = 0u; row < 7u; ++row) {
+            for (uint32_t sub_row = 0u; sub_row < scale; ++sub_row) {
+                const int32_t destination_y =
+                    top + (int32_t)row * (int32_t)scale + (int32_t)sub_row;
+                if (destination_y < 0 || destination_y >= (int32_t)height ||
+                    base_x < 0 || base_x + (int32_t)span > (int32_t)width)
+                    continue;
+                for (uint32_t column = 0u; column < span; ++column) {
+                    const uint32_t source_column = column / scale;
+                    send_pixels[column] =
+                        (glyph[source_column] & (1u << row)) != 0u
+                            ? (gc->foreground | 0xff000000u)
+                            : ((const uint32_t *)(uintptr_t)mapped)
+                                  [(uint32_t)destination_y * width +
+                                   (uint32_t)base_x + column];
+                }
+                if (syscall4(SYSCALL_SURFACE_WRITE, surface,
+                             (uint64_t)(uintptr_t)send_pixels, span,
+                             (uint32_t)destination_y * width +
+                                 (uint32_t)base_x) != span)
+                    {
+                        (void)syscall1(SYSCALL_SURFACE_UNMAP, surface);
+                        return -3;
+                    }
+            }
+        }
+    }
+    (void)syscall1(SYSCALL_SURFACE_UNMAP, surface);
+    if (window != NULL)
+        (void)syscall5(SYSCALL_SURFACE_DAMAGE, surface,
+                       x < 0 ? 0u : (uint32_t)x,
+                       top < 0 ? 0u : (uint32_t)top,
+                       (uint32_t)length * 6u * scale, 7u * scale);
+    return 1;
+}
+
 static void map_notify(const struct demonx_window *window) {
     clear_outgoing(window->event_client);
     outgoing.flags = DEMONX_FLAG_EVENT;
@@ -1806,6 +1867,28 @@ static int parse_request(const char *reply_name) {
             (int16_t)read16(&incoming.payload[12]),
             (int16_t)read16(&incoming.payload[14]),
             &incoming.payload[17], length);
+        if (drawn < 0) {
+            protocol_error(11u, opcode, id);
+            return 1;
+        }
+        return 0;
+    }
+    if (opcode == DEMONX_POLY_TEXT8_SCALED && incoming.payload_length >= 21u) {
+        struct demonx_gc *gc = find_gc(read32(&incoming.payload[8]));
+        const uint8_t length = incoming.payload[16];
+        const uint8_t scale = incoming.payload[17];
+        const uint16_t expected =
+            (uint16_t)((18u + (uint16_t)length + 3u) & ~3u);
+        if (incoming.payload_length != expected || gc == NULL ||
+            gc->owner_client != incoming.client_id || gc->drawable != id ||
+            !valid_drawable(id)) {
+            protocol_error(gc == NULL ? 13u : 2u, opcode, id);
+            return 1;
+        }
+        const int drawn = draw_text_scaled(id, gc,
+            (int16_t)read16(&incoming.payload[12]),
+            (int16_t)read16(&incoming.payload[14]),
+            &incoming.payload[18], length, scale);
         if (drawn < 0) {
             protocol_error(11u, opcode, id);
             return 1;
