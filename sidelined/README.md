@@ -1,13 +1,20 @@
 # Sidelined
 
-Everything under this directory is the previous graphical desktop stack --
+Everything under this directory is an *earlier* graphical desktop stack --
 sidelined, not deleted, on request, in favor of a plain TTY-only console
-kernel (see `src/kernel.c`'s `main()`: every boot now goes straight to
-`makobox_shell()`, no compositor, no framebuffer graphics mode).
+kernel at the time. That decision has since been reversed: the graphical
+direction was picked back up with a from-scratch rewrite (a Rust
+compositor at `rust/compositor/`, plus a new C DemonX server at
+`user/demonx_server.c`, window manager at `Desktop/demonwm/demonwm.cc`,
+and `apps/xterm/xterm.c`), and `src/kernel.c`'s `main()` now does spawn a
+real compositor and reach a graphical desktop session before falling
+through to `makobox_shell()` as the recovery console alongside it (see
+`DESKTOP_SESSION_READY` at boot).
 
-Nothing here is part of the active build. It's kept in the tree (and in
-full git history either way) in case the graphical direction gets picked
-back up later, rather than lost.
+Nothing under *this* directory is part of the active build -- it's the
+older, now-superseded implementation (Xlib-shim based, MKO-scripted
+compositor), kept in the tree (and in full git history either way) rather
+than lost, in case anything here is useful reference for the current one.
 
 ## What's here
 
@@ -28,4 +35,13 @@ back up later, rather than lost.
 
 `apps/cxx_hello`, `apps/tetris`, and `user/init.mko`/`sdk.mko` are plain
 console/input-driven, don't depend on the compositor or any windowing
-protocol, and stayed in the active build.
+protocol, and stayed in the active build regardless of the desktop stack's
+own state.
+
+The *current* graphical desktop stack -- distinct from everything sidelined
+above, not a revival of it -- lives at `rust/compositor/` (compositor),
+`user/demonx_server.c` (X11 server), `Desktop/demonwm/demonwm.cc` (window
+manager), and `apps/xterm/xterm.c` (terminal client). `user/compositor.mko`/
+`.S` at the top-level `user/` directory are themselves now dead leftovers
+from before the Rust rewrite -- not part of this sidelined/ stack, but not
+built by anything active either.
