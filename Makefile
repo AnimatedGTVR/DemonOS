@@ -112,7 +112,7 @@ OBJECTS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/serial.o $(BUILD)/terminal
 
 OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/capability.o \
-	$(BUILD)/ipc.o $(BUILD)/display.o $(BUILD)/surface.o $(BUILD)/network.o $(BUILD)/http.o $(BUILD)/e1000.o $(BUILD)/ahci.o $(BUILD)/init.o $(BUILD)/runas.o $(BUILD)/apps.o $(BUILD)/git.o \
+	$(BUILD)/ipc.o $(BUILD)/display.o $(BUILD)/surface.o $(BUILD)/network.o $(BUILD)/http.o $(BUILD)/e1000.o $(BUILD)/ahci.o $(BUILD)/usb_uhci.o $(BUILD)/init.o $(BUILD)/runas.o $(BUILD)/apps.o $(BUILD)/git.o \
 	$(BUILD)/ramfs.o $(BUILD)/acpi.o $(BUILD)/ac97.o \
 	$(BUILD)/kernel_cxx_runtime.o \
 	$(BUILD)/kernel_bounded_table_test.o \
@@ -1574,6 +1574,9 @@ $(BUILD)/e1000.o: src/e1000.c include/kernel/e1000.h include/kernel/network.h in
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/ahci.o: src/ahci.c include/kernel/ahci.h include/kernel/pci.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/usb_uhci.o: src/usb_uhci.c include/kernel/usb_uhci.h include/kernel/pci.h include/kernel/interrupts.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/ac97.o: src/ac97.c include/kernel/ac97.h include/kernel/pci.h | $(BUILD)

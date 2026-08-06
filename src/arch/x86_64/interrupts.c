@@ -2,6 +2,7 @@
 #include <kernel/scheduler.h>
 #include <kernel/serial.h>
 #include <kernel/terminal.h>
+#include <kernel/usb_uhci.h>
 #include <demon/input.h>
 
 #include <stddef.h>
@@ -240,6 +241,7 @@ uintptr_t interrupt_timer_handler(uintptr_t frame_address) {
        moving once and then stalling. This is not polling the pointer state:
        it only drains bytes the controller already reports as available. */
     drain_mouse_bytes(8u);
+    usb_uhci_poll();
     const uintptr_t next_frame = scheduler_on_timer_tick(frame_address);
     out8(0x20u, 0x20u);
     return next_frame;
@@ -382,6 +384,24 @@ static void decode_mouse_packet(void) {
         }
     }
     ++mouse_packets;
+}
+
+void mouse_report_absolute(int32_t x, int32_t y, uint8_t buttons) {
+    if (x < 0) x = 0; else if (x > pointer_max_x) x = pointer_max_x;
+    if (y < 0) y = 0; else if (y > pointer_max_y) y = pointer_max_y;
+    if (x != pointer_x || y != pointer_y) {
+        const int32_t dx = x - pointer_x;
+        const int32_t dy = y - pointer_y;
+        pointer_x = x;
+        pointer_y = y;
+        struct input_event event = {.timestamp = timer_ticks, .type = INPUT_MOUSE_MOVE,
+            .x = pointer_x, .y = pointer_y, .delta_x = dx, .delta_y = dy};
+        (void)input_publish(&event);
+    }
+    publish_mouse_button(1u, INPUT_MOUSE_LEFT, buttons);
+    publish_mouse_button(2u, INPUT_MOUSE_RIGHT, buttons);
+    publish_mouse_button(4u, INPUT_MOUSE_MIDDLE, buttons);
+    mouse_button_state = buttons;
 }
 
 static void drain_mouse_bytes(uint32_t limit) {

@@ -57,9 +57,23 @@ static bool start_index(size_t index, uint32_t depth) {
     }
     if (index == 8u) {
         struct scheduler_task_snapshot process;
+        /* A persistent service's own idle-heartbeat timeout (the
+           compositor's ~50ms repaint pacing -- see rust/compositor's
+           next_frame_tick) can legitimately fire and return it to READY
+           at any moment this unit happens to be checked, well before the
+           scheduler gets back around to actually running it so it can
+           call its blocking wait again. That is normal operation, not a
+           crash: only READY or BLOCKED means "still alive and functioning
+           as a service"; EXITED (or no such pid at all) is the real
+           failure signal. Checking only BLOCKED here raced against that
+           heartbeat and failed boot outright as this session's own boot
+           sequence grew longer, since a longer synchronous boot gives the
+           heartbeat more real wall-clock time to have already fired by
+           the time this check runs. */
         if (unit->process_id == 0u ||
             !scheduler_snapshot(unit->process_id, &process) ||
-            process.state != SCHEDULER_TASK_BLOCKED ||
+            (process.state != SCHEDULER_TASK_BLOCKED &&
+             process.state != SCHEDULER_TASK_READY) ||
             !text_equal(process.name, "compositor")) {
             unit->state = INIT_UNIT_FAILED;
             return false;
@@ -150,8 +164,12 @@ bool init_system_desktop_active(void) {
     if (!graphical_boot || units[8].state != INIT_UNIT_ACTIVE ||
         units[9].state != INIT_UNIT_ACTIVE) return false;
     struct scheduler_task_snapshot process;
+    /* See start_index's own comment on index==8 for why READY is accepted
+       alongside BLOCKED here too -- same persistent-service idle-heartbeat
+       race, same fix. */
     return scheduler_snapshot(units[8].process_id, &process) &&
-        process.state == SCHEDULER_TASK_BLOCKED;
+        (process.state == SCHEDULER_TASK_BLOCKED ||
+         process.state == SCHEDULER_TASK_READY);
 }
 
 bool init_system_self_test(void) {

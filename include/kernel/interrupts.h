@@ -23,5 +23,13 @@ int32_t mouse_x(void);
 int32_t mouse_y(void);
 uint8_t mouse_buttons(void);
 void mouse_set_bounds(uint32_t width, uint32_t height);
+// Absolute-position report from a source other than PS/2 (see src/usb_uhci.c):
+// x/y are already in screen coordinates (clamped to mouse_set_bounds' own
+// pointer_max_x/y), buttons is the same 3-bit left/right/middle mask
+// decode_mouse_packet derives from PS/2's own flags byte. Feeds the exact
+// same pointer_x/y state and input_publish path PS/2 motion uses, so every
+// consumer (the compositor, MakoBox, etc.) sees one pointer regardless of
+// which physical device moved it.
+void mouse_report_absolute(int32_t x, int32_t y, uint8_t buttons);
 
 #endif
