@@ -433,6 +433,18 @@ static bool multiboot_test_mode(uintptr_t info_address) {
     return multiboot_cmdline_has(info_address, "boottest");
 }
 
+/* Same pattern as multiboot_test_mode's "boottest" needle: the desktop
+   stack (compositor/DemonX/DemonWM/xterm) only takes over the boot when
+   explicitly requested via this cmdline token (grub-desktop.cfg), not
+   merely because the binaries happen to be present in RAMFS. Without
+   this gate, `make run`'s plain interactive console -- the one every
+   other port's play command (cave-story, quake, doom) actually runs
+   from -- would be silently replaced by the desktop session the moment
+   compositor.elf was added to that ISO's module list. */
+static bool multiboot_desktop_mode(uintptr_t info_address) {
+    return multiboot_cmdline_has(info_address, "desktop");
+}
+
 
 static uint64_t report_multiboot(uintptr_t info_address, uintptr_t allocation_floor) {
     const struct multiboot2_info *info = (const struct multiboot2_info *)info_address;
@@ -1211,11 +1223,16 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
        need one for their own rendering) but never module2 in compositor.elf/
        demonx.elf/demonwm.elf/xterm.elf, since they're built by separate,
        narrower Makefile targets. Only attempt the desktop stack when the
-       compositor binary is actually present; otherwise fall back to the
-       plain console path exactly as before, rather than treating a simply
-       different ISO's module list as a fatal boot error. */
+       compositor binary is actually present *and* explicitly requested via
+       the "desktop" cmdline needle (grub-desktop.cfg / multiboot_desktop_mode) --
+       otherwise fall back to the plain console path exactly as before.
+       Presence-only gating silently replaced the plain mako# console every
+       other port's play command (cave-story, quake, doom) runs from the
+       moment compositor.elf was added to an ISO's module list, which is
+       not what an interactive `make run` session should do by default. */
     uint32_t compositor_probe_id;
     const bool desktop_stack_present = framebuffer_available() &&
+        multiboot_desktop_mode(multiboot_info) &&
         ramfs_open("/system/bin/compositor.elf", 26u, false, &compositor_probe_id);
     if (desktop_stack_present) {
         if (capability_open(1u, CAPABILITY_SERVICE_DISPLAY) != UINT64_MAX ||

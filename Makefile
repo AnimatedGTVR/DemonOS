@@ -106,7 +106,7 @@ OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/kernel_slot_table_test.o \
 	$(BUILD)/user_program_blob.o
 
-.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-cave-story run-quake run-wayland run-sdl run-vnc smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
+.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-cave-story run-quake run-wayland run-sdl run-vnc desktop-iso run-desktop smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
 
 QUAKE_SOURCE := $(BUILD)/quake-upstream
 QUAKE_COMMIT := bf4ac424ce754894ac8f1dae6a3981954bc9852d
@@ -2082,6 +2082,34 @@ $(RUN_ISO): $(ISO) freedoom-assets quake-data nxengine-data nxengine-source $(NX
 	cp $(NXENGINE_DATA)/CaveStory/data/Title.pbm $(BUILD)/iso-run/games/nxengine/Title.pbm
 	cp grub/grub.cfg $(BUILD)/iso-run/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(BUILD)/iso-run >/dev/null 2>&1
+
+# Opt-in desktop image (see grub-desktop.cfg): the "desktop" cmdline needle
+# is what actually activates the compositor/DemonX/DemonWM/xterm session
+# (src/kernel.c's multiboot_desktop_mode) -- separate from $(RUN_ISO)'s
+# plain interactive console so `make run` keeps booting straight to mako#.
+DESKTOP_ISO := $(BUILD)/kernel-desktop.iso
+
+desktop-iso: $(DESKTOP_ISO)
+
+$(DESKTOP_ISO): $(ISO) freedoom-assets quake-data grub/grub-desktop.cfg
+	rm -rf $(BUILD)/iso-desktop
+	cp -r $(ISO_ROOT) $(BUILD)/iso-desktop
+	mkdir -p $(BUILD)/iso-desktop/games/freedoom $(BUILD)/iso-desktop/licenses/doom
+	cp $(FREEDOOM_WAD) $(BUILD)/iso-desktop/games/freedoom/freedoom1.wad
+	cp $(FREEDOOM_DIR)/COPYING.txt $(BUILD)/iso-desktop/licenses/doom/Freedoom-COPYING.txt
+	mkdir -p $(BUILD)/iso-desktop/games/quake $(BUILD)/iso-desktop/licenses/quake
+	cp $(QUAKE_PAK) $(BUILD)/iso-desktop/games/quake/pak0.pak
+	cp $(QUAKE_DATA_DIR)/SLICNSE.TXT $(BUILD)/iso-desktop/licenses/quake/SLICNSE.TXT
+	cp $(QUAKE_DATA_DIR)/README.TXT $(BUILD)/iso-desktop/licenses/quake/README.TXT
+	cp grub/grub-desktop.cfg $(BUILD)/iso-desktop/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(BUILD)/iso-desktop >/dev/null 2>&1
+
+run-desktop: $(DESKTOP_ISO)
+	@echo "Mouse: using the reliable XWayland QEMU backend; Ctrl+Alt+G releases it"
+	env GDK_BACKEND=x11 qemu-system-x86_64 -cdrom $(DESKTOP_ISO) -m 256M -serial stdio \
+		$(QEMU_AUDIO_RUN) \
+		-display gtk,grab-on-hover=on,zoom-to-fit=on \
+		-no-reboot -no-shutdown
 
 iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/kernel.elf -type f 2>/dev/null | grep -q kernel.elf
