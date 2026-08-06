@@ -120,6 +120,7 @@ static void applet_help(void) {
     line("  wc <path>   count lines/words/bytes in a file");
     line("  touch <path> create an empty file if it doesn't exist");
     line("  write <path> <text>  create/replace a file with text");
+    line("  edit <path>  interactively enter multi-line content, end with '.'");
     line("  rm <path>   remove a file from the project store");
     line("  cp <src> <dst>  copy a file");
     line("  mv <src> <dst>  move (rename) a file");
@@ -582,6 +583,102 @@ static void applet_write(const char *argument) {
         return;
     }
     value_line("wrote ", (uint64_t)length, " bytes");
+}
+
+// Same blocking-keystroke pattern as makobox_shell's own prompt loop: give
+// any ready userspace task a turn between keystrokes instead of burning CPU
+// in a tight poll, so a long edit session doesn't stall the compositor or
+// other services the way a raw keyboard_read_char loop would.
+static char edit_read_char(void) {
+    for (;;) {
+        if (scheduler_has_ready_users()) {
+            (void)userspace_run_init();
+            if (terminal_graphical_active()) terminal_graphical_refresh();
+        }
+        if (terminal_graphical_active()) input_discard_pending();
+        char value;
+        if (keyboard_read_char(&value)) return value;
+        __asm__ volatile ("hlt");
+    }
+}
+
+#define EDIT_MAX_LINES 128u
+#define EDIT_LINE_CAPACITY 96u
+
+// A real line editor, not a curses-style full-screen one: this console is
+// an append-only scroll (see terminal.h -- no cursor-addressing API exists
+// here, unlike xterm's own framebuffer-backed "edit" which owns a DemonX
+// surface it can redraw in place), so "single '.' line ends input" is the
+// natural fit, matching classic teletype editors rather than faking a
+// full-screen UI this console can't actually support.
+static void applet_edit(const char *path) {
+    if (path[0] == '\0') { line("usage: edit <path>"); return; }
+    const uint8_t *existing_data;
+    size_t existing_length;
+    if (open_file_view(path, &existing_data, &existing_length)) {
+        line("--- current contents ---");
+        applet_cat(path);
+        line("--- end ---");
+    } else {
+        line("(new file)");
+    }
+    line("Enter new content, one line at a time. End with a single '.' line.");
+    static char lines[EDIT_MAX_LINES][EDIT_LINE_CAPACITY];
+    size_t line_count = 0u;
+    for (;;) {
+        terminal_write("> ");
+        serial_write("> ");
+        char text_line[EDIT_LINE_CAPACITY];
+        size_t length = 0u;
+        for (;;) {
+            const char value = edit_read_char();
+            if (value == '\n') {
+                terminal_write_line("");
+                serial_write("\n");
+                text_line[length] = '\0';
+                break;
+            }
+            if (value == '\b') {
+                if (length > 0u) {
+                    --length;
+                    terminal_backspace();
+                    serial_write("\b \b");
+                }
+                continue;
+            }
+            if (length + 1u < sizeof(text_line)) {
+                text_line[length++] = value;
+                text_line[length] = '\0';
+                const char echo[2] = { value, '\0' };
+                terminal_write(echo);
+                serial_write(echo);
+            }
+        }
+        if (text_line[0] == '.' && text_line[1] == '\0') break;
+        if (line_count >= EDIT_MAX_LINES) {
+            line("edit: too many lines, stopping input early");
+            break;
+        }
+        size_t copy_length = 0u;
+        while (text_line[copy_length] != '\0' && copy_length + 1u < EDIT_LINE_CAPACITY)
+            ++copy_length;
+        for (size_t i = 0u; i < copy_length; ++i) lines[line_count][i] = text_line[i];
+        lines[line_count][copy_length] = '\0';
+        ++line_count;
+    }
+    static char buffer[EDIT_MAX_LINES * EDIT_LINE_CAPACITY];
+    size_t total = 0u;
+    for (size_t i = 0u; i < line_count; ++i) {
+        for (const char *p = lines[i]; *p != '\0'; ++p) buffer[total++] = *p;
+        buffer[total++] = '\n';
+    }
+    uint32_t object_id;
+    if (!ramfs_open(path, string_length(path), true, &object_id) ||
+        !ramfs_write(object_id, (const uint8_t *)buffer, total)) {
+        line("edit: could not save file");
+        return;
+    }
+    value_line("saved ", (uint64_t)total, " bytes");
 }
 
 static void write_hex_byte(uint8_t value) {
@@ -1777,7 +1874,7 @@ static bool command_exists(const char *name) {
         "abi", "caps", "projects", "apps", "tetris", "doom", "classicube", "quake", "quake-core",
         "nxengine", "nxengine-core", "nxengine-play-freeplay", "nxengine-freeplay", "cave-story", "beep", "tone",
         "bleeps", "git", "desktop", "runit",
-        "runas", "ls", "cat", "head", "tail", "wc", "touch", "write", "rm",
+        "runas", "ls", "cat", "head", "tail", "wc", "touch", "write", "edit", "rm",
         "cp", "mv", "grep", "hexdump", "strings", "df", "du", "free", "uptime",
         "stat", "find", "tree", "tac", "rev", "sort", "uniq", "cmp", "diff",
         "basename", "dirname", "nproc", "seq", "sleep", "time", "calc", "printf",
@@ -2336,6 +2433,7 @@ bool makobox_run(const char *command_line) {
     else if (starts_with(command_line, "cp ", &argument)) applet_cp(argument);
     else if (starts_with(command_line, "grep ", &argument)) applet_grep(argument);
     else if (starts_with(command_line, "write ", &argument)) applet_write(argument);
+    else if (starts_with(command_line, "edit ", &argument)) applet_edit(argument);
     else if (starts_with(command_line, "hexdump ", &argument)) applet_hexdump(argument);
     else if (starts_with(command_line, "strings ", &argument)) applet_strings(argument);
     else if (equal(command_line, "df")) applet_df();
