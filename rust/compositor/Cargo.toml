@@ -1,0 +1,16 @@
+[package]
+name = "compositor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "compositor"
+path = "src/main.rs"
+
+[dependencies]
+demon-abi = { path = "../demon-abi" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true

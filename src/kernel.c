@@ -1150,6 +1150,35 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         serial_write(" status="); serial_write_u64(rust_hello_status); serial_write("\n");
         boot_status("Rust runtime (Stage 0)", "no_std freestanding binary ran under real MAKO-ABI");
     }
+    /* Rust compositor rewrite, Stage 2 (see rust/compositor): a real
+       minimal compositor -- opens the real DISPLAY capability, queries
+       the real display, fills a real frame buffer, and presents it via
+       the real display_submit syscall -- proving that path end to end
+       before porting over user/compositor.mko's real window-management
+       logic in later stages. Runs (and fully releases DISPLAY again via
+       its own clean exit) before the real desktop-stack block below ever
+       tries to open that same capability, so the two never conflict.
+       Needs a real framebuffer to mean anything, and -- same lesson as
+       rust-hello and the desktop stack's own compositor.elf regression
+       -- only proceeds if the binary is actually present in this ISO. */
+    uint32_t rust_compositor_probe_id;
+    if (framebuffer_available() &&
+        ramfs_open("/system/bin/rust-compositor.elf", 31u, false, &rust_compositor_probe_id)) {
+        const uint32_t rust_compositor_pid = userspace_spawn_path(0u,
+            "/system/bin/rust-compositor.elf", 31u, "rust-compositor",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY));
+        if (rust_compositor_pid == 0u || !userspace_run_init())
+            boot_fatal("Rust compositor Stage 2 spawn failed");
+        uint64_t rust_compositor_status = UINT64_MAX;
+        if (!scheduler_reap(0u, rust_compositor_pid, &rust_compositor_status) ||
+            rust_compositor_status != 0u)
+            boot_fatal("Rust compositor Stage 2 did not exit cleanly");
+        serial_write("RUST_COMPOSITOR_SPAWN_OK pid="); serial_write_u64(rust_compositor_pid);
+        serial_write(" status="); serial_write_u64(rust_compositor_status); serial_write("\n");
+        boot_status("Rust compositor (Stage 2)", "real display capability + one real frame presented");
+    }
     const uint32_t portcheck_pid = userspace_spawn_path(0u,
         "/system/bin/portcheck.elf", 25u, "portcheck",
         CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
