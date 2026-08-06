@@ -5,7 +5,7 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 use demon_abi::{
     CapabilityService, DisplayInfo, DisplaySubmit, InputEvent, WindowMessage, WindowOpcode,
-    DEMONWM_PANEL_PROXY_ID, DEMONX_DISPLAY_CHANNEL, DEMONX_WINDOW_ID_BASE, DISPLAY_SUBMIT_PRESENT,
+    DEMONX_DISPLAY_CHANNEL, DEMONX_WINDOW_ID_BASE, DISPLAY_SUBMIT_PRESENT,
     INPUT_KEY_DOWN, INPUT_KEY_UP, INPUT_MOUSE_BUTTON_DOWN, INPUT_MOUSE_BUTTON_UP,
     INPUT_MOUSE_MOVE, UINT64_MAX, WINDOW_PROTOCOL_VERSION, WINDOW_SERVICE,
 };
@@ -34,14 +34,22 @@ fn panic(_info: &PanicInfo) -> ! {
 const SCREEN_WIDTH: u32 = 640;
 const SCREEN_HEIGHT: u32 = 480;
 const WINDOW_LIMIT: usize = 8;
-const MIN_CREATE_SIZE: u32 = 32;
+// A real hardware-keystroke verification (see the temporary debug_u32 calls
+// below) caught this at 32: DemonWM's real panel window is a genuine 628x28
+// CREATE (Desktop/demonwm/demonwm.cc's createPanel, kPanelHeight = 28), not
+// an untracked native strip -- the old MKO compositor's 32px floor (and its
+// matching "until DemonWM's retained panel surface is visible" input-proxy
+// hack, removed below) predated the panel becoming a real window and were
+// never updated once it did. The only real invariant this compositor needs
+// is a nonzero size, so composite()'s per-row slice writes never operate on
+// an empty/degenerate window.
+const MIN_CREATE_SIZE: u32 = 1;
 const MIN_MOVE_WIDTH: u32 = 160;
 const MIN_MOVE_HEIGHT: u32 = 120;
 // #FF101820 / placeholder fill, transcribed as the exact decimal literals
 // user/compositor.mko's render_demonwm_backend used for the same two colors.
 const BACKGROUND_COLOR: u32 = 4_279_245_080;
 const PLACEHOLDER_COLOR: u32 = 4_280_032_545;
-const TOP_PANEL_HEIGHT: u32 = 32;
 
 #[derive(Clone, Copy)]
 struct Window {
@@ -357,18 +365,7 @@ pub extern "C" fn rust_main() -> ! {
                 k if k == INPUT_MOUSE_BUTTON_DOWN => {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
-                    if cursor_y < TOP_PANEL_HEIGHT {
-                        send_window_event(
-                            DEMONWM_PANEL_PROXY_ID,
-                            WindowOpcode::Button,
-                            4,
-                            cursor_x as i32,
-                            cursor_y as i32,
-                            1,
-                            0,
-                        );
-                        repaint = true;
-                    } else if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
+                    if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
                         let window = table[slot];
                         focused_window = window.id;
                         table[slot].z = next_z;
