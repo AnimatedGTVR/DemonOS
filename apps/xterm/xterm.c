@@ -67,6 +67,9 @@ static void editor_open(const char *name);
 #define KEYCODE_DOWN 0x50u
 #define KEYCODE_LEFT 0x4bu
 #define KEYCODE_RIGHT 0x4du
+#define KEYCODE_HOME 0x47u
+#define KEYCODE_END 0x4fu
+#define KEYCODE_DELETE 0x53u
 #define KEYCODE_S 0x1fu
 #define KEYCODE_Q 0x10u
 // '-' and '=' (the unshifted key '+' lives on) -- same physical scan code
@@ -499,6 +502,25 @@ static void editor_key(uint32_t value, uint32_t keycode, uint32_t modifiers) {
                 editor_cursor_col = 0u;
                 if (editor_cursor_row >= editor_top_row + rows)
                     editor_top_row = editor_cursor_row - rows + 1u;
+            }
+        } else if (keycode == KEYCODE_HOME) {
+            editor_cursor_col = 0u;
+        } else if (keycode == KEYCODE_END) {
+            editor_cursor_col = length;
+        } else if (keycode == KEYCODE_DELETE) {
+            if (editor_cursor_col < length) {
+                uint32_t index = editor_cursor_col;
+                while (index < length) { line[index] = line[index + 1u]; ++index; }
+                editor_dirty = 1;
+            } else if (editor_cursor_row + 1u < editor_line_count) {
+                const uint32_t next_length = string_length(editor_lines[editor_cursor_row + 1u]);
+                if (length + next_length < LINE_CAPACITY - 1u) {
+                    copy_string(line + length, editor_lines[editor_cursor_row + 1u]);
+                    for (uint32_t i = editor_cursor_row + 1u; i + 1u < editor_line_count; ++i)
+                        copy_string(editor_lines[i], editor_lines[i + 1u]);
+                    --editor_line_count;
+                    editor_dirty = 1;
+                }
             }
         }
     }
