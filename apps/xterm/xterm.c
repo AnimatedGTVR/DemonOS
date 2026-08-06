@@ -67,23 +67,11 @@ static void editor_open(const char *name);
 #define KEYCODE_DOWN 0x50u
 #define KEYCODE_LEFT 0x4bu
 #define KEYCODE_RIGHT 0x4du
-#define KEYCODE_I 0x17u
-#define KEYCODE_O 0x18u
 #define KEYCODE_S 0x1fu
 #define KEYCODE_Q 0x10u
 
-/* GRID_WIDTH/GRID_HEIGHT stay the fixed pixel budget the window was created
-   with (see CLIENT_WIDTH/CLIENT_HEIGHT above) -- Ctrl+I/Ctrl+O never resize
-   the window, they just change how many scaled cells fit inside that same
-   budget (see cell_width/cell_height/visible_rows_at_scale/
-   visible_cols_at_scale below). font_scale=1 reproduces today's exact 6x7
-   layout; DEMONX_POLY_TEXT8_SCALED has no real reason to support more than
-   a handful of steps for a terminal this size, so 3 is a generous top end
-   (18x21 cells, ~21x7 visible) and 1 is the natural floor (the font has no
-   smaller real representation to fall back to). */
-#define FONT_SCALE_MIN 1u
-#define FONT_SCALE_MAX 3u
-static uint32_t font_scale = 1u;
+// Fixed at the font's smallest real size -- no adjustable scaling.
+#define font_scale 1u
 
 static uint32_t cell_width(void) { return CELL_WIDTH * font_scale; }
 static uint32_t cell_height(void) { return CELL_HEIGHT * font_scale; }
@@ -557,16 +545,7 @@ static void render_editor(Display *display, Window window, GC gc) {
 }
 
 static void terminal_key(uint32_t value, uint32_t keycode, uint32_t modifiers) {
-    if ((modifiers & INPUT_MOD_CTRL) != 0u) {
-        if (keycode == KEYCODE_I) {
-            if (font_scale > FONT_SCALE_MIN) --font_scale;
-            return;
-        }
-        if (keycode == KEYCODE_O) {
-            if (font_scale < FONT_SCALE_MAX) ++font_scale;
-            return;
-        }
-    }
+    (void)modifiers;
     if (value == '\n') {
         terminal_execute();
         return;
@@ -626,12 +605,9 @@ static void render_terminal(Display *display, Window window, GC gc) {
     XFillRectangle(display, window, gc, 1, TITLE_HEIGHT + 1u,
                    CLIENT_WIDTH - 2u, CLIENT_HEIGHT - TITLE_HEIGHT - 2u);
 
-    /* Ctrl+I/Ctrl+O never resize the window (see font_scale's own comment)
-       -- they change how many of these cells fit in the same fixed pixel
-       budget, so every position below is scale-aware and every drawn
-       string is clipped to whatever now fits, rather than assuming the
-       scale=1 column/row counts GRID_COLS/GRID_ROWS baked the window size
-       around. */
+    /* font_scale is fixed at 1 (see its own definition), so this is just
+       GRID_COLS/GRID_ROWS -- kept scale-aware rather than hardcoded in case
+       that ever changes again. */
     const uint32_t scaled_w = cell_width();
     const uint32_t scaled_h = cell_height();
     const uint32_t cols = visible_cols_at_scale();
