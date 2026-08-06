@@ -1343,7 +1343,8 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             const uint32_t xterm_pid = userspace_spawn_path(0u,
                 "/system/bin/xterm.elf", 21u, "xterm",
                 CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
-                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE));
             if (xterm_pid == 0u)
                 boot_fatal("Interactive xterm launch failed");
             (void)userspace_run_init();
@@ -1355,7 +1356,8 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             const uint32_t xterm_pid = userspace_spawn_path(0u,
                 "/system/bin/xterm.elf", 21u, "xterm-smoke",
                 CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
-                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE));
             if (xterm_pid == 0u || !userspace_run_init())
                 boot_fatal("xterm boot-test smoke failed to start");
             uint64_t xterm_status = UINT64_MAX;

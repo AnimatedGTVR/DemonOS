@@ -27,6 +27,7 @@ extern int demonx_draw_string_scaled(Display *display, Drawable drawable,
                                      int length, uint8_t scale);
 
 static void render_terminal(Display *display, Window window, GC gc);
+static void editor_open(const char *name);
 
 #define XTERM_DISPLAY ":3"
 
@@ -68,6 +69,8 @@ static void render_terminal(Display *display, Window window, GC gc);
 #define KEYCODE_RIGHT 0x4du
 #define KEYCODE_I 0x17u
 #define KEYCODE_O 0x18u
+#define KEYCODE_S 0x1fu
+#define KEYCODE_Q 0x10u
 
 /* GRID_WIDTH/GRID_HEIGHT stay the fixed pixel budget the window was created
    with (see CLIENT_WIDTH/CLIENT_HEIGHT above) -- Ctrl+I/Ctrl+O never resize
@@ -98,6 +101,34 @@ static uint32_t input_cursor;
 static char command_history[COMMAND_HISTORY][INPUT_CAPACITY];
 static uint32_t command_history_count;
 static uint32_t history_index; /* 0..count-1 while recalling, count = live */
+
+/* Full-screen "edit <file>" editor. Reuses the same LINE_CAPACITY/font_scale
+   layout machinery as the scrollback terminal (see render_editor), but owns
+   its own line buffer and cursor -- unlike the shell's single input line,
+   this is a real multi-line, savable document. EDITOR_MAX_LINES x
+   LINE_CAPACITY is a plain static array, same style as `scrollback`, sized
+   for real config-file-sized editing rather than anything approaching a
+   full text file -- and kept deliberately small: this "ordinary
+   application" process slot only gets a fixed 12-page (48 KiB) code+data
+   budget (see kernel.c's per-slot code_pages table), the one larger 48-page
+   slot is permanently held by the long-running compositor by the time
+   xterm spawns, and every static byte here folds into that same one
+   segment alongside xterm's own code (see load_process's own comment on
+   why). 48 lines comfortably covers real config-file editing while leaving
+   headroom in that budget; editor_open/editor_save also now share one
+   scratch buffer instead of one each, for the same reason. */
+#define EDITOR_MAX_LINES 48u
+static char editor_lines[EDITOR_MAX_LINES][LINE_CAPACITY];
+static char editor_scratch[EDITOR_MAX_LINES * LINE_CAPACITY];
+static uint32_t editor_line_count;
+static uint32_t editor_cursor_row;
+static uint32_t editor_cursor_col;
+static uint32_t editor_top_row;
+static char editor_filename[LINE_CAPACITY];
+static int editor_active;
+static int editor_dirty;
+static int editor_status_is_error;
+static char editor_status[LINE_CAPACITY];
 
 static uint32_t string_length(const char *text) {
     uint32_t length = 0u;
@@ -230,7 +261,7 @@ static void terminal_execute(void) {
     remember_command();
 
     if (command_matches(command, "help")) {
-        append_scrollback("Commands: help, clear, echo <text>, about, exit");
+        append_scrollback("Commands: help, clear, echo <text>, edit <file>, about, exit");
     } else if (command_matches(command, "clear")) {
         scrollback_count = 0u;
         scrollback_start = 0u;
@@ -246,6 +277,14 @@ static void terminal_execute(void) {
             append_scrollback("");
         } else {
             append_scrollback(text);
+        }
+    } else if (command_matches(command, "edit")) {
+        const char *name = command + 4u;
+        while (*name == ' ') ++name;
+        if (*name == '\0') {
+            append_scrollback("usage: edit filename");
+        } else {
+            editor_open(name);
         }
     } else {
         char reply[LINE_CAPACITY];
@@ -266,6 +305,255 @@ static void terminal_execute(void) {
 static void terminal_clear_screen(void) {
     scrollback_count = 0u;
     scrollback_start = 0u;
+}
+
+static void editor_set_status(const char *text, int is_error) {
+    copy_string(editor_status, text);
+    editor_status_is_error = is_error;
+}
+
+// "edit <file>" opens a real RAMFS file (creating it if it doesn't exist
+// yet -- create=1u, matching every other app's demon_file_open call) for a
+// real multi-line, savable editing session. demon_handle_read always reads
+// from byte 0 (see copy_ramfs_to_user's own fixed offset), so this is a
+// single bounded read, not a loop -- there is no advancing file position to
+// exhaust here.
+static void editor_open(const char *name) {
+    uint32_t length = string_length(name);
+    if (length >= LINE_CAPACITY) length = LINE_CAPACITY - 1u;
+    for (uint32_t i = 0u; i < length; ++i) editor_filename[i] = name[i];
+    editor_filename[length] = '\0';
+
+    editor_line_count = 0u;
+    editor_cursor_row = 0u;
+    editor_cursor_col = 0u;
+    editor_top_row = 0u;
+    editor_dirty = 0;
+    editor_active = 1;
+
+    const uint64_t storage = demon_service_open(4u); /* CAPABILITY_SERVICE_STORAGE */
+    const uint64_t handle = storage == UINT64_MAX ? UINT64_MAX :
+        demon_file_open(storage, editor_filename, length, 1u);
+    uint64_t total_read = 0u;
+    if (handle != UINT64_MAX) {
+        const uint64_t read = demon_handle_read(handle, editor_scratch, sizeof(editor_scratch));
+        if (read != UINT64_MAX) total_read = read;
+        demon_handle_close(handle);
+    }
+
+    uint32_t line = 0u;
+    uint32_t col = 0u;
+    for (uint64_t i = 0u; i < total_read && line < EDITOR_MAX_LINES; ++i) {
+        const char character = editor_scratch[i];
+        if (character == '\n') {
+            editor_lines[line][col] = '\0';
+            ++line;
+            col = 0u;
+        } else if (col < LINE_CAPACITY - 1u) {
+            editor_lines[line][col] = character;
+            ++col;
+        }
+    }
+    if (line < EDITOR_MAX_LINES) {
+        editor_lines[line][col] = '\0';
+        ++line;
+    }
+    editor_line_count = line;
+
+    if (handle == UINT64_MAX)
+        editor_set_status("new file (storage unavailable)", 1);
+    else if (total_read == 0u)
+        editor_set_status("new file", 0);
+    else
+        editor_set_status("loaded", 0);
+}
+
+// Every line, rejoined with '\n', in one demon_handle_write call: ramfs's
+// own store() (src/ramfs.cpp) replaces the whole file's content and length
+// per call, so partial/incremental writes would need their own explicit
+// truncate step this ABI doesn't expose -- one full-content write is both
+// simpler and the only way this actually replaces stale trailing bytes from
+// a previous, longer version of the file.
+static void editor_save(void) {
+    uint32_t total = 0u;
+    for (uint32_t line = 0u; line < editor_line_count; ++line) {
+        const uint32_t length = string_length(editor_lines[line]);
+        for (uint32_t i = 0u; i < length && total < sizeof(editor_scratch); ++i)
+            editor_scratch[total++] = editor_lines[line][i];
+        if (total < sizeof(editor_scratch)) editor_scratch[total++] = '\n';
+    }
+    const uint64_t storage = demon_service_open(4u);
+    if (storage == UINT64_MAX) {
+        editor_set_status("save failed: no storage", 1);
+        return;
+    }
+    const uint64_t handle = demon_file_open(storage, editor_filename,
+        string_length(editor_filename), 1u);
+    if (handle == UINT64_MAX) {
+        editor_set_status("save failed: open", 1);
+        return;
+    }
+    const uint64_t written = demon_handle_write(handle, editor_scratch, total);
+    demon_handle_close(handle);
+    if (written != total) {
+        editor_set_status("save failed: write", 1);
+        return;
+    }
+    editor_dirty = 0;
+    editor_set_status("saved", 0);
+}
+
+static void editor_key(uint32_t value, uint32_t keycode, uint32_t modifiers) {
+    if ((modifiers & INPUT_MOD_CTRL) != 0u) {
+        if (keycode == KEYCODE_S) { editor_save(); return; }
+        if (keycode == KEYCODE_Q) {
+            editor_active = 0;
+            append_scrollback(editor_dirty ? "editor closed unsaved changes discarded"
+                                           : "editor closed");
+            return;
+        }
+        return;
+    }
+    char *line = editor_lines[editor_cursor_row];
+    const uint32_t length = string_length(line);
+    if (value == '\n') {
+        if (editor_line_count < EDITOR_MAX_LINES) {
+            for (uint32_t i = editor_line_count; i > editor_cursor_row + 1u; --i)
+                copy_string(editor_lines[i], editor_lines[i - 1u]);
+            copy_string(editor_lines[editor_cursor_row + 1u], line + editor_cursor_col);
+            line[editor_cursor_col] = '\0';
+            ++editor_line_count;
+            ++editor_cursor_row;
+            editor_cursor_col = 0u;
+            editor_dirty = 1;
+        }
+        return;
+    }
+    if (value == '\b') {
+        if (editor_cursor_col > 0u) {
+            uint32_t index = editor_cursor_col - 1u;
+            while (index < length) { line[index] = line[index + 1u]; ++index; }
+            --editor_cursor_col;
+            editor_dirty = 1;
+        } else if (editor_cursor_row > 0u) {
+            const uint32_t previous_length =
+                string_length(editor_lines[editor_cursor_row - 1u]);
+            if (previous_length + length < LINE_CAPACITY - 1u) {
+                copy_string(editor_lines[editor_cursor_row - 1u] + previous_length, line);
+                for (uint32_t i = editor_cursor_row; i + 1u < editor_line_count; ++i)
+                    copy_string(editor_lines[i], editor_lines[i + 1u]);
+                --editor_line_count;
+                --editor_cursor_row;
+                editor_cursor_col = previous_length;
+                editor_dirty = 1;
+            }
+        }
+        return;
+    }
+    if (value >= 0x20u && value < 0x7fu) {
+        if (length < LINE_CAPACITY - 1u) {
+            uint32_t index = length;
+            while (index > editor_cursor_col) {
+                line[index] = line[index - 1u];
+                --index;
+            }
+            line[editor_cursor_col] = (char)value;
+            ++editor_cursor_col;
+            editor_dirty = 1;
+        }
+        return;
+    }
+    if (value == 0u) {
+        const uint32_t rows = visible_rows_at_scale();
+        if (keycode == KEYCODE_UP && editor_cursor_row > 0u) {
+            --editor_cursor_row;
+            const uint32_t new_length = string_length(editor_lines[editor_cursor_row]);
+            if (editor_cursor_col > new_length) editor_cursor_col = new_length;
+            if (editor_cursor_row < editor_top_row) editor_top_row = editor_cursor_row;
+        } else if (keycode == KEYCODE_DOWN &&
+                   editor_cursor_row + 1u < editor_line_count) {
+            ++editor_cursor_row;
+            const uint32_t new_length = string_length(editor_lines[editor_cursor_row]);
+            if (editor_cursor_col > new_length) editor_cursor_col = new_length;
+            if (editor_cursor_row >= editor_top_row + rows)
+                editor_top_row = editor_cursor_row - rows + 1u;
+        } else if (keycode == KEYCODE_LEFT) {
+            if (editor_cursor_col > 0u) {
+                --editor_cursor_col;
+            } else if (editor_cursor_row > 0u) {
+                --editor_cursor_row;
+                editor_cursor_col = string_length(editor_lines[editor_cursor_row]);
+                if (editor_cursor_row < editor_top_row) editor_top_row = editor_cursor_row;
+            }
+        } else if (keycode == KEYCODE_RIGHT) {
+            if (editor_cursor_col < length) {
+                ++editor_cursor_col;
+            } else if (editor_cursor_row + 1u < editor_line_count) {
+                ++editor_cursor_row;
+                editor_cursor_col = 0u;
+                if (editor_cursor_row >= editor_top_row + rows)
+                    editor_top_row = editor_cursor_row - rows + 1u;
+            }
+        }
+    }
+}
+
+static void render_editor(Display *display, Window window, GC gc) {
+    XSetForeground(display, gc, COLOR_BORDER);
+    XFillRectangle(display, window, gc, 0, 0, CLIENT_WIDTH, CLIENT_HEIGHT);
+
+    XSetForeground(display, gc, COLOR_TITLE_BAR);
+    XFillRectangle(display, window, gc, 1, 1, CLIENT_WIDTH - 2u, TITLE_HEIGHT);
+    XSetForeground(display, gc, editor_status_is_error ? COLOR_CURSOR : COLOR_TITLE_TEXT);
+    char title[LINE_CAPACITY];
+    copy_string(title, "EDIT ");
+    uint32_t title_length = string_length(title);
+    uint32_t name_length = string_length(editor_filename);
+    if (title_length + name_length >= LINE_CAPACITY) name_length = LINE_CAPACITY - 1u - title_length;
+    for (uint32_t i = 0u; i < name_length; ++i) title[title_length + i] = editor_filename[i];
+    title_length += name_length;
+    title[title_length++] = ' ';
+    uint32_t status_length = string_length(editor_status);
+    if (title_length + status_length >= LINE_CAPACITY) status_length = LINE_CAPACITY - 1u - title_length;
+    for (uint32_t i = 0u; i < status_length; ++i) title[title_length + i] = editor_status[i];
+    title_length += status_length;
+    title[title_length] = '\0';
+    XDrawString(display, window, gc, PADDING, 9, title, (int)title_length);
+
+    XSetForeground(display, gc, COLOR_BACKGROUND);
+    XFillRectangle(display, window, gc, 1, TITLE_HEIGHT + 1u,
+                   CLIENT_WIDTH - 2u, CLIENT_HEIGHT - TITLE_HEIGHT - 2u);
+
+    const uint32_t scaled_w = cell_width();
+    const uint32_t scaled_h = cell_height();
+    const uint32_t cols = visible_cols_at_scale();
+    const uint32_t rows = visible_rows_at_scale();
+    uint32_t shown = editor_line_count - editor_top_row;
+    if (shown > rows) shown = rows;
+
+    for (uint32_t row = 0u; row < shown; ++row) {
+        const char *line = editor_lines[editor_top_row + row];
+        uint32_t length = string_length(line);
+        if (length > cols) length = cols;
+        XSetForeground(display, gc, COLOR_TEXT);
+        demonx_draw_string_scaled(display, window, gc, PADDING,
+            PADDING + TITLE_HEIGHT + (int)(row * scaled_h) + 6,
+            line, (int)length, (uint8_t)font_scale);
+    }
+
+    const int cursor_x = PADDING + (int)(editor_cursor_col * scaled_w);
+    const int cursor_y = PADDING + TITLE_HEIGHT +
+        (int)((editor_cursor_row - editor_top_row) * scaled_h);
+    XSetForeground(display, gc, COLOR_CURSOR);
+    XFillRectangle(display, window, gc, cursor_x, cursor_y, scaled_w, scaled_h);
+    if (editor_cursor_col < string_length(editor_lines[editor_cursor_row])) {
+        const char cursor_char[2] =
+            { editor_lines[editor_cursor_row][editor_cursor_col], '\0' };
+        XSetForeground(display, gc, COLOR_CURSOR_CHAR);
+        demonx_draw_string_scaled(display, window, gc, cursor_x,
+            cursor_y + 6 * (int)font_scale, cursor_char, 1, (uint8_t)font_scale);
+    }
+    XFlush(display);
 }
 
 static void terminal_key(uint32_t value, uint32_t keycode, uint32_t modifiers) {
@@ -479,11 +767,23 @@ uint64_t xterm_main(void) {
         XNextEvent(display, &event);
         if (event.type == KeyPress) {
             if (event.xkey.keycode == 0x01u) break;
-            terminal_key(event.xkey.value, event.xkey.keycode,
-                        (uint32_t)event.xkey.state);
-            render_terminal(display, window, gc);
+            /* Re-check editor_active after handling the key, not before:
+               "edit foo.txt\n" flips it from inside terminal_key's own
+               call to editor_open, and that same keypress's render must
+               already show the editor, not the terminal view from a
+               state that's no longer current. */
+            if (editor_active) {
+                editor_key(event.xkey.value, event.xkey.keycode,
+                          (uint32_t)event.xkey.state);
+            } else {
+                terminal_key(event.xkey.value, event.xkey.keycode,
+                            (uint32_t)event.xkey.state);
+            }
+            if (editor_active) render_editor(display, window, gc);
+            else render_terminal(display, window, gc);
         } else if (event.type == ConfigureNotify) {
-            render_terminal(display, window, gc);
+            if (editor_active) render_editor(display, window, gc);
+            else render_terminal(display, window, gc);
         }
     }
 
