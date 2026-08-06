@@ -28,12 +28,19 @@ static uintptr_t graphical_kernel_cr3;
 #define PLAIN_BG 0xFF000000u
 #define PLAIN_FG 0xFFC0C0C0u
 
-// 80x25 cells at 7x14px is 560x350px; centered on the 640x480 framebuffer
-// this kernel targets (see FRAMEBUFFER_DETECTED at boot).
+// The font glyph itself is a fixed 5x7 bitmap drawn at scale=1 (see
+// framebuffer_text/glyph_rows in framebuffer.c) -- 1 screen pixel per font
+// pixel is already its smallest real size, same floor xterm's own
+// font_scale=1 now permanently sits at. What was previously oversized here
+// was the cell padding around that glyph: width already added only the
+// necessary 1px gap (glyph advances 6px, cell was 7px), but height doubled
+// the 7px glyph to a 14px cell. Tightened height to match width's same
+// 1px-gap convention. 80x25 cells at 7x8px is 560x200px; centered on the
+// 640x480 framebuffer this kernel targets (see FRAMEBUFFER_DETECTED at boot).
 #define GRAPHICAL_X 40
-#define GRAPHICAL_Y 65
+#define GRAPHICAL_Y 140
 #define GRAPHICAL_CELL_WIDTH 7
-#define GRAPHICAL_CELL_HEIGHT 14
+#define GRAPHICAL_CELL_HEIGHT 8
 
 /* The low physical backbuffer is identity-mapped in the kernel CR3, but its
    virtual range crosses the userspace image window beginning at 0x300000.
@@ -82,7 +89,7 @@ static void graphical_cell(size_t y, size_t x) {
     framebuffer_fill_rect((struct framebuffer_rect){pixel_x, pixel_y,
         GRAPHICAL_CELL_WIDTH, GRAPHICAL_CELL_HEIGHT}, vga_background_rgb(attribute >> 4u));
     char text[2] = {(char)(cell & 0xffu), '\0'};
-    framebuffer_text(pixel_x, pixel_y + 2, text, 1u, vga_foreground_rgb(attribute));
+    framebuffer_text(pixel_x, pixel_y, text, 1u, vga_foreground_rgb(attribute));
 }
 
 static void store_cell(size_t y, size_t x, uint16_t value) {
