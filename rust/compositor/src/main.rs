@@ -109,6 +109,13 @@ struct Window {
     restore_y: u32,
     restore_width: u32,
     restore_height: u32,
+    // Which of the WORKSPACE_COUNT desktops this window belongs to --
+    // assigned at Create time from whatever the current workspace is, and
+    // never changed after (no "move window to workspace" gesture exists
+    // yet). Windows outside the current workspace are skipped by both
+    // composite() and every hit-test, so they're fully hidden and
+    // unclickable rather than merely drawn behind everything else.
+    workspace: u32,
 }
 
 impl Window {
@@ -129,6 +136,7 @@ impl Window {
         restore_y: 0,
         restore_width: 0,
         restore_height: 0,
+        workspace: 0,
     };
 }
 
@@ -161,12 +169,13 @@ fn title_control_at(window: &Window, local_x: u32) -> u32 {
     0
 }
 
-fn decoration_hit_at(table: &[Window; WINDOW_LIMIT], x: u32, y: u32) -> Option<usize> {
+fn decoration_hit_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: u32, y: u32) -> Option<usize> {
     table
         .iter()
         .enumerate()
         .filter(|(_, w)| {
             w.in_use
+                && w.workspace == workspace
                 && w.id >= DEMONX_WINDOW_ID_BASE
                 && x >= w.x
                 && x < w.x + w.width
@@ -175,6 +184,25 @@ fn decoration_hit_at(table: &[Window; WINDOW_LIMIT], x: u32, y: u32) -> Option<u
         })
         .max_by_key(|(_, w)| w.z)
         .map(|(index, _)| index)
+}
+
+// Returns which workspace dot (0..WORKSPACE_COUNT) a panel click landed
+// on, or None if the click was elsewhere in the panel (or outside it).
+// Mirrors demonwm's own panelClick, extended with the workspace band it
+// only ever drew, never made clickable.
+fn workspace_dot_at(x: i32, y: i32) -> Option<u32> {
+    if y < PANEL_MARGIN || y >= PANEL_MARGIN + PANEL_HEIGHT as i32 {
+        return None;
+    }
+    let width = SCREEN_WIDTH as i32 - 2 * PANEL_MARGIN;
+    let dots_x = PANEL_MARGIN + width / 2 - 30;
+    for dot in 0..WORKSPACE_COUNT {
+        let dot_x = dots_x + dot as i32 * 10;
+        if x >= dot_x && x < dot_x + 6 {
+            return Some(dot);
+        }
+    }
+    None
 }
 
 fn hits_resize_corner(window: &Window, x: u32, y: u32) -> bool {
@@ -189,21 +217,26 @@ fn find_slot(table: &[Window; WINDOW_LIMIT], id: u32) -> Option<usize> {
     table.iter().position(|w| w.in_use && w.id == id)
 }
 
-fn find_top_slot(table: &[Window; WINDOW_LIMIT]) -> Option<usize> {
+fn find_top_slot(table: &[Window; WINDOW_LIMIT], workspace: u32) -> Option<usize> {
     table
         .iter()
         .enumerate()
-        .filter(|(_, w)| w.in_use)
+        .filter(|(_, w)| w.in_use && w.workspace == workspace)
         .max_by_key(|(_, w)| w.z)
         .map(|(index, _)| index)
 }
 
-fn top_slot_at(table: &[Window; WINDOW_LIMIT], x: u32, y: u32) -> Option<usize> {
+fn top_slot_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: u32, y: u32) -> Option<usize> {
     table
         .iter()
         .enumerate()
         .filter(|(_, w)| {
-            w.in_use && x >= w.x && x < w.x + w.width && y >= w.y && y < w.y + w.height
+            w.in_use
+                && w.workspace == workspace
+                && x >= w.x
+                && x < w.x + w.width
+                && y >= w.y
+                && y < w.y + w.height
         })
         .max_by_key(|(_, w)| w.z)
         .map(|(index, _)| index)
@@ -457,7 +490,7 @@ fn composite(
     order.sort_unstable_by_key(|&index| table[index].z);
     for &index in order.iter() {
         let window = table[index];
-        if !window.in_use {
+        if !window.in_use || window.workspace != current_workspace {
             continue;
         }
         if window.mapped_address != 0 {
@@ -546,11 +579,8 @@ pub extern "C" fn rust_main() -> ! {
     let mut resize_grab_y: i32 = 0;
     let mut resize_start_width: u32 = 0;
     let mut resize_start_height: u32 = 0;
-    // Workspace/launcher UI state -- click handling for these lands in a
-    // later stage; for now the panel just renders workspace 0 as current
-    // and the launcher as closed, matching what a freshly booted desktop
-    // should look like either way.
-    let current_workspace: u32 = 0;
+    // Workspace/launcher UI state.
+    let mut current_workspace: u32 = 0;
     let launcher_open: bool = false;
     if demon_abi::display_cursor_move(display, cursor_x as u64, cursor_y as u64, 0) == UINT64_MAX {
         demon_abi::write(b"RUST_COMPOSITOR_FAIL cursor-init\n");
@@ -608,6 +638,7 @@ pub extern "C" fn rust_main() -> ! {
                                 restore_y: message.y as u32,
                                 restore_width: message.width,
                                 restore_height: message.height,
+                                workspace: current_workspace,
                             };
                             next_z += 1;
                             if message.surface_id != 0 {
@@ -631,7 +662,7 @@ pub extern "C" fn rust_main() -> ! {
                         }
                         table[slot] = Window::EMPTY;
                         if focused_window == message.window_id {
-                            focused_window = find_top_slot(&table).map_or(0, |s| table[s].id);
+                            focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
                         }
                         repaint = true;
                     }
@@ -708,7 +739,7 @@ pub extern "C" fn rust_main() -> ! {
                         } else {
                             resizing_id = 0;
                         }
-                    } else if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
+                    } else if let Some(slot) = top_slot_at(&table, current_workspace, cursor_x, cursor_y) {
                         let window = table[slot];
                         if window.id >= DEMONX_WINDOW_ID_BASE {
                             send_window_event(
@@ -727,7 +758,11 @@ pub extern "C" fn rust_main() -> ! {
                 k if k == INPUT_MOUSE_BUTTON_DOWN => {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
-                    if let Some(slot) = decoration_hit_at(&table, cursor_x, cursor_y) {
+                    if let Some(dot) = workspace_dot_at(cursor_x as i32, cursor_y as i32) {
+                        current_workspace = dot;
+                        focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
+                        repaint = true;
+                    } else if let Some(slot) = decoration_hit_at(&table, current_workspace, cursor_x, cursor_y) {
                         let window = table[slot];
                         focused_window = window.id;
                         table[slot].z = next_z;
@@ -743,7 +778,7 @@ pub extern "C" fn rust_main() -> ! {
                                 }
                                 table[slot] = Window::EMPTY;
                                 if focused_window == window.id {
-                                    focused_window = find_top_slot(&table).map_or(0, |s| table[s].id);
+                                    focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
                                 }
                             }
                             1 => {
@@ -772,7 +807,7 @@ pub extern "C" fn rust_main() -> ! {
                             }
                         }
                         repaint = true;
-                    } else if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
+                    } else if let Some(slot) = top_slot_at(&table, current_workspace, cursor_x, cursor_y) {
                         let window = table[slot];
                         focused_window = window.id;
                         table[slot].z = next_z;
@@ -802,7 +837,7 @@ pub extern "C" fn rust_main() -> ! {
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
                     dragging_id = 0;
                     resizing_id = 0;
-                    if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
+                    if let Some(slot) = top_slot_at(&table, current_workspace, cursor_x, cursor_y) {
                         let window = table[slot];
                         if window.id >= DEMONX_WINDOW_ID_BASE {
                             send_window_event(
@@ -818,7 +853,18 @@ pub extern "C" fn rust_main() -> ! {
                     }
                 }
                 k if k == INPUT_KEY_DOWN || k == INPUT_KEY_UP => {
-                    if focused_window != 0 {
+                    // Ctrl+1/2/3 switches workspaces directly, without ever
+                    // reaching the focused client -- scan codes 0x02/0x03/
+                    // 0x04 are the physical '1'/'2'/'3' keys regardless of
+                    // shift state, matching the panel dots 1:1.
+                    if k == INPUT_KEY_DOWN
+                        && (event.modifiers & demon_abi::INPUT_MOD_CTRL) != 0
+                        && (0x02..=0x04).contains(&event.code)
+                    {
+                        current_workspace = (event.code - 0x02) as u32;
+                        focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
+                        repaint = true;
+                    } else if focused_window != 0 {
                         let packed_type_code = event.kind as u32 | ((event.code as u32) << 16);
                         send_window_event(
                             focused_window,

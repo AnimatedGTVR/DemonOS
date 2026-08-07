@@ -288,6 +288,7 @@ pub const INPUT_MOUSE_MOVE: u16 = 3;
 pub const INPUT_MOUSE_BUTTON_DOWN: u16 = 4;
 pub const INPUT_MOUSE_BUTTON_UP: u16 = 5;
 pub const INPUT_MOUSE_SCROLL: u16 = 6;
+pub const INPUT_MOD_CTRL: u32 = 1 << 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
