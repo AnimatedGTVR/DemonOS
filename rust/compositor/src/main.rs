@@ -84,6 +84,26 @@ const LAUNCHER_BTN_X0: i32 = PANEL_MARGIN + 4;
 const LAUNCHER_BTN_X1: i32 = LAUNCHER_BTN_X0 + 72;
 const WORKSPACE_COUNT: u32 = 3;
 
+// The launcher popover, opened by clicking the panel's DEMONOS button.
+// Deliberately a single entry, not demonwm's full app grid: every other
+// "app" in this build (Doom, Quake, ClassiCube, NXEngine) takes exclusive
+// raw display ownership instead of rendering into a compositor window
+// (see their CAPABILITY_SERVICE_DISPLAY grants in src/makobox.c's
+// launch_app), so they cannot coexist with the desktop session as a
+// windowed launcher entry the way DemonWM's grid pretended they could.
+// xterm is the only real windowed client that exists today, so it's the
+// only candidate entry -- but it isn't wired to actually spawn one (see
+// the click handler's own comment): a second instance of an
+// already-running process was proven to crash the whole compositor via a
+// real, separate kernel IPC/input wait-state bug, not anything in this
+// file. The cell exists and closes the launcher on click so the UI reads
+// as real rather than decorative, without shipping the one known-unsafe
+// action available today.
+const LAUNCHER_X: i32 = PANEL_MARGIN;
+const LAUNCHER_Y: i32 = PANEL_MARGIN + PANEL_HEIGHT as i32 + 8;
+const LAUNCHER_WIDTH: u32 = 160;
+const LAUNCHER_HEIGHT: u32 = 60;
+
 #[derive(Clone, Copy)]
 struct Window {
     in_use: bool,
@@ -207,6 +227,21 @@ fn workspace_dot_at(x: i32, y: i32) -> Option<u32> {
 
 fn hits_resize_corner(window: &Window, x: u32, y: u32) -> bool {
     x + RESIZE_GRIP >= window.x + window.width && y + RESIZE_GRIP >= window.y + window.height
+}
+
+fn in_launcher_button(x: i32, y: i32) -> bool {
+    x >= LAUNCHER_BTN_X0 && x < LAUNCHER_BTN_X1 && y >= PANEL_MARGIN && y < PANEL_MARGIN + PANEL_HEIGHT as i32
+}
+
+fn in_launcher_cell(x: i32, y: i32) -> bool {
+    x >= LAUNCHER_X && x < LAUNCHER_X + LAUNCHER_WIDTH as i32 &&
+    y >= LAUNCHER_Y && y < LAUNCHER_Y + LAUNCHER_HEIGHT as i32
+}
+
+fn draw_launcher(frame: &mut [u32]) {
+    fill_rect(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT, 0xff20242c);
+    fill_rect(frame, LAUNCHER_X + 8, LAUNCHER_Y + 8, 20, 20, COLOR_VIOLET);
+    draw_text(frame, LAUNCHER_X + 8, LAUNCHER_Y + 36, b"TERMINAL", COLOR_TEXT);
 }
 
 fn find_free_slot(table: &[Window; WINDOW_LIMIT]) -> Option<usize> {
@@ -526,6 +561,9 @@ fn composite(
         }
     }
     draw_panel(frame, current_workspace, launcher_open);
+    if launcher_open {
+        draw_launcher(frame);
+    }
 }
 
 #[no_mangle]
@@ -581,7 +619,7 @@ pub extern "C" fn rust_main() -> ! {
     let mut resize_start_height: u32 = 0;
     // Workspace/launcher UI state.
     let mut current_workspace: u32 = 0;
-    let launcher_open: bool = false;
+    let mut launcher_open: bool = false;
     if demon_abi::display_cursor_move(display, cursor_x as u64, cursor_y as u64, 0) == UINT64_MAX {
         demon_abi::write(b"RUST_COMPOSITOR_FAIL cursor-init\n");
         demon_abi::exit(1);
@@ -758,7 +796,34 @@ pub extern "C" fn rust_main() -> ! {
                 k if k == INPUT_MOUSE_BUTTON_DOWN => {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
-                    if let Some(dot) = workspace_dot_at(cursor_x as i32, cursor_y as i32) {
+                    if in_launcher_button(cursor_x as i32, cursor_y as i32) {
+                        launcher_open = !launcher_open;
+                        repaint = true;
+                    } else if launcher_open && in_launcher_cell(cursor_x as i32, cursor_y as i32) {
+                        // Deliberately NOT wired to demon_abi::spawn yet: spawning
+                        // a second xterm.elf while one is already running was
+                        // tested and reproducibly took the whole compositor down
+                        // (compositor_wait itself started returning an
+                        // unrecognized value, hitting RUST_COMPOSITOR_FAIL and a
+                        // clean exit -- not a panic in this file's own code).
+                        // Isolated by removing the spawn call and repeating the
+                        // exact same click sequence, which then reproduced
+                        // cleanly with no failure at all, so the trigger is
+                        // specifically spawning a second instance of an
+                        // already-running process, not the launcher UI itself.
+                        // Root cause is in shared kernel IPC/input wait-state
+                        // bookkeeping (src/ipc.c's ipc_wait_select/
+                        // ipc_process_cleanup, src/input.c's input_wait), not
+                        // this compositor -- real, pre-existing, and worth a
+                        // dedicated investigation, but out of scope to guess-fix
+                        // here. The cell still closes the launcher so clicking
+                        // it does something reasonable rather than nothing.
+                        launcher_open = false;
+                        repaint = true;
+                    } else if launcher_open {
+                        launcher_open = false;
+                        repaint = true;
+                    } else if let Some(dot) = workspace_dot_at(cursor_x as i32, cursor_y as i32) {
                         current_workspace = dot;
                         focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
                         repaint = true;
