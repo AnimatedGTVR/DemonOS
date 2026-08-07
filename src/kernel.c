@@ -1350,22 +1350,15 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
         }
         serial_write("DEMONX_SERVER_READY transport=capability-ipc protocol=X11\n");
         if (!test_mode && !doom_frame_test) {
-            const uint32_t demonwm_pid = userspace_spawn_path(0u,
-                "/system/bin/demonwm.elf", 23u, "demonwm",
-                CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC));
-            if (demonwm_pid == 0u)
-                boot_fatal("Interactive DemonWM launch failed");
-            (void)userspace_run_init();
-            struct scheduler_task_snapshot demonwm_state;
-            if (!scheduler_snapshot(demonwm_pid, &demonwm_state) ||
-                demonwm_state.state != SCHEDULER_TASK_BLOCKED) {
-                serial_write("DEMONWM_STARTUP_FAILED state=");
-                serial_write(scheduler_state_name(demonwm_state.state));
-                serial_write(" exit=");
-                serial_write_u64(demonwm_state.exit_code);
-                serial_write("\n");
-                boot_fatal("DemonWM did not claim DemonX and enter its event loop");
-            }
+            /* DemonWM (Desktop/demonwm/demonwm.cc, C++) is being retired in
+               favor of window management living directly in the Rust
+               compositor (decorations, drag, resize, close -- see
+               rust/compositor/src/main.rs's own decoration comment). This
+               is an interim state: demonwm.elf still builds and ships
+               while its replacement gains feature parity (panel,
+               workspaces, launcher), but is no longer spawned, so nothing
+               reparents a second frame window around xterm's content
+               anymore -- the compositor draws that chrome itself. */
             const uint32_t xterm_pid = userspace_spawn_path(0u,
                 "/system/bin/xterm.elf", 21u, "xterm",
                 CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
@@ -1374,9 +1367,7 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             if (xterm_pid == 0u)
                 boot_fatal("Interactive xterm launch failed");
             (void)userspace_run_init();
-            serial_write("DEMONWM_SESSION_READY pid=");
-            serial_write_u64(demonwm_pid);
-            serial_write(" display=:2 wm=click-focus,raise,drag\n");
+            serial_write("DESKTOP_WM_READY mode=rust-compositor-native\n");
             desktop_session_loop(compositor_pid);
         } else {
             const uint32_t xterm_pid = userspace_spawn_path(0u,

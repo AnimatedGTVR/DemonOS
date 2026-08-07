@@ -51,6 +51,27 @@ const MIN_MOVE_HEIGHT: u32 = 120;
 const BACKGROUND_COLOR: u32 = 4_279_245_080;
 const PLACEHOLDER_COLOR: u32 = 4_280_032_545;
 
+// Decoration geometry/colors, ported from Desktop/demonwm/demonwm.cc's own
+// constants (kColor*, title_height_, kControlSize/kControlGap/kResizeGrip,
+// kMinWindowWidth/Height) -- this compositor now draws that same chrome
+// itself instead of DemonWM reparenting a second frame window around each
+// client. Decoration is drawn as a strip ABOVE the window's own (x, y),
+// extending its on-screen footprint upward rather than shrinking the
+// client's content area, so no client needs to know decoration exists (no
+// reparenting, no coordinate renegotiation).
+const TITLE_HEIGHT: u32 = 24;
+const CONTROL_SIZE: u32 = 16;
+const CONTROL_GAP: u32 = 4;
+const RESIZE_GRIP: u32 = 10;
+const MIN_WINDOW_WIDTH: u32 = 96;
+const MIN_WINDOW_HEIGHT: u32 = 64;
+const RESERVED_TOP: u32 = 34; // kMargin(6) + kPanelHeight(28), matching demonwm's own panel band
+const COLOR_TITLE_FOCUSED: u32 = 0xff8b6bff;
+const COLOR_TITLE_UNFOCUSED: u32 = 0xff262b33;
+const COLOR_TEXT: u32 = 0xfff1f3f5;
+const COLOR_TEXT_MUTED: u32 = 0xff9ba3af;
+const COLOR_EMBER: u32 = 0xffff5c42;
+
 #[derive(Clone, Copy)]
 struct Window {
     in_use: bool,
@@ -62,6 +83,20 @@ struct Window {
     height: u32,
     surface_id: u32,
     mapped_address: u64,
+    // The mapped surface's own real pixel dimensions, fixed at Create time
+    // and never touched by resize -- composite() blits at most this many
+    // columns/rows regardless of the window's current on-screen width/
+    // height, so a resize never reads past what the client actually
+    // allocated (most clients here, like xterm, have a fixed-size surface
+    // and don't repaint at a new resolution; resizing them just crops or
+    // pads with background rather than reading out of bounds).
+    surface_width: u32,
+    surface_height: u32,
+    maximized: bool,
+    restore_x: u32,
+    restore_y: u32,
+    restore_width: u32,
+    restore_height: u32,
 }
 
 impl Window {
@@ -75,7 +110,63 @@ impl Window {
         height: 0,
         surface_id: 0,
         mapped_address: 0,
+        surface_width: 0,
+        surface_height: 0,
+        maximized: false,
+        restore_x: 0,
+        restore_y: 0,
+        restore_width: 0,
+        restore_height: 0,
     };
+}
+
+// A window's true visual footprint including its title bar strip, which
+// lives entirely above (x, y) and is never allowed to go above
+// RESERVED_TOP (see decoration_hit_at/clamp_drag_y).
+fn decoration_top(window: &Window) -> u32 {
+    window.y.saturating_sub(TITLE_HEIGHT)
+}
+
+fn maximize_control_x(window: &Window) -> u32 {
+    window.width - 8 - 2 * CONTROL_SIZE - CONTROL_GAP
+}
+
+fn close_control_x(window: &Window) -> u32 {
+    window.width - 8 - CONTROL_SIZE
+}
+
+// 1 = hit the maximize control, 2 = hit the close control, 0 = neither
+// (just an ordinary drag-start point in the title bar).
+fn title_control_at(window: &Window, local_x: u32) -> u32 {
+    let max_x = maximize_control_x(window);
+    if local_x >= max_x && local_x < max_x + CONTROL_SIZE {
+        return 1;
+    }
+    let close_x = close_control_x(window);
+    if local_x >= close_x && local_x < close_x + CONTROL_SIZE {
+        return 2;
+    }
+    0
+}
+
+fn decoration_hit_at(table: &[Window; WINDOW_LIMIT], x: u32, y: u32) -> Option<usize> {
+    table
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| {
+            w.in_use
+                && w.id >= DEMONX_WINDOW_ID_BASE
+                && x >= w.x
+                && x < w.x + w.width
+                && y >= decoration_top(w)
+                && y < w.y
+        })
+        .max_by_key(|(_, w)| w.z)
+        .map(|(index, _)| index)
+}
+
+fn hits_resize_corner(window: &Window, x: u32, y: u32) -> bool {
+    x + RESIZE_GRIP >= window.x + window.width && y + RESIZE_GRIP >= window.y + window.height
 }
 
 fn find_free_slot(table: &[Window; WINDOW_LIMIT]) -> Option<usize> {
@@ -159,13 +250,138 @@ fn send_window_event(
     demon_abi::handle_close(handle);
 }
 
+// A real 4x5 pixel bitmap font, not a placeholder -- same design as the
+// kernel's own framebuffer_text_compact (see src/framebuffer.c), ported
+// here as a stopgap so decoration/panel text renders now. This is a
+// deliberate, temporary stand-in for the Pixel12x10 TTF: it draws real,
+// readable glyphs today rather than leaving text blank while the TTF
+// parser/rasterizer (a separate, much larger piece of work) gets built.
+// Each row is a 4-bit value, bit 3 = leftmost column.
+const FONT_CHARS: &[u8] = b" -.:/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const FONT_ROWS: [[u8; 5]; 41] = [
+    [0, 0, 0, 0, 0],       // space
+    [0, 0, 15, 0, 0],      // -
+    [0, 0, 0, 0, 4],       // .
+    [0, 4, 0, 4, 0],       // :
+    [1, 2, 4, 8, 0],       // /
+    [6, 9, 9, 9, 6],       // 0
+    [2, 6, 2, 2, 7],       // 1
+    [6, 9, 2, 4, 15],      // 2
+    [14, 1, 6, 1, 14],     // 3
+    [9, 9, 15, 1, 1],      // 4
+    [15, 8, 14, 1, 14],    // 5
+    [6, 8, 14, 9, 6],      // 6
+    [15, 1, 2, 4, 4],      // 7
+    [6, 9, 6, 9, 6],       // 8
+    [6, 9, 7, 1, 6],       // 9
+    [6, 9, 15, 9, 9],      // A
+    [14, 9, 14, 9, 14],    // B
+    [7, 8, 8, 8, 7],       // C
+    [14, 9, 9, 9, 14],     // D
+    [15, 8, 14, 8, 15],    // E
+    [15, 8, 14, 8, 8],     // F
+    [7, 8, 11, 9, 7],      // G
+    [9, 9, 15, 9, 9],      // H
+    [15, 4, 4, 4, 15],     // I
+    [3, 1, 1, 9, 6],       // J
+    [9, 10, 12, 10, 9],    // K
+    [8, 8, 8, 8, 15],      // L
+    [9, 15, 15, 9, 9],     // M
+    [9, 13, 11, 9, 9],     // N
+    [6, 9, 9, 9, 6],       // O
+    [14, 9, 14, 8, 8],     // P
+    [6, 9, 9, 6, 1],       // Q
+    [14, 9, 14, 10, 9],    // R
+    [7, 8, 6, 1, 14],      // S
+    [15, 4, 4, 4, 4],      // T
+    [9, 9, 9, 9, 6],       // U
+    [9, 9, 9, 6, 4],       // V
+    [9, 9, 15, 15, 9],     // W
+    [9, 6, 4, 6, 9],       // X
+    [9, 9, 6, 4, 4],       // Y
+    [15, 2, 4, 8, 15],     // Z
+];
+
+fn glyph_rows(character: u8) -> &'static [u8; 5] {
+    let upper = if character.is_ascii_lowercase() {
+        character - b'a' + b'A'
+    } else {
+        character
+    };
+    match FONT_CHARS.iter().position(|&c| c == upper) {
+        Some(index) => &FONT_ROWS[index],
+        None => &FONT_ROWS[0],
+    }
+}
+
+fn put_pixel(frame: &mut [u32], x: i32, y: i32, color: u32) {
+    if x < 0 || y < 0 || x >= SCREEN_WIDTH as i32 || y >= SCREEN_HEIGHT as i32 {
+        return;
+    }
+    frame[y as usize * SCREEN_WIDTH as usize + x as usize] = color;
+}
+
+fn fill_rect(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32, color: u32) {
+    for row in 0..height as i32 {
+        for col in 0..width as i32 {
+            put_pixel(frame, x + col, y + row, color);
+        }
+    }
+}
+
+fn draw_text(frame: &mut [u32], x: i32, y: i32, text: &[u8], color: u32) {
+    let mut cursor = x;
+    for &character in text {
+        let rows = glyph_rows(character);
+        for (row_index, &row) in rows.iter().enumerate() {
+            for col in 0..4 {
+                if row & (1 << (3 - col)) != 0 {
+                    put_pixel(frame, cursor + col as i32, y + row_index as i32, color);
+                }
+            }
+        }
+        cursor += 5;
+    }
+}
+
+// Decoration strip for one window: title bar fill, close/maximize
+// controls, ported from Desktop/demonwm/demonwm.cc's drawFrame -- drawn as
+// a compositor-level overlay above the window's own content rather than a
+// second reparented frame window (see this file's own decoration comment).
+fn draw_decoration(frame: &mut [u32], window: &Window, focused: bool) {
+    let top = decoration_top(window) as i32;
+    let title_color = if focused {
+        COLOR_TITLE_FOCUSED
+    } else {
+        COLOR_TITLE_UNFOCUSED
+    };
+    fill_rect(frame, window.x as i32, top, window.width, TITLE_HEIGHT, title_color);
+    draw_text(frame, window.x as i32 + 6, top + 8, b"DEMONOS", COLOR_TEXT);
+
+    let control_y = top + (TITLE_HEIGHT as i32 - CONTROL_SIZE as i32) / 2;
+    let max_x = window.x as i32 + maximize_control_x(window) as i32;
+    // Maximize/restore: an outlined square (just the four edges).
+    fill_rect(frame, max_x, control_y, CONTROL_SIZE, 1, COLOR_TEXT_MUTED);
+    fill_rect(frame, max_x, control_y + CONTROL_SIZE as i32 - 1, CONTROL_SIZE, 1, COLOR_TEXT_MUTED);
+    fill_rect(frame, max_x, control_y, 1, CONTROL_SIZE, COLOR_TEXT_MUTED);
+    fill_rect(frame, max_x + CONTROL_SIZE as i32 - 1, control_y, 1, CONTROL_SIZE, COLOR_TEXT_MUTED);
+
+    let close_x = window.x as i32 + close_control_x(window) as i32;
+    fill_rect(frame, close_x, control_y, CONTROL_SIZE, CONTROL_SIZE, COLOR_EMBER);
+    // X mark: two diagonals, drawn as single pixels (no line primitive yet).
+    for i in 0..CONTROL_SIZE as i32 {
+        put_pixel(frame, close_x + i, control_y + i, COLOR_TEXT);
+        put_pixel(frame, close_x + CONTROL_SIZE as i32 - 1 - i, control_y + i, COLOR_TEXT);
+    }
+}
+
 // Clear to the desktop background, then paint every live window back to
 // front by ascending z -- a real zero-copy blit from its mapped surface, or
 // a flat placeholder if it has none mapped, exactly like
 // render_demonwm_backend's own two draw paths. Bounds were already enforced
 // when the window entered the table (CREATE/MOVE both reject anything that
 // would not fit), so every row copy here stays inside `frame`.
-fn composite(table: &[Window; WINDOW_LIMIT], frame: &mut [u32]) {
+fn composite(table: &[Window; WINDOW_LIMIT], frame: &mut [u32], focused_window: u32) {
     frame.fill(BACKGROUND_COLOR);
     let mut order: [usize; WINDOW_LIMIT] = [0, 1, 2, 3, 4, 5, 6, 7];
     order.sort_unstable_by_key(|&index| table[index].z);
@@ -175,20 +391,35 @@ fn composite(table: &[Window; WINDOW_LIMIT], frame: &mut [u32]) {
             continue;
         }
         if window.mapped_address != 0 {
-            let pixels = window.width as usize * window.height as usize;
+            // Blit at most the surface's own real dimensions -- resize only
+            // ever changes window.width/height (on-screen placement), never
+            // surface_width/height (what the client actually allocated), so
+            // this never reads past the mapped surface even mid-resize.
+            let copy_width = window.width.min(window.surface_width) as usize;
+            let copy_height = window.height.min(window.surface_height) as usize;
+            if copy_width < window.width as usize || copy_height < window.height as usize {
+                // Resized larger than the surface actually is: pad the
+                // uncovered strip with background instead of leaving
+                // whatever was there from the previous frame.
+                fill_rect(frame, window.x as i32, window.y as i32, window.width, window.height, BACKGROUND_COLOR);
+            }
+            let pixels = window.surface_width as usize * window.surface_height as usize;
             let source =
                 unsafe { core::slice::from_raw_parts(window.mapped_address as *const u32, pixels) };
-            for row in 0..window.height as usize {
-                let src_start = row * window.width as usize;
+            for row in 0..copy_height {
+                let src_start = row * window.surface_width as usize;
                 let dst_start = (window.y as usize + row) * SCREEN_WIDTH as usize + window.x as usize;
-                frame[dst_start..dst_start + window.width as usize]
-                    .copy_from_slice(&source[src_start..src_start + window.width as usize]);
+                frame[dst_start..dst_start + copy_width]
+                    .copy_from_slice(&source[src_start..src_start + copy_width]);
             }
         } else {
             for row in 0..window.height {
                 let dst_start = (window.y + row) as usize * SCREEN_WIDTH as usize + window.x as usize;
                 frame[dst_start..dst_start + window.width as usize].fill(PLACEHOLDER_COLOR);
             }
+        }
+        if window.id >= DEMONX_WINDOW_ID_BASE {
+            draw_decoration(frame, &window, window.id == focused_window);
         }
     }
 }
@@ -230,6 +461,20 @@ pub extern "C" fn rust_main() -> ! {
     let mut focused_window: u32 = 0;
     let mut cursor_x: u32 = 60;
     let mut cursor_y: u32 = 80;
+    // Drag/resize state, ported from Desktop/demonwm/demonwm.cc's
+    // drag_window_/resize_frame_ pair -- 0 means "not active" (id 0 is
+    // never a real window id, see DEMONX_WINDOW_ID_BASE). Grab offsets are
+    // stored as (cursor - window origin) at gesture start so motion stays
+    // anchored to wherever on the title bar/corner the user actually
+    // grabbed, matching continueDrag/continueResize's own math.
+    let mut dragging_id: u32 = 0;
+    let mut drag_grab_x: i32 = 0;
+    let mut drag_grab_y: i32 = 0;
+    let mut resizing_id: u32 = 0;
+    let mut resize_grab_x: i32 = 0;
+    let mut resize_grab_y: i32 = 0;
+    let mut resize_start_width: u32 = 0;
+    let mut resize_start_height: u32 = 0;
     if demon_abi::display_cursor_move(display, cursor_x as u64, cursor_y as u64, 0) == UINT64_MAX {
         demon_abi::write(b"RUST_COMPOSITOR_FAIL cursor-init\n");
         demon_abi::exit(1);
@@ -279,6 +524,13 @@ pub extern "C" fn rust_main() -> ! {
                                 height: message.height,
                                 surface_id: 0,
                                 mapped_address: 0,
+                                surface_width: message.width,
+                                surface_height: message.height,
+                                maximized: false,
+                                restore_x: message.x as u32,
+                                restore_y: message.y as u32,
+                                restore_width: message.width,
+                                restore_height: message.height,
                             };
                             next_z += 1;
                             if message.surface_id != 0 {
@@ -346,7 +598,40 @@ pub extern "C" fn rust_main() -> ! {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
                     demon_abi::display_cursor_move(display, cursor_x as u64, cursor_y as u64, 0);
-                    if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
+                    if dragging_id != 0 {
+                        if let Some(slot) = find_slot(&table, dragging_id) {
+                            let width = table[slot].width;
+                            let height = table[slot].height;
+                            let mut new_x = cursor_x as i32 - drag_grab_x;
+                            let mut new_y = cursor_y as i32 - drag_grab_y;
+                            new_x = new_x.max(0).min((SCREEN_WIDTH - width.min(SCREEN_WIDTH)) as i32);
+                            new_y = new_y
+                                .max(RESERVED_TOP as i32 + TITLE_HEIGHT as i32)
+                                .min((SCREEN_HEIGHT - height.min(SCREEN_HEIGHT)) as i32);
+                            table[slot].x = new_x as u32;
+                            table[slot].y = new_y as u32;
+                            table[slot].maximized = false;
+                        } else {
+                            dragging_id = 0;
+                        }
+                    } else if resizing_id != 0 {
+                        if let Some(slot) = find_slot(&table, resizing_id) {
+                            let window = table[slot];
+                            let mut width = resize_start_width as i32 + (cursor_x as i32 - resize_grab_x);
+                            let mut height = resize_start_height as i32 + (cursor_y as i32 - resize_grab_y);
+                            width = width
+                                .max(MIN_WINDOW_WIDTH as i32)
+                                .min((SCREEN_WIDTH - window.x) as i32);
+                            height = height
+                                .max(MIN_WINDOW_HEIGHT as i32)
+                                .min((SCREEN_HEIGHT - window.y) as i32);
+                            table[slot].width = width as u32;
+                            table[slot].height = height as u32;
+                            table[slot].maximized = false;
+                        } else {
+                            resizing_id = 0;
+                        }
+                    } else if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
                         let window = table[slot];
                         if window.id >= DEMONX_WINDOW_ID_BASE {
                             send_window_event(
@@ -365,12 +650,63 @@ pub extern "C" fn rust_main() -> ! {
                 k if k == INPUT_MOUSE_BUTTON_DOWN => {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
-                    if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
+                    if let Some(slot) = decoration_hit_at(&table, cursor_x, cursor_y) {
                         let window = table[slot];
                         focused_window = window.id;
                         table[slot].z = next_z;
                         next_z += 1;
-                        if window.id >= DEMONX_WINDOW_ID_BASE {
+                        let local_x = cursor_x - window.x;
+                        match title_control_at(&window, local_x) {
+                            2 => {
+                                // Close: same cleanup WindowOpcode::Close already
+                                // does for a client-initiated close.
+                                if window.surface_id != 0 {
+                                    demon_abi::surface_unmap(window.surface_id as u64);
+                                    demon_abi::handle_close(window.surface_id as u64);
+                                }
+                                table[slot] = Window::EMPTY;
+                                if focused_window == window.id {
+                                    focused_window = find_top_slot(&table).map_or(0, |s| table[s].id);
+                                }
+                            }
+                            1 => {
+                                if window.maximized {
+                                    table[slot].x = window.restore_x;
+                                    table[slot].y = window.restore_y;
+                                    table[slot].width = window.restore_width;
+                                    table[slot].height = window.restore_height;
+                                    table[slot].maximized = false;
+                                } else {
+                                    table[slot].restore_x = window.x;
+                                    table[slot].restore_y = window.y;
+                                    table[slot].restore_width = window.width;
+                                    table[slot].restore_height = window.height;
+                                    table[slot].x = 0;
+                                    table[slot].y = RESERVED_TOP + TITLE_HEIGHT;
+                                    table[slot].width = SCREEN_WIDTH;
+                                    table[slot].height = SCREEN_HEIGHT - table[slot].y;
+                                    table[slot].maximized = true;
+                                }
+                            }
+                            _ => {
+                                dragging_id = window.id;
+                                drag_grab_x = cursor_x as i32 - window.x as i32;
+                                drag_grab_y = cursor_y as i32 - window.y as i32;
+                            }
+                        }
+                        repaint = true;
+                    } else if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
+                        let window = table[slot];
+                        focused_window = window.id;
+                        table[slot].z = next_z;
+                        next_z += 1;
+                        if window.id >= DEMONX_WINDOW_ID_BASE && hits_resize_corner(&window, cursor_x, cursor_y) {
+                            resizing_id = window.id;
+                            resize_grab_x = cursor_x as i32;
+                            resize_grab_y = cursor_y as i32;
+                            resize_start_width = window.width;
+                            resize_start_height = window.height;
+                        } else if window.id >= DEMONX_WINDOW_ID_BASE {
                             send_window_event(
                                 window.id,
                                 WindowOpcode::Button,
@@ -387,6 +723,8 @@ pub extern "C" fn rust_main() -> ! {
                 k if k == INPUT_MOUSE_BUTTON_UP => {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
+                    dragging_id = 0;
+                    resizing_id = 0;
                     if let Some(slot) = top_slot_at(&table, cursor_x, cursor_y) {
                         let window = table[slot];
                         if window.id >= DEMONX_WINDOW_ID_BASE {
@@ -434,7 +772,7 @@ pub extern "C" fn rust_main() -> ! {
         let present_now = demon_abi::ticks();
         if dirty && (ready == 3 || present_now >= next_frame_tick) {
             let frame = unsafe { &mut *core::ptr::addr_of_mut!(FRAME) };
-            composite(&table, frame);
+            composite(&table, frame, focused_window);
             let submit = DisplaySubmit {
                 x: 0,
                 y: 0,
