@@ -101,6 +101,13 @@ pub fn exit(status: u64) -> ! {
 pub fn ticks() -> u64 {
     unsafe { syscall0(3) }
 }
+// Real CMOS/RTC wall-clock time, not kernel uptime -- packed as
+// (hour << 8) | minute, hour 0-23, minute 0-59. See syscall 48's own
+// comment in src/arch/x86_64/userspace.c for why this needs to be a
+// syscall at all (CMOS port I/O is privileged, ring 3 cannot read it).
+pub fn real_time_of_day() -> u64 {
+    unsafe { syscall0(48) }
+}
 pub fn getpid() -> u64 {
     unsafe { syscall0(4) }
 }

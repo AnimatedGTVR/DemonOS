@@ -43,8 +43,16 @@ static void editor_open(const char *name);
 #define CLIENT_WIDTH (GRID_WIDTH + 2 * PADDING)
 #define CLIENT_HEIGHT (TITLE_HEIGHT + GRID_HEIGHT + 2 * PADDING)
 
+// WIN_Y must clear the compositor's own reserved top band plus the
+// decoration strip it now draws above every window's own (x, y) -- see
+// rust/compositor/src/main.rs's RESERVED_TOP/TITLE_HEIGHT (34 + 24 = 58).
+// Under the old DemonWM architecture this only had to clear the panel
+// itself (36 = kMargin + kPanelHeight + 2) because DemonWM's reparented
+// frame absorbed the decoration offset on xterm's behalf; the compositor
+// draws decoration directly above whatever position the client requests,
+// so xterm has to leave room for it itself now.
 #define WIN_X 14
-#define WIN_Y 36
+#define WIN_Y 58
 
 #define COLOR_BORDER 0xff2b3340u
 #define COLOR_BACKGROUND 0xff0d1014u

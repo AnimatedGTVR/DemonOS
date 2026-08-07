@@ -774,6 +774,42 @@ static bool display_submit_from_user(const struct display_user_submit *request) 
     return true;
 }
 
+// Real CMOS/RTC hardware read (ports 0x70/0x71) for syscall 48 -- the same
+// real hardware protocol src/makobox.c's own read_rtc/applet_date already
+// use (poll Register A's update-in-progress bit, BCD-decode unless
+// Register B says the RTC is already in binary mode), duplicated here
+// rather than shared because CMOS access is privileged port I/O ring 3
+// cannot do itself: a userspace clock display (see rust/compositor) has
+// no other way to learn the real time of day, only kernel uptime ticks.
+static inline void rtc_out8(uint16_t port, uint8_t value) {
+    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+static inline uint8_t rtc_in8(uint16_t port) {
+    uint8_t value;
+    __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+static uint8_t rtc_cmos_read(uint8_t reg) {
+    rtc_out8(0x70u, reg);
+    return rtc_in8(0x71u);
+}
+static uint8_t rtc_bcd_to_binary(uint8_t value) {
+    return (uint8_t)(((value >> 4u) * 10u) + (value & 0x0Fu));
+}
+// Packs as (hour << 8) | minute, both real binary (not BCD) values --
+// hour 0-23, minute 0-59.
+static uint64_t real_time_of_day(void) {
+    for (unsigned attempt = 0u; attempt < 1000000u; ++attempt)
+        if ((rtc_cmos_read(0x0Au) & 0x80u) == 0u) break;
+    uint8_t minute = rtc_cmos_read(0x02u);
+    uint8_t hour = rtc_cmos_read(0x04u) & 0x7Fu;
+    if ((rtc_cmos_read(0x0Bu) & 0x04u) == 0u) { // BCD mode
+        minute = rtc_bcd_to_binary(minute);
+        hour = rtc_bcd_to_binary(hour);
+    }
+    return ((uint64_t)hour << 8u) | (uint64_t)minute;
+}
+
 uintptr_t syscall_dispatch(uintptr_t frame_address) {
     struct interrupt_frame *frame = (struct interrupt_frame *)frame_address;
     const uint64_t number = frame->rax;
@@ -1432,6 +1468,10 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
     }
     if (number == 47u) {
         frame->rax = anonymous_commit(scheduler_current_pid(), frame->rdi, frame->rsi != 0u);
+        return frame_address;
+    }
+    if (number == 48u) {
+        frame->rax = real_time_of_day();
         return frame_address;
     }
     frame->rax = (uint64_t)-1;

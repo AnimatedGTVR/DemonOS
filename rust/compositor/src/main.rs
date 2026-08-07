@@ -71,6 +71,18 @@ const COLOR_TITLE_UNFOCUSED: u32 = 0xff262b33;
 const COLOR_TEXT: u32 = 0xfff1f3f5;
 const COLOR_TEXT_MUTED: u32 = 0xff9ba3af;
 const COLOR_EMBER: u32 = 0xffff5c42;
+const COLOR_VIOLET: u32 = 0xff8b6bff;
+const COLOR_PANEL_BG: u32 = 0xff1a1d24;
+
+// Panel geometry, ported from demonwm's kMargin/kPanelHeight/
+// kLauncherBtnX0/X1 -- drawn as a pure compositor overlay (never a window
+// table entry, unlike DemonWM's real 628x28 CREATE'd panel window) since
+// it has no client of its own to composite from.
+const PANEL_MARGIN: i32 = 6;
+const PANEL_HEIGHT: u32 = 28;
+const LAUNCHER_BTN_X0: i32 = PANEL_MARGIN + 4;
+const LAUNCHER_BTN_X1: i32 = LAUNCHER_BTN_X0 + 72;
+const WORKSPACE_COUNT: u32 = 3;
 
 #[derive(Clone, Copy)]
 struct Window {
@@ -375,13 +387,71 @@ fn draw_decoration(frame: &mut [u32], window: &Window, focused: bool) {
     }
 }
 
+fn push_digit(buffer: &mut [u8; 5], index: &mut usize, value: u32) {
+    buffer[*index] = b'0' + (value % 10) as u8;
+    *index += 1;
+}
+
+// Top panel: launcher button, workspace dots, a real HH:MM clock (see
+// syscall 48 / demon_abi::real_time_of_day -- CMOS/RTC time, not kernel
+// uptime), and tray placeholders. Ported from demonwm's own drawPanel,
+// drawn as a pure overlay with no window-table entry of its own.
+fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
+    let width = SCREEN_WIDTH as i32 - 2 * PANEL_MARGIN;
+    fill_rect(frame, PANEL_MARGIN, PANEL_MARGIN, width as u32, PANEL_HEIGHT, COLOR_PANEL_BG);
+
+    let launcher_color = if launcher_open { COLOR_VIOLET } else { COLOR_EMBER };
+    fill_rect(
+        frame,
+        LAUNCHER_BTN_X0,
+        PANEL_MARGIN + 4,
+        (LAUNCHER_BTN_X1 - LAUNCHER_BTN_X0) as u32,
+        PANEL_HEIGHT - 8,
+        launcher_color,
+    );
+    draw_text(frame, LAUNCHER_BTN_X0 + 8, PANEL_MARGIN + 10, b"DEMONOS", COLOR_TEXT);
+
+    // Workspace dots, just left of center.
+    let dots_x = PANEL_MARGIN + width / 2 - 30;
+    for dot in 0..WORKSPACE_COUNT {
+        let color = if dot == current_workspace { COLOR_EMBER } else { COLOR_TEXT_MUTED };
+        fill_rect(frame, dots_x + dot as i32 * 10, PANEL_MARGIN + 12, 6, 6, color);
+    }
+
+    // Clock, centered: real wall-clock time from CMOS/RTC, not uptime.
+    let packed = demon_abi::real_time_of_day();
+    let hour = ((packed >> 8) & 0xff) as u32;
+    let minute = (packed & 0xff) as u32;
+    let mut clock_text = [0u8; 5];
+    let mut index = 0usize;
+    push_digit(&mut clock_text, &mut index, hour / 10);
+    push_digit(&mut clock_text, &mut index, hour % 10);
+    clock_text[index] = b':';
+    index += 1;
+    push_digit(&mut clock_text, &mut index, minute / 10);
+    push_digit(&mut clock_text, &mut index, minute % 10);
+    draw_text(frame, PANEL_MARGIN + width / 2 + 8, PANEL_MARGIN + 10, &clock_text, COLOR_TEXT);
+
+    // Tray placeholders, right-aligned.
+    for slot in 0..3 {
+        let tray_x = PANEL_MARGIN + width - 12 - slot * 22 - 14;
+        fill_rect(frame, tray_x, PANEL_MARGIN + 8, 14, 14, COLOR_TEXT_MUTED);
+    }
+}
+
 // Clear to the desktop background, then paint every live window back to
 // front by ascending z -- a real zero-copy blit from its mapped surface, or
 // a flat placeholder if it has none mapped, exactly like
 // render_demonwm_backend's own two draw paths. Bounds were already enforced
 // when the window entered the table (CREATE/MOVE both reject anything that
 // would not fit), so every row copy here stays inside `frame`.
-fn composite(table: &[Window; WINDOW_LIMIT], frame: &mut [u32], focused_window: u32) {
+fn composite(
+    table: &[Window; WINDOW_LIMIT],
+    frame: &mut [u32],
+    focused_window: u32,
+    current_workspace: u32,
+    launcher_open: bool,
+) {
     frame.fill(BACKGROUND_COLOR);
     let mut order: [usize; WINDOW_LIMIT] = [0, 1, 2, 3, 4, 5, 6, 7];
     order.sort_unstable_by_key(|&index| table[index].z);
@@ -422,6 +492,7 @@ fn composite(table: &[Window; WINDOW_LIMIT], frame: &mut [u32], focused_window: 
             draw_decoration(frame, &window, window.id == focused_window);
         }
     }
+    draw_panel(frame, current_workspace, launcher_open);
 }
 
 #[no_mangle]
@@ -475,6 +546,12 @@ pub extern "C" fn rust_main() -> ! {
     let mut resize_grab_y: i32 = 0;
     let mut resize_start_width: u32 = 0;
     let mut resize_start_height: u32 = 0;
+    // Workspace/launcher UI state -- click handling for these lands in a
+    // later stage; for now the panel just renders workspace 0 as current
+    // and the launcher as closed, matching what a freshly booted desktop
+    // should look like either way.
+    let current_workspace: u32 = 0;
+    let launcher_open: bool = false;
     if demon_abi::display_cursor_move(display, cursor_x as u64, cursor_y as u64, 0) == UINT64_MAX {
         demon_abi::write(b"RUST_COMPOSITOR_FAIL cursor-init\n");
         demon_abi::exit(1);
@@ -772,7 +849,7 @@ pub extern "C" fn rust_main() -> ! {
         let present_now = demon_abi::ticks();
         if dirty && (ready == 3 || present_now >= next_frame_tick) {
             let frame = unsafe { &mut *core::ptr::addr_of_mut!(FRAME) };
-            composite(&table, frame, focused_window);
+            composite(&table, frame, focused_window, current_workspace, launcher_open);
             let submit = DisplaySubmit {
                 x: 0,
                 y: 0,
