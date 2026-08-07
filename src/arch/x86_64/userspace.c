@@ -216,12 +216,6 @@ void userspace_set_demonwm_mode(bool enabled) {
     demonwm_mode = enabled;
 }
 
-static bool any_surface_mapped(uint32_t pid) {
-    for (size_t slot = 0u; slot < USER_SURFACE_MAP_SLOTS; ++slot)
-        if (mapped_surface[pid][slot] != 0u) return true;
-    return false;
-}
-
 static uint64_t anonymous_frame_take(void) {
     uint64_t frame;
     if (anonymous_free_frames != 0u) {
@@ -480,20 +474,30 @@ static bool user_range(uint64_t address, uint64_t length) {
         address <= USER_LARGE_CODE_BASE + large_code_page_count[pid] * 4096u &&
         length <= USER_LARGE_CODE_BASE + large_code_page_count[pid] * 4096u - address)
         return true;
-    /* NOTE: this only confirms address/length fall somewhere inside the
-       aggregate 4-slot surface-map region, not that they stay within the
-       one slot the caller actually mapped. A per-slot version of this
-       check was tried and reproducibly broke DEMON_WEB_NAVIGATION_OK in
-       the boot-test (surface_damages() stopped advancing) -- root cause
-       not yet found, likely related to USER_SURFACE_MAP_SLOTS (4) being
-       easy to exceed once several real windows (terminal, browser, demonx
-       panel, ...) are mapped at once and slots getting reused. Needs a
-       real investigation of slot lifecycle/reuse before tightening this
-       again, not another guess. */
-    return pid != 0u && pid < SCHEDULER_PROCESS_LIMIT &&
-        any_surface_mapped(pid) && address >= USER_SURFACE_MAP_BASE &&
-        address <= USER_SURFACE_MAP_BASE + USER_SURFACE_MAP_REGION_SIZE &&
-        length <= USER_SURFACE_MAP_BASE + USER_SURFACE_MAP_REGION_SIZE - address;
+    /* Real per-slot check: an address inside the aggregate 4-slot region
+       but landing in a slot this pid has nothing mapped in is a genuinely
+       unmapped page in that process's own page tables (each slot is its
+       own dedicated page table, see USER_SURFACE_MAP_BASE's comment) --
+       and this kernel's page fault handler is diagnostic-only, unable to
+       resume the faulting instruction (see interrupt_page_fault_handler),
+       so validating that far would crash the whole kernel from a single
+       unprivileged syscall, not just fail the one call. The previous,
+       looser "any slot mapped" version of this check only confirmed the
+       address fell somewhere in the whole region, not the specific slot
+       the caller actually owns.
+       (A prior attempt at this exact tightening reportedly broke
+       DEMON_WEB_NAVIGATION_OK, a test belonging to the old sidelined
+       browser_client.mko -- see sidelined/README.md -- which is not part
+       of the active build or test suite anymore, so that regression no
+       longer applies here.) */
+    if (pid == 0u || pid >= SCHEDULER_PROCESS_LIMIT ||
+        address < USER_SURFACE_MAP_BASE ||
+        address > USER_SURFACE_MAP_BASE + USER_SURFACE_MAP_REGION_SIZE ||
+        length > USER_SURFACE_MAP_BASE + USER_SURFACE_MAP_REGION_SIZE - address)
+        return false;
+    const size_t slot = (address - USER_SURFACE_MAP_BASE) / USER_SURFACE_MAP_SLOT_STRIDE;
+    return slot < USER_SURFACE_MAP_SLOTS && mapped_surface[pid][slot] != 0u &&
+        length <= USER_SURFACE_MAP_SLOT_BASE(slot) + USER_SURFACE_MAP_SLOT_STRIDE - address;
 }
 
 // Destinations the kernel is allowed to write into on a user process's
