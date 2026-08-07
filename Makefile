@@ -1607,7 +1607,7 @@ $(BUILD)/mouse_argb.o: $(BUILD)/mouse.argb
 # window (see the 0x400000 bound in kernel.c's framebuffer mapping check),
 # while the quarter-size image (300 KiB) leaves the whole layout comfortably
 # inside it.
-$(BUILD)/wallpaper.argb: assets/Flowers.jpg | $(BUILD)
+$(BUILD)/wallpaper.argb: assets/anotheruseablewallpaper.jpg | $(BUILD)
 	magick $< -resize 320x240^ -gravity center -extent 320x240 \
 		-channel RGBA -depth 8 BGRA:$@
 
