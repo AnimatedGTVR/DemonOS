@@ -513,24 +513,19 @@ fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
 // render_demonwm_backend's own two draw paths. Bounds were already enforced
 // when the window entered the table (CREATE/MOVE both reject anything that
 // would not fit), so every row copy here stays inside `frame`.
-// The real baked-in wallpaper, stored quarter-resolution and upscaled 2x
-// (nearest neighbor) here -- the exact same convention the kernel's own
-// framebuffer blit path uses for it (see DEMON_WALLPAPER_WIDTH/HEIGHT's
-// own comment), so this draws the identical image the recovery console's
-// graphical backdrop would. Falls back to the flat BACKGROUND_COLOR fill
-// if the wallpaper syscall ever fails (e.g. a future build without the
-// asset baked in) rather than leaving the frame uninitialized.
+// The real wallpaper, read from /system/wallpaper.argb (see
+// grub-desktop.cfg's own module2 line) at its native 640x480 resolution --
+// no upscaling needed, unlike the kernel's own quarter-resolution copy for
+// its DISPLAY_EFFECT_WALLPAPER primitive (see src/display.c), since this
+// file is shipped at full screen size specifically for this. Falls back
+// to the flat BACKGROUND_COLOR fill if the file can't be read (e.g. a
+// non-desktop boot with no such RAMFS entry) rather than leaving the
+// frame uninitialized.
 fn draw_wallpaper(frame: &mut [u32], wallpaper: &[u32], wallpaper_loaded: bool) {
-    if !wallpaper_loaded {
+    if wallpaper_loaded {
+        frame.copy_from_slice(wallpaper);
+    } else {
         frame.fill(BACKGROUND_COLOR);
-        return;
-    }
-    for y in 0..SCREEN_HEIGHT as usize {
-        let source_row = (y / 2) * demon_abi::WALLPAPER_WIDTH;
-        let dest_row = y * SCREEN_WIDTH as usize;
-        for x in 0..SCREEN_WIDTH as usize {
-            frame[dest_row + x] = wallpaper[source_row + x / 2];
-        }
     }
 }
 
@@ -652,16 +647,36 @@ pub extern "C" fn rust_main() -> ! {
     static mut FRAME: [u32; PIXELS] = [0; PIXELS];
 
     // Heap-allocated, not a static array: WALLPAPER_PIXELS * 4 bytes
-    // (300 KiB) compiled directly into this binary's own image would push
-    // its total size well past USER_LARGE_CODE_MAX_PAGES's 320-page
-    // ceiling (see anonymous_map's own comment) -- confirmed by trying
-    // exactly that first: the compositor stopped loading at all.
+    // (1.2 MiB at full 640x480 resolution) compiled directly into this
+    // binary's own image would push its total size well past
+    // USER_LARGE_CODE_MAX_PAGES's 320-page ceiling (see anonymous_map's
+    // own comment) -- confirmed by trying exactly that first, at the
+    // smaller quarter-resolution size, and the compositor stopped loading
+    // at all.
     const WALLPAPER_PIXELS: usize = demon_abi::WALLPAPER_WIDTH * demon_abi::WALLPAPER_HEIGHT;
-    let wallpaper_address = demon_abi::anonymous_map((WALLPAPER_PIXELS * 4) as u64);
-    let wallpaper_loaded = wallpaper_address != UINT64_MAX
-        && demon_abi::wallpaper_pixels(unsafe {
-            core::slice::from_raw_parts_mut(wallpaper_address as *mut u32, WALLPAPER_PIXELS)
-        }) != UINT64_MAX;
+    const WALLPAPER_BYTES: usize = WALLPAPER_PIXELS * 4;
+    let wallpaper_address = demon_abi::anonymous_map(WALLPAPER_BYTES as u64);
+    let wallpaper_loaded = if wallpaper_address != UINT64_MAX {
+        let storage = demon_abi::service_open(CapabilityService::Storage as u64);
+        let handle = if storage != UINT64_MAX {
+            demon_abi::file_open(storage, b"/system/wallpaper.argb", false)
+        } else {
+            UINT64_MAX
+        };
+        let read_bytes = if handle != UINT64_MAX {
+            let destination = unsafe {
+                core::slice::from_raw_parts_mut(wallpaper_address as *mut u8, WALLPAPER_BYTES)
+            };
+            let result = demon_abi::handle_read(handle, destination);
+            demon_abi::handle_close(handle);
+            result
+        } else {
+            UINT64_MAX
+        };
+        read_bytes == WALLPAPER_BYTES as u64
+    } else {
+        false
+    };
     let wallpaper: &[u32] = if wallpaper_loaded {
         unsafe { core::slice::from_raw_parts(wallpaper_address as *const u32, WALLPAPER_PIXELS) }
     } else {

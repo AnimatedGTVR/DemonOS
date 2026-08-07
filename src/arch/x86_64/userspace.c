@@ -1,6 +1,5 @@
 #include <kernel/userspace.h>
 #include <kernel/acpi.h>
-#include <demon/assets.h>
 #include <kernel/capability.h>
 #include <kernel/elf64.h>
 #include <kernel/display.h>
@@ -1473,26 +1472,6 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
     }
     if (number == 48u) {
         frame->rax = real_time_of_day();
-        return frame_address;
-    }
-    if (number == 49u) {
-        // Copies the real baked-in wallpaper (320x240 ARGB, see
-        // demon_wallpaper_pixels/DEMON_WALLPAPER_WIDTH/HEIGHT) into a
-        // userspace buffer -- the Rust compositor needs this to draw an
-        // actual background image instead of a flat fill color, but that
-        // pixel data is linked directly into the kernel binary
-        // (build/wallpaper_argb.o), unreachable from ring 3 without a
-        // syscall copying it out, the same way display_info copies out
-        // other kernel-resident state no capability object wraps.
-        const size_t wallpaper_bytes = (size_t)DEMON_WALLPAPER_WIDTH * DEMON_WALLPAPER_HEIGHT * sizeof(uint32_t);
-        const uint32_t *pixels = demon_wallpaper_pixels();
-        if (pixels == NULL || frame->rsi < wallpaper_bytes ||
-            !user_write_range(frame->rdi, wallpaper_bytes)) {
-            frame->rax = (uint64_t)-1;
-            return frame_address;
-        }
-        frame->rax = userspace_copy_to(scheduler_current_pid(), frame->rdi,
-            (const uint8_t *)pixels, wallpaper_bytes) ? wallpaper_bytes : (uint64_t)-1;
         return frame_address;
     }
     frame->rax = (uint64_t)-1;

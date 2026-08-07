@@ -1310,7 +1310,12 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_INPUT) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_IPC) |
-            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE));
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            /* Reads the real, full-resolution wallpaper file off RAMFS
+               (see grub-desktop.cfg's own module2 line for it) instead of
+               the kernel-linked quarter-resolution copy ring 3 otherwise
+               has no way to reach. */
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE));
         if (compositor_pid == 0u)
             boot_fatal("Ring-3 compositor launch failed");
         (void)userspace_run_init();

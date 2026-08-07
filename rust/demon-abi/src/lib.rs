@@ -120,16 +120,13 @@ pub fn real_time_of_day() -> u64 {
 pub fn anonymous_map(byte_count: u64) -> u64 {
     unsafe { syscall1(40, byte_count) }
 }
-pub const WALLPAPER_WIDTH: usize = 320;
-pub const WALLPAPER_HEIGHT: usize = 240;
-// Copies the real baked-in wallpaper (see syscall 49's own comment in
-// src/arch/x86_64/userspace.c) into `buffer`, which must hold at least
-// WALLPAPER_WIDTH * WALLPAPER_HEIGHT u32s. Returns the byte count copied,
-// or UINT64_MAX on failure.
-pub fn wallpaper_pixels(buffer: &mut [u32]) -> u64 {
-    let byte_len = core::mem::size_of_val(buffer) as u64;
-    unsafe { syscall2(49, buffer.as_mut_ptr() as u64, byte_len) }
-}
+// Full screen resolution -- the wallpaper file at /system/wallpaper.argb
+// (see grub-desktop.cfg's own module2 line) is shipped at this exact size,
+// not the quarter-resolution copy linked into the kernel binary for its
+// own DISPLAY_EFFECT_WALLPAPER primitive (see src/display.c), so no
+// upscaling is needed once it's read in.
+pub const WALLPAPER_WIDTH: usize = 640;
+pub const WALLPAPER_HEIGHT: usize = 480;
 pub fn getpid() -> u64 {
     unsafe { syscall0(4) }
 }

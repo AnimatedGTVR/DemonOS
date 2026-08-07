@@ -1614,6 +1614,17 @@ $(BUILD)/wallpaper.argb: assets/anotheruseablewallpaper.jpg | $(BUILD)
 $(BUILD)/wallpaper_argb.o: $(BUILD)/wallpaper.argb
 	$(LD) -r -b binary $< -o $@
 
+# Full 640x480 resolution, unlike the quarter-size copy above -- shipped as
+# a real RAMFS file (see $(DESKTOP_ISO)'s module2 line for it), not linked
+# into the kernel binary, so it isn't bound by the kernel's own backbuffer
+# memory constraint. The Rust compositor reads this directly instead of
+# upscaling the quarter-size copy, since ring 3 has no other way to reach
+# that copy anyway (it's kernel-linked data) and a real 1:1 image looks
+# far sharper than a 2x nearest-neighbor upscale.
+$(BUILD)/wallpaper-full.argb: assets/anotheruseablewallpaper.jpg | $(BUILD)
+	magick $< -resize 640x480^ -gravity center -extent 640x480 \
+		-channel RGBA -depth 8 BGRA:$@
+
 # Contextual cursor icon pack (assets/Mouse/New Icons/Mouse Icons/). Unlike
 # mouse.png, these source files are already true RGBA with real alpha (not a
 # flat-color background needing floodfill removal -- running mouse.png's
@@ -2118,9 +2129,10 @@ DESKTOP_ISO := $(BUILD)/kernel-desktop.iso
 
 desktop-iso: $(DESKTOP_ISO)
 
-$(DESKTOP_ISO): $(ISO) freedoom-assets quake-data grub/grub-desktop.cfg
+$(DESKTOP_ISO): $(ISO) freedoom-assets quake-data grub/grub-desktop.cfg $(BUILD)/wallpaper-full.argb
 	rm -rf $(BUILD)/iso-desktop
 	cp -r $(ISO_ROOT) $(BUILD)/iso-desktop
+	cp $(BUILD)/wallpaper-full.argb $(BUILD)/iso-desktop/boot/mako/wallpaper.argb
 	mkdir -p $(BUILD)/iso-desktop/games/freedoom $(BUILD)/iso-desktop/licenses/doom
 	cp $(FREEDOOM_WAD) $(BUILD)/iso-desktop/games/freedoom/freedoom1.wad
 	cp $(FREEDOOM_DIR)/COPYING.txt $(BUILD)/iso-desktop/licenses/doom/Freedoom-COPYING.txt
