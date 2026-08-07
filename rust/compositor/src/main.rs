@@ -513,14 +513,37 @@ fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
 // render_demonwm_backend's own two draw paths. Bounds were already enforced
 // when the window entered the table (CREATE/MOVE both reject anything that
 // would not fit), so every row copy here stays inside `frame`.
+// The real baked-in wallpaper, stored quarter-resolution and upscaled 2x
+// (nearest neighbor) here -- the exact same convention the kernel's own
+// framebuffer blit path uses for it (see DEMON_WALLPAPER_WIDTH/HEIGHT's
+// own comment), so this draws the identical image the recovery console's
+// graphical backdrop would. Falls back to the flat BACKGROUND_COLOR fill
+// if the wallpaper syscall ever fails (e.g. a future build without the
+// asset baked in) rather than leaving the frame uninitialized.
+fn draw_wallpaper(frame: &mut [u32], wallpaper: &[u32], wallpaper_loaded: bool) {
+    if !wallpaper_loaded {
+        frame.fill(BACKGROUND_COLOR);
+        return;
+    }
+    for y in 0..SCREEN_HEIGHT as usize {
+        let source_row = (y / 2) * demon_abi::WALLPAPER_WIDTH;
+        let dest_row = y * SCREEN_WIDTH as usize;
+        for x in 0..SCREEN_WIDTH as usize {
+            frame[dest_row + x] = wallpaper[source_row + x / 2];
+        }
+    }
+}
+
 fn composite(
     table: &[Window; WINDOW_LIMIT],
     frame: &mut [u32],
     focused_window: u32,
     current_workspace: u32,
     launcher_open: bool,
+    wallpaper: &[u32],
+    wallpaper_loaded: bool,
 ) {
-    frame.fill(BACKGROUND_COLOR);
+    draw_wallpaper(frame, wallpaper, wallpaper_loaded);
     let mut order: [usize; WINDOW_LIMIT] = [0, 1, 2, 3, 4, 5, 6, 7];
     order.sort_unstable_by_key(|&index| table[index].z);
     for &index in order.iter() {
@@ -627,6 +650,23 @@ pub extern "C" fn rust_main() -> ! {
 
     const PIXELS: usize = SCREEN_WIDTH as usize * SCREEN_HEIGHT as usize;
     static mut FRAME: [u32; PIXELS] = [0; PIXELS];
+
+    // Heap-allocated, not a static array: WALLPAPER_PIXELS * 4 bytes
+    // (300 KiB) compiled directly into this binary's own image would push
+    // its total size well past USER_LARGE_CODE_MAX_PAGES's 320-page
+    // ceiling (see anonymous_map's own comment) -- confirmed by trying
+    // exactly that first: the compositor stopped loading at all.
+    const WALLPAPER_PIXELS: usize = demon_abi::WALLPAPER_WIDTH * demon_abi::WALLPAPER_HEIGHT;
+    let wallpaper_address = demon_abi::anonymous_map((WALLPAPER_PIXELS * 4) as u64);
+    let wallpaper_loaded = wallpaper_address != UINT64_MAX
+        && demon_abi::wallpaper_pixels(unsafe {
+            core::slice::from_raw_parts_mut(wallpaper_address as *mut u32, WALLPAPER_PIXELS)
+        }) != UINT64_MAX;
+    let wallpaper: &[u32] = if wallpaper_loaded {
+        unsafe { core::slice::from_raw_parts(wallpaper_address as *const u32, WALLPAPER_PIXELS) }
+    } else {
+        &[]
+    };
 
     let mut dirty = true;
     let mut next_frame_tick = demon_abi::ticks() + 5;
@@ -960,7 +1000,7 @@ pub extern "C" fn rust_main() -> ! {
         let present_now = demon_abi::ticks();
         if dirty && (ready == 3 || present_now >= next_frame_tick) {
             let frame = unsafe { &mut *core::ptr::addr_of_mut!(FRAME) };
-            composite(&table, frame, focused_window, current_workspace, launcher_open);
+            composite(&table, frame, focused_window, current_workspace, launcher_open, wallpaper, wallpaper_loaded);
             let submit = DisplaySubmit {
                 x: 0,
                 y: 0,

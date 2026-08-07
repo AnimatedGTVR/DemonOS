@@ -108,6 +108,28 @@ pub fn ticks() -> u64 {
 pub fn real_time_of_day() -> u64 {
     unsafe { syscall0(48) }
 }
+// One-shot anonymous heap allocation: commits byte_count bytes (rounded up
+// to whole pages) as a single region at a fixed process-lifetime address,
+// returned here, or UINT64_MAX on failure. Exists so a process can grow
+// memory beyond its own ELF image size without bloating the image itself
+// (see USER_LARGE_CODE_MAX_PAGES's own ceiling in
+// src/arch/x86_64/userspace.c) -- a static array big enough for something
+// like the wallpaper buffer would push a small binary like this
+// compositor well past that ceiling if it were compiled into the image
+// instead of allocated here at runtime.
+pub fn anonymous_map(byte_count: u64) -> u64 {
+    unsafe { syscall1(40, byte_count) }
+}
+pub const WALLPAPER_WIDTH: usize = 320;
+pub const WALLPAPER_HEIGHT: usize = 240;
+// Copies the real baked-in wallpaper (see syscall 49's own comment in
+// src/arch/x86_64/userspace.c) into `buffer`, which must hold at least
+// WALLPAPER_WIDTH * WALLPAPER_HEIGHT u32s. Returns the byte count copied,
+// or UINT64_MAX on failure.
+pub fn wallpaper_pixels(buffer: &mut [u32]) -> u64 {
+    let byte_len = core::mem::size_of_val(buffer) as u64;
+    unsafe { syscall2(49, buffer.as_mut_ptr() as u64, byte_len) }
+}
 pub fn getpid() -> u64 {
     unsafe { syscall0(4) }
 }
