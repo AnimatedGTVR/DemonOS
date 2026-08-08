@@ -322,6 +322,8 @@ static int create_window_surface(struct demonx_window *window) {
     return 1;
 }
 
+static struct demonx_property *find_property(uint32_t window, uint32_t atom);
+
 static int publish_window(struct demonx_window *window) {
     if (!create_window_surface(window) || !ensure_desktop_handles()) return 0;
     if (window->surface_handle == DEMONX_FALLBACK_SURFACE) return 0;
@@ -360,6 +362,23 @@ static int publish_window(struct demonx_window *window) {
         .width = surface_width, .height = surface_height,
         .surface_id = window->compositor_surface,
     };
+    /* 39 is XA_WM_NAME (see include/X11/Xlib.h) -- a predefined X11 atom
+       both sides already agree on, not one interned at runtime, so no
+       lookup through the atoms[] table is needed here. xterm sets this via
+       XStoreName before XMapWindow (see apps/xterm/xterm.c), and
+       publish_window only ever runs once a window is actually mapped, so
+       the property is already stored by the time this reads it. Carried
+       one-way at window-creation time, not kept in sync with later
+       XStoreName calls -- no client here ever renames itself after
+       mapping, so that gap is real but currently unreachable. */
+    const struct demonx_property *name = find_property(window->id, 39u);
+    if (name != NULL && name->data_length > 0u) {
+        uint32_t copy_length = name->data_length;
+        if (copy_length > sizeof(message.payload)) copy_length = (uint32_t)sizeof(message.payload);
+        for (uint32_t index = 0u; index < copy_length; ++index)
+            message.payload[index] = name->data[index];
+        message.payload_length = copy_length;
+    }
     return syscall3(SYSCALL_CHANNEL_SEND, compositor_handle,
         (uint64_t)(uintptr_t)&message, sizeof(message)) == sizeof(message);
 }

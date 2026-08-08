@@ -168,6 +168,14 @@ struct Window {
     // composite() and every hit-test, so they're fully hidden and
     // unclickable rather than merely drawn behind everything else.
     workspace: u32,
+    // The client's real title, carried one-way in Create's payload field
+    // (see user/demonx_server.c's publish_window: DemonX reads whatever
+    // XStoreName set as XA_WM_NAME before the window was mapped and copies
+    // it in here) -- not kept in sync with any later rename, since nothing
+    // here renames itself after mapping. title_length == 0 means no title
+    // was set; callers fall back to a generic label in that case.
+    title: [u8; 24],
+    title_length: u8,
 }
 
 impl Window {
@@ -189,7 +197,25 @@ impl Window {
         restore_width: 0,
         restore_height: 0,
         workspace: 0,
+        title: [0; 24],
+        title_length: 0,
     };
+
+    // The client's title, uppercased (the compact font is uppercase-only,
+    // see glyph_rows) with an ASCII fallback for anything it can't draw,
+    // or "WINDOW" if none was set.
+    fn title_text(&self, out: &mut [u8; 24]) -> usize {
+        if self.title_length == 0 {
+            let fallback = b"WINDOW";
+            out[..fallback.len()].copy_from_slice(fallback);
+            return fallback.len();
+        }
+        let length = self.title_length as usize;
+        for i in 0..length {
+            out[i] = self.title[i].to_ascii_uppercase();
+        }
+        length
+    }
 }
 
 // A window's true visual footprint including its title bar strip, which
@@ -641,7 +667,9 @@ fn draw_decoration(frame: &mut [u32], window: &Window, focused: bool) {
         COLOR_TITLE_UNFOCUSED
     };
     fill_rounded_rect_top(frame, window.x as i32, top, window.width, TITLE_HEIGHT, CORNER_RADIUS, title_color);
-    draw_text(frame, window.x as i32 + 44, top + 8, b"DEMONOS", COLOR_TEXT);
+    let mut title_buffer = [0u8; 24];
+    let title_length = window.title_text(&mut title_buffer);
+    draw_text(frame, window.x as i32 + 44, top + 8, &title_buffer[..title_length], COLOR_TEXT);
 
     let control_y = top + TITLE_HEIGHT as i32 / 2;
     // macOS-style traffic lights: solid dots, dimmed (muted grey) when the
@@ -724,7 +752,9 @@ fn draw_taskbar(frame: &mut [u32], table: &[Window; WINDOW_LIMIT], workspace: u3
         let focused = window.id == focused_window;
         let item_color = if focused { COLOR_TITLE_FOCUSED } else { COLOR_TASKBAR_ITEM };
         fill_rounded_rect(frame, item_x, BOTTOM_BAR_Y + 6, TASKBAR_ITEM_WIDTH, BOTTOM_BAR_HEIGHT - 12, 8, item_color);
-        draw_text(frame, item_x + 10, BOTTOM_BAR_Y + 16, b"DEMONOS", COLOR_TEXT);
+        let mut title_buffer = [0u8; 24];
+        let title_length = window.title_text(&mut title_buffer);
+        draw_text(frame, item_x + 10, BOTTOM_BAR_Y + 16, &title_buffer[..title_length], COLOR_TEXT);
         item_x += TASKBAR_ITEM_WIDTH as i32 + TASKBAR_ITEM_GAP;
     }
 }
@@ -958,6 +988,8 @@ pub extern "C" fn rust_main() -> ! {
                                 restore_width: message.width,
                                 restore_height: message.height,
                                 workspace: current_workspace,
+                                title: message.payload,
+                                title_length: (message.payload_length as usize).min(message.payload.len()) as u8,
                             };
                             next_z += 1;
                             if message.surface_id != 0 {
