@@ -13,7 +13,9 @@
 #include <kernel/serial.h>
 #include <kernel/terminal.h>
 #include <kernel/userspace.h>
+#include <kernel/ahci.h>
 #include <demon/input.h>
+#include <demon/tui.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -66,6 +68,11 @@ static void line(const char *text) {
     serial_write(text);
     serial_write("\n");
     terminal_write_line(text);
+}
+
+static void makobox_tui_emit(void *context, const char *text) {
+    (void)context;
+    line(text);
 }
 
 static void value_line(const char *label, uint64_t value, const char *suffix) {
@@ -2686,6 +2693,7 @@ void makobox_shell(void) {
        boot lines and reads like a dmesg dump instead of a shell you just
        landed in. */
     terminal_write("\f");
+    tui_banner(makobox_tui_emit, NULL, 40u, "DEMONOS / MAKOBOX");
     line("");
     line("MakoBox interactive console ready. Type 'help'.");
     line("Terminal owns display and keyboard.");
@@ -2769,4 +2777,164 @@ void makobox_shell(void) {
             serial_write(echo);
         }
     }
+}
+
+/* Real destructive disk installer: writes a whole-disk boot image (a
+   RAMFS-embedded copy of another MAKO ISO -- see grub/grub-installer.cfg
+   and $(INSTALLER_ISO) in the Makefile) to the first AHCI disk, sector by
+   sector, via ahci_write_sectors. GRUB's own rescue images are BIOS-
+   hybrid-bootable (the same trick distros use for "dd this ISO to a USB
+   stick"), so a raw byte-for-byte copy of one onto a real disk is enough
+   to make that disk bootable -- no separate bootloader-installation step
+   is needed here. Only reachable via the "install" cmdline needle
+   (multiboot_install_mode in src/kernel.c); a plain boot never risks
+   touching a disk this way. */
+#define INSTALLER_CHUNK_BYTES 4096u
+#define INSTALLER_CHUNK_SECTORS (INSTALLER_CHUNK_BYTES / 512u)
+#define INSTALLER_BOX_WIDTH 50u
+
+static bool installer_read_line(char *buffer, size_t capacity) {
+    size_t length = 0u;
+    for (;;) {
+        char value;
+        if (!keyboard_read_char(&value)) { __asm__ volatile ("hlt"); continue; }
+        if (value == '\n') {
+            buffer[length] = '\0';
+            terminal_write_line("");
+            serial_write("\n");
+            return true;
+        }
+        if (value == '\b') {
+            if (length > 0u) {
+                --length;
+                buffer[length] = '\0';
+                terminal_backspace();
+                serial_write("\b \b");
+            }
+            continue;
+        }
+        if (length + 1u < capacity) {
+            buffer[length++] = value;
+            buffer[length] = '\0';
+            char echo[2] = { value, '\0' };
+            terminal_write(echo);
+            serial_write(echo);
+        }
+    }
+}
+
+/* Builds " <label><value><suffix>" into `out` for use as tui_box_line
+   content -- the installer's own equivalent of value_line, but as a
+   string instead of a direct serial/terminal write, so it can be wrapped
+   in a real "| ... |" box line instead of sitting between two bare
+   rules. */
+static void installer_format_summary(char *out, size_t capacity, const char *label,
+                                     uint64_t value, const char *suffix) {
+    size_t length = 0u;
+    if (length + 1u < capacity) out[length++] = ' ';
+    for (const char *c = label; *c != '\0' && length + 1u < capacity; ++c) out[length++] = *c;
+    char digits[20];
+    size_t digit_count = 0u;
+    if (value == 0u) digits[digit_count++] = '0';
+    while (value > 0u) { digits[digit_count++] = (char)('0' + (value % 10u)); value /= 10u; }
+    for (size_t i = digit_count; i > 0u && length + 1u < capacity; --i) out[length++] = digits[i - 1u];
+    for (const char *c = suffix; *c != '\0' && length + 1u < capacity; ++c) out[length++] = *c;
+    out[length] = '\0';
+}
+
+__attribute__((noreturn)) void makobox_installer_run(void) {
+    terminal_write("\f");
+    tui_banner(makobox_tui_emit, NULL, INSTALLER_BOX_WIDTH, "DEMONOS DISK INSTALLER");
+    line("");
+
+    if (!ahci_ready()) {
+        line("No SATA/AHCI disk detected -- nothing to install to.");
+        line("Falling back to the interactive console.");
+        line("");
+        makobox_shell();
+    }
+
+    const char *image_path = "/system/install/image.iso";
+    uint32_t image_id;
+    const uint8_t *image_data;
+    size_t image_length;
+    if (!ramfs_open(image_path, string_length(image_path), false, &image_id) ||
+        !ramfs_view(image_id, &image_data, &image_length) || image_length == 0u) {
+        line("No installable image found in this boot media.");
+        line("Boot kernel-installer.iso, not a plain MAKO image.");
+        line("Falling back to the interactive console.");
+        line("");
+        makobox_shell();
+    }
+
+    const uint64_t disk_sectors = ahci_sector_count();
+    const uint64_t disk_mib = (disk_sectors * 512u) / (1024u * 1024u);
+    const uint64_t image_sectors = ((uint64_t)image_length + 511u) / 512u;
+    const uint64_t image_mib = ((uint64_t)image_length + (1024u * 1024u - 1u)) / (1024u * 1024u);
+
+    if (image_sectors > disk_sectors) {
+        line("The install image is larger than the target disk. Aborting.");
+        line("");
+        makobox_shell();
+    }
+
+    char summary_line[INSTALLER_BOX_WIDTH];
+    installer_format_summary(summary_line, sizeof(summary_line), "Target disk:   ", disk_mib, " MiB");
+    tui_box_line(makobox_tui_emit, NULL, INSTALLER_BOX_WIDTH, summary_line);
+    installer_format_summary(summary_line, sizeof(summary_line), "Install image: ", image_mib, " MiB");
+    tui_box_line(makobox_tui_emit, NULL, INSTALLER_BOX_WIDTH, summary_line);
+    tui_box_edge(makobox_tui_emit, NULL, INSTALLER_BOX_WIDTH);
+    line("");
+    line("WARNING: this OVERWRITES THE ENTIRE TARGET DISK.");
+    line("Everything currently on it will be permanently lost.");
+    line("");
+    line("Type YES (uppercase) and press Enter to continue,");
+    line("or press Enter alone to cancel.");
+    terminal_write("install> ");
+    serial_write("install> ");
+    char confirm[16];
+    installer_read_line(confirm, sizeof(confirm));
+    if (!equal(confirm, "YES")) {
+        line("");
+        line("Install cancelled. Falling back to the interactive console.");
+        line("");
+        makobox_shell();
+    }
+
+    line("");
+    line("Writing image to disk...");
+    uint64_t lba = 0u;
+    size_t offset = 0u;
+    static uint8_t chunk_buffer[INSTALLER_CHUNK_BYTES];
+    unsigned last_reported_percent = 0xFFFFFFFFu;
+    while (offset < image_length) {
+        const size_t remaining = image_length - offset;
+        const bool full_chunk = remaining >= INSTALLER_CHUNK_BYTES;
+        const uint8_t *chunk_ptr;
+        if (full_chunk) {
+            chunk_ptr = image_data + offset;
+        } else {
+            for (size_t i = 0u; i < remaining; ++i) chunk_buffer[i] = image_data[offset + i];
+            for (size_t i = remaining; i < INSTALLER_CHUNK_BYTES; ++i) chunk_buffer[i] = 0u;
+            chunk_ptr = chunk_buffer;
+        }
+        if (!ahci_write_sectors(lba, INSTALLER_CHUNK_SECTORS, chunk_ptr)) {
+            line("");
+            line("DISK WRITE FAILED. The target disk may be left in a broken state.");
+            for (;;) __asm__ volatile ("cli; hlt");
+        }
+        lba += INSTALLER_CHUNK_SECTORS;
+        offset += full_chunk ? INSTALLER_CHUNK_BYTES : remaining;
+        const unsigned percent = (unsigned)((uint64_t)offset * 100u / (uint64_t)image_length);
+        if (percent != last_reported_percent && percent % 5u == 0u) {
+            tui_progress_bar(makobox_tui_emit, NULL, INSTALLER_BOX_WIDTH, percent, "installing");
+            last_reported_percent = percent;
+        }
+    }
+    tui_progress_bar(makobox_tui_emit, NULL, INSTALLER_BOX_WIDTH, 100u, "installing");
+    line("");
+    tui_banner(makobox_tui_emit, NULL, INSTALLER_BOX_WIDTH, "INSTALL COMPLETE");
+    line("Remove the installation media and restart your computer");
+    line("to boot DemonOS from disk.");
+    for (;;) __asm__ volatile ("cli; hlt");
 }

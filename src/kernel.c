@@ -461,6 +461,15 @@ static bool multiboot_desktop_mode(uintptr_t info_address) {
     return multiboot_cmdline_has(info_address, "desktop");
 }
 
+/* Same pattern again: the destructive disk installer (src/makobox.c's
+   makobox_installer_run, which overwrites the first AHCI disk) only ever
+   runs when explicitly requested via this cmdline needle
+   (grub-installer.cfg) -- never merely because an install image happens
+   to be present in RAMFS. */
+static bool multiboot_install_mode(uintptr_t info_address) {
+    return multiboot_cmdline_has(info_address, "install");
+}
+
 
 static uint64_t report_multiboot(uintptr_t info_address, uintptr_t allocation_floor) {
     const struct multiboot2_info *info = (const struct multiboot2_info *)info_address;
@@ -1514,5 +1523,8 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     framebuffer_cursor_hide();
     terminal_graphical_enable();
     boot_welcome();
+    if (multiboot_install_mode(multiboot_info)) {
+        makobox_installer_run();
+    }
     makobox_shell();
 }

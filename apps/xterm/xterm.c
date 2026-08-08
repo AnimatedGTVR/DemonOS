@@ -18,6 +18,7 @@
 #include <demon/demonx.h>
 #include <demon/input.h>
 #include <demon/shell_commands.h>
+#include <demon/tui.h>
 #include <stdint.h>
 
 /* DemonX-specific extension (see lib/demonx/xlib.c's own comment) -- not
@@ -379,7 +380,8 @@ static void terminal_execute(void) {
         scrollback_count = 0u;
         scrollback_start = 0u;
     } else if (command_matches(command, "about")) {
-        append_scrollback("MAKO xterm 1.0 -- DemonX X11 wire client");
+        tui_banner(xterm_shell_emit, NULL, 40u, "MAKO xterm 1.0");
+        append_scrollback("DemonX X11 wire client");
         append_scrollback("kernel: MAKO microkernel, 640x480 ARGB desktop");
     } else if (command_matches(command, "exit")) {
         append_scrollback("(window stays; kill the process to close)");

@@ -19,5 +19,6 @@ void makobox_init(const struct makobox_state *state);
 bool makobox_run(const char *command_line);
 bool makobox_self_test(void);
 __attribute__((noreturn)) void makobox_shell(void);
+__attribute__((noreturn)) void makobox_installer_run(void);
 
 #endif

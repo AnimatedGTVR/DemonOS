@@ -108,7 +108,7 @@ LDFLAGS := -nostdlib --gc-sections -z max-page-size=0x1000 -T linker.ld
 USER_LDFLAGS := -nostdlib -z max-page-size=0x10 -T user/linker.ld
 
 OBJECTS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/serial.o $(BUILD)/terminal.o \
-	$(BUILD)/interrupt_stubs.o $(BUILD)/interrupts.o $(BUILD)/pci.o $(BUILD)/input.o $(BUILD)/graphics.o $(BUILD)/mouse_argb.o $(BUILD)/wallpaper_argb.o $(BUILD)/cursor_icons_argb.o $(BUILD)/ui_icons_argb.o $(BUILD)/start_logo_argb.o $(BUILD)/shell_icons_argb.o $(BUILD)/assets.o $(BUILD)/framebuffer.o $(BUILD)/makobox.o $(BUILD)/kernel_probe.o
+	$(BUILD)/interrupt_stubs.o $(BUILD)/interrupts.o $(BUILD)/pci.o $(BUILD)/input.o $(BUILD)/graphics.o $(BUILD)/mouse_argb.o $(BUILD)/wallpaper_argb.o $(BUILD)/cursor_icons_argb.o $(BUILD)/ui_icons_argb.o $(BUILD)/start_logo_argb.o $(BUILD)/shell_icons_argb.o $(BUILD)/assets.o $(BUILD)/framebuffer.o $(BUILD)/makobox.o $(BUILD)/tui.o $(BUILD)/kernel_probe.o
 
 OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/capability.o \
@@ -119,7 +119,7 @@ OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/kernel_slot_table_test.o \
 	$(BUILD)/user_program_blob.o
 
-.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-cave-story run-quake run-wayland run-sdl run-vnc desktop-iso run-desktop smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
+.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-cave-story run-quake run-wayland run-sdl run-vnc desktop-iso run-desktop installer-iso run-installer smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
 
 QUAKE_SOURCE := $(BUILD)/quake-upstream
 QUAKE_COMMIT := bf4ac424ce754894ac8f1dae6a3981954bc9852d
@@ -1723,10 +1723,13 @@ $(BUILD)/assets.o: src/assets.c include/demon/assets.h $(BUILD)/mouse_argb.o $(B
 $(BUILD)/framebuffer.o: src/framebuffer.c include/demon/assets.h include/demon/graphics.h include/kernel/framebuffer.h include/kernel/multiboot2.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/makobox.o: src/makobox.c include/kernel/makobox.h include/kernel/apps.h include/kernel/capability.h include/kernel/framebuffer.h include/kernel/git.h include/kernel/init.h include/kernel/interrupts.h include/kernel/ipc.h include/kernel/runas.h include/kernel/ramfs.h include/kernel/scheduler.h include/kernel/serial.h include/kernel/terminal.h include/kernel/userspace.h | $(BUILD)
+$(BUILD)/makobox.o: src/makobox.c include/kernel/makobox.h include/kernel/apps.h include/kernel/capability.h include/kernel/framebuffer.h include/kernel/git.h include/kernel/init.h include/kernel/interrupts.h include/kernel/ipc.h include/kernel/runas.h include/kernel/ramfs.h include/kernel/scheduler.h include/kernel/serial.h include/kernel/terminal.h include/kernel/userspace.h include/demon/tui.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/shell_commands.o: shared/shell_commands.c include/demon/shell_commands.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/tui.o: shared/tui.c include/demon/tui.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/scheduler.o: src/scheduler.c include/kernel/scheduler.h include/kernel/interrupt_frame.h include/kernel/userspace.h include/kernel/ipc.h include/demon/input.h | $(BUILD)
@@ -1870,12 +1873,12 @@ $(DEMONWM_ELF): $(BUILD)/demonwm_entry.o $(BUILD)/demonwm.o $(BUILD)/demonx_xlib
 $(BUILD)/xterm_entry.o: apps/xterm/entry.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
-$(BUILD)/xterm.o: apps/xterm/xterm.c include/X11/Xlib.h include/demon/c_app.h include/demon/demonx.h include/demon/shell_commands.h | $(BUILD)
+$(BUILD)/xterm.o: apps/xterm/xterm.c include/X11/Xlib.h include/demon/c_app.h include/demon/demonx.h include/demon/shell_commands.h include/demon/tui.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(XTERM_ELF): $(BUILD)/xterm_entry.o $(BUILD)/xterm.o $(BUILD)/demonx_xlib.o $(BUILD)/shell_commands.o user/linker.ld
+$(XTERM_ELF): $(BUILD)/xterm_entry.o $(BUILD)/xterm.o $(BUILD)/demonx_xlib.o $(BUILD)/shell_commands.o $(BUILD)/tui.o user/linker.ld
 	$(LD) $(USER_LDFLAGS) $(BUILD)/xterm_entry.o \
-		$(BUILD)/xterm.o $(BUILD)/demonx_xlib.o $(BUILD)/shell_commands.o -o $@
+		$(BUILD)/xterm.o $(BUILD)/demonx_xlib.o $(BUILD)/shell_commands.o $(BUILD)/tui.o -o $@
 	$(STRIP) -s $@
 
 $(BUILD)/portkit_entry.o: apps/portcheck/entry.S | $(BUILD)
@@ -2153,6 +2156,34 @@ run-desktop: $(DESKTOP_ISO)
 		-usb -device usb-tablet \
 		-display gtk,grab-on-hover=on,zoom-to-fit=on \
 		-no-reboot -no-shutdown
+
+# Real disk installer image: embeds a byte-for-byte copy of $(RUN_ISO)
+# as a RAMFS asset (/system/install/image.iso) and boots straight into
+# makobox_installer_run (src/makobox.c) via the "install" cmdline needle
+# (grub-installer.cfg / multiboot_install_mode in src/kernel.c) instead
+# of the normal console. That installer writes the embedded copy raw to
+# the first AHCI disk it finds -- destructive, real, and only reachable
+# from this specific ISO.
+INSTALLER_ISO := $(BUILD)/kernel-installer.iso
+
+installer-iso: $(INSTALLER_ISO)
+
+$(INSTALLER_ISO): $(RUN_ISO) grub/grub-installer.cfg
+	rm -rf $(BUILD)/iso-installer
+	cp -r $(BUILD)/iso-run $(BUILD)/iso-installer
+	cp $(RUN_ISO) $(BUILD)/iso-installer/boot/mako/install-image.iso
+	cp grub/grub-installer.cfg $(BUILD)/iso-installer/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(BUILD)/iso-installer >/dev/null 2>&1
+
+run-installer: $(INSTALLER_ISO)
+	@echo "This boots the REAL disk installer. It will offer to overwrite"
+	@echo "whatever disk QEMU attaches as the primary AHCI drive -- pass"
+	@echo "your own -drive to point it at a throwaway image, e.g.:"
+	@echo "  qemu-img create -f qcow2 build/installer-target.qcow2 512M"
+	@echo "  qemu-system-x86_64 -cdrom $(INSTALLER_ISO) -m 256M -serial stdio \\"
+	@echo "    -drive file=build/installer-target.qcow2,if=none,id=disk0 \\"
+	@echo "    -device ahci,id=ahci0 -device ide-hd,drive=disk0,bus=ahci0.0 \\"
+	@echo "    -no-reboot -no-shutdown"
 
 iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/kernel.elf -type f 2>/dev/null | grep -q kernel.elf
