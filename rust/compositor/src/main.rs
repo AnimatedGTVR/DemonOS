@@ -66,13 +66,24 @@ const RESIZE_GRIP: u32 = 10;
 const MIN_WINDOW_WIDTH: u32 = 96;
 const MIN_WINDOW_HEIGHT: u32 = 64;
 const RESERVED_TOP: u32 = 34; // kMargin(6) + kPanelHeight(28), matching demonwm's own panel band
-const COLOR_TITLE_FOCUSED: u32 = 0xff8b6bff;
-const COLOR_TITLE_UNFOCUSED: u32 = 0xff262b33;
+const COLOR_TITLE_FOCUSED: u32 = 0xff6c4fe0;
+const COLOR_TITLE_UNFOCUSED: u32 = 0xff2a2e37;
 const COLOR_TEXT: u32 = 0xfff1f3f5;
 const COLOR_TEXT_MUTED: u32 = 0xff9ba3af;
 const COLOR_EMBER: u32 = 0xffff5c42;
 const COLOR_VIOLET: u32 = 0xff8b6bff;
 const COLOR_PANEL_BG: u32 = 0xff1a1d24;
+// macOS-style traffic-light controls: red = close, green = maximize/
+// restore. No decorative third circle -- every button drawn actually
+// does something when clicked (see title_control_at), unlike a plain
+// unwired "minimize" dot would.
+const COLOR_CONTROL_CLOSE: u32 = 0xffff5f57;
+const COLOR_CONTROL_MAXIMIZE: u32 = 0xff28c840;
+const CORNER_RADIUS: i32 = 8;
+// Chrome surfaces (panel, launcher) blend into the wallpaper instead of a
+// flat opaque fill -- a soft frosted-glass read instead of a solid card
+// stacked on top of the desktop.
+const PANEL_BLEND_ALPHA: u8 = 235;
 
 // Panel geometry, ported from demonwm's kMargin/kPanelHeight/
 // kLauncherBtnX0/X1 -- drawn as a pure compositor overlay (never a window
@@ -167,24 +178,34 @@ fn decoration_top(window: &Window) -> u32 {
     window.y.saturating_sub(TITLE_HEIGHT)
 }
 
-fn maximize_control_x(window: &Window) -> u32 {
-    window.width - 8 - 2 * CONTROL_SIZE - CONTROL_GAP
+// Traffic-light layout, macOS convention: close then maximize, left to
+// right, near the title bar's left edge. Both return the dot's CENTER x
+// offset from window.x, not a top-left corner -- these are circles, not
+// squares. (_window is unused for now: both positions are fixed offsets
+// regardless of window width, kept as a parameter in case a future control
+// needs width-relative placement the way the old right-aligned layout did.)
+fn close_control_x(_window: &Window) -> i32 {
+    16
 }
 
-fn close_control_x(window: &Window) -> u32 {
-    window.width - 8 - CONTROL_SIZE
+fn maximize_control_x(_window: &Window) -> i32 {
+    16 + CONTROL_GAP as i32 + CONTROL_SIZE as i32
 }
 
 // 1 = hit the maximize control, 2 = hit the close control, 0 = neither
-// (just an ordinary drag-start point in the title bar).
+// (just an ordinary drag-start point in the title bar). Hit region is a
+// square CONTROL_SIZE across, centered on each dot -- generous compared to
+// the visible circle radius, matching how real traffic lights have a
+// bigger click target than their drawn size.
 fn title_control_at(window: &Window, local_x: u32) -> u32 {
-    let max_x = maximize_control_x(window);
-    if local_x >= max_x && local_x < max_x + CONTROL_SIZE {
-        return 1;
-    }
+    let half = CONTROL_SIZE as i32 / 2;
     let close_x = close_control_x(window);
-    if local_x >= close_x && local_x < close_x + CONTROL_SIZE {
+    if (local_x as i32 - close_x).abs() <= half {
         return 2;
+    }
+    let max_x = maximize_control_x(window);
+    if (local_x as i32 - max_x).abs() <= half {
+        return 1;
     }
     0
 }
@@ -239,8 +260,9 @@ fn in_launcher_cell(x: i32, y: i32) -> bool {
 }
 
 fn draw_launcher(frame: &mut [u32]) {
-    fill_rect(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT, 0xff20242c);
-    fill_rect(frame, LAUNCHER_X + 8, LAUNCHER_Y + 8, 20, 20, COLOR_VIOLET);
+    draw_shadow(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT);
+    blend_rounded_rect(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT, CORNER_RADIUS, 0xff20242c, PANEL_BLEND_ALPHA);
+    fill_rounded_rect(frame, LAUNCHER_X + 8, LAUNCHER_Y + 8, 20, 20, 5, COLOR_VIOLET);
     draw_text(frame, LAUNCHER_X + 8, LAUNCHER_Y + 36, b"TERMINAL", COLOR_TEXT);
 }
 
@@ -409,6 +431,146 @@ fn fill_rect(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32, color: 
     }
 }
 
+// Alpha-blends `color`'s RGB into whatever is already at (x, y), weighted
+// by `alpha` (0..=255). Used for the drop shadow -- a hard-edged shadow
+// rect would just look like a second, darker rectangle; blending against
+// the real pixels underneath (wallpaper or another window) is what
+// actually reads as elevation/depth rather than decoration.
+fn blend_pixel(frame: &mut [u32], x: i32, y: i32, color: u32, alpha: u8) {
+    if x < 0 || y < 0 || x >= SCREEN_WIDTH as i32 || y >= SCREEN_HEIGHT as i32 {
+        return;
+    }
+    let index = y as usize * SCREEN_WIDTH as usize + x as usize;
+    let dst = frame[index];
+    let a = alpha as u32;
+    let inv = 255 - a;
+    let blend_channel = |shift: u32| -> u32 {
+        let src_channel = (color >> shift) & 0xff;
+        let dst_channel = (dst >> shift) & 0xff;
+        ((src_channel * a + dst_channel * inv) / 255) & 0xff
+    };
+    frame[index] = 0xff000000
+        | (blend_channel(16) << 16)
+        | (blend_channel(8) << 8)
+        | blend_channel(0);
+}
+
+// A soft rectangular shadow: rather than a hard-edged alpha rect (which
+// just reads as a second, flat-gray rectangle), alpha fades linearly over
+// SHADOW_FEATHER pixels at each edge, so it actually reads as something
+// glowing/receding behind the window rather than another decoration.
+const SHADOW_FEATHER: i32 = 8;
+fn draw_shadow(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32) {
+    let x0 = x - SHADOW_FEATHER;
+    let y0 = y - SHADOW_FEATHER;
+    let x1 = x + width as i32 + SHADOW_FEATHER;
+    let y1 = y + height as i32 + SHADOW_FEATHER;
+    for row in y0..y1 {
+        let fade_y = ((row - y0).min(y1 - 1 - row) + 1).clamp(0, SHADOW_FEATHER);
+        for col in x0..x1 {
+            let fade_x = ((col - x0).min(x1 - 1 - col) + 1).clamp(0, SHADOW_FEATHER);
+            let fade = fade_x.min(fade_y);
+            let alpha = (fade * 70 / SHADOW_FEATHER) as u8;
+            if alpha > 0 {
+                blend_pixel(frame, col, row, 0xff000000, alpha);
+            }
+        }
+    }
+}
+
+fn fill_circle(frame: &mut [u32], center_x: i32, center_y: i32, radius: i32, color: u32) {
+    for row in -radius..=radius {
+        for col in -radius..=radius {
+            if col * col + row * row <= radius * radius {
+                put_pixel(frame, center_x + col, center_y + row, color);
+            }
+        }
+    }
+}
+
+// A filled rect with its four corners cut to a quarter-circle radius --
+// every compositor-drawn chrome surface (panel, launcher, title bar) uses
+// this instead of a hard-cornered fill_rect for a softer, more deliberate
+// look than plain rectangles.
+fn fill_rounded_rect(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32, radius: i32, color: u32) {
+    let w = width as i32;
+    let h = height as i32;
+    for row in 0..h {
+        for col in 0..w {
+            let corner_x = if col < radius {
+                radius - col
+            } else if col >= w - radius {
+                col - (w - radius - 1)
+            } else {
+                0
+            };
+            let corner_y = if row < radius {
+                radius - row
+            } else if row >= h - radius {
+                row - (h - radius - 1)
+            } else {
+                0
+            };
+            if corner_x > 0 && corner_y > 0 && corner_x * corner_x + corner_y * corner_y > radius * radius {
+                continue;
+            }
+            put_pixel(frame, x + col, y + row, color);
+        }
+    }
+}
+
+// Same corner mask as fill_rounded_rect, but only the TOP two corners --
+// for the title bar strip, which sits directly above a window's square-
+// cornered content with no gap, so only its own top edge should round.
+fn fill_rounded_rect_top(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32, radius: i32, color: u32) {
+    let w = width as i32;
+    for row in 0..height as i32 {
+        for col in 0..w {
+            let corner_x = if col < radius {
+                radius - col
+            } else if col >= w - radius {
+                col - (w - radius - 1)
+            } else {
+                0
+            };
+            let corner_y = if row < radius { radius - row } else { 0 };
+            if corner_x > 0 && corner_y > 0 && corner_x * corner_x + corner_y * corner_y > radius * radius {
+                continue;
+            }
+            put_pixel(frame, x + col, y + row, color);
+        }
+    }
+}
+
+// Same corner mask as fill_rounded_rect, blended instead of opaque -- the
+// frosted-glass look for panel/launcher chrome (see PANEL_BLEND_ALPHA).
+fn blend_rounded_rect(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32, radius: i32, color: u32, alpha: u8) {
+    let w = width as i32;
+    let h = height as i32;
+    for row in 0..h {
+        for col in 0..w {
+            let corner_x = if col < radius {
+                radius - col
+            } else if col >= w - radius {
+                col - (w - radius - 1)
+            } else {
+                0
+            };
+            let corner_y = if row < radius {
+                radius - row
+            } else if row >= h - radius {
+                row - (h - radius - 1)
+            } else {
+                0
+            };
+            if corner_x > 0 && corner_y > 0 && corner_x * corner_x + corner_y * corner_y > radius * radius {
+                continue;
+            }
+            blend_pixel(frame, x + col, y + row, color, alpha);
+        }
+    }
+}
+
 fn draw_text(frame: &mut [u32], x: i32, y: i32, text: &[u8], color: u32) {
     let mut cursor = x;
     for &character in text {
@@ -428,6 +590,8 @@ fn draw_text(frame: &mut [u32], x: i32, y: i32, text: &[u8], color: u32) {
 // controls, ported from Desktop/demonwm/demonwm.cc's drawFrame -- drawn as
 // a compositor-level overlay above the window's own content rather than a
 // second reparented frame window (see this file's own decoration comment).
+const CONTROL_DOT_RADIUS: i32 = 6;
+
 fn draw_decoration(frame: &mut [u32], window: &Window, focused: bool) {
     let top = decoration_top(window) as i32;
     let title_color = if focused {
@@ -435,24 +599,17 @@ fn draw_decoration(frame: &mut [u32], window: &Window, focused: bool) {
     } else {
         COLOR_TITLE_UNFOCUSED
     };
-    fill_rect(frame, window.x as i32, top, window.width, TITLE_HEIGHT, title_color);
-    draw_text(frame, window.x as i32 + 6, top + 8, b"DEMONOS", COLOR_TEXT);
+    fill_rounded_rect_top(frame, window.x as i32, top, window.width, TITLE_HEIGHT, CORNER_RADIUS, title_color);
+    draw_text(frame, window.x as i32 + 44, top + 8, b"DEMONOS", COLOR_TEXT);
 
-    let control_y = top + (TITLE_HEIGHT as i32 - CONTROL_SIZE as i32) / 2;
-    let max_x = window.x as i32 + maximize_control_x(window) as i32;
-    // Maximize/restore: an outlined square (just the four edges).
-    fill_rect(frame, max_x, control_y, CONTROL_SIZE, 1, COLOR_TEXT_MUTED);
-    fill_rect(frame, max_x, control_y + CONTROL_SIZE as i32 - 1, CONTROL_SIZE, 1, COLOR_TEXT_MUTED);
-    fill_rect(frame, max_x, control_y, 1, CONTROL_SIZE, COLOR_TEXT_MUTED);
-    fill_rect(frame, max_x + CONTROL_SIZE as i32 - 1, control_y, 1, CONTROL_SIZE, COLOR_TEXT_MUTED);
-
-    let close_x = window.x as i32 + close_control_x(window) as i32;
-    fill_rect(frame, close_x, control_y, CONTROL_SIZE, CONTROL_SIZE, COLOR_EMBER);
-    // X mark: two diagonals, drawn as single pixels (no line primitive yet).
-    for i in 0..CONTROL_SIZE as i32 {
-        put_pixel(frame, close_x + i, control_y + i, COLOR_TEXT);
-        put_pixel(frame, close_x + CONTROL_SIZE as i32 - 1 - i, control_y + i, COLOR_TEXT);
-    }
+    let control_y = top + TITLE_HEIGHT as i32 / 2;
+    // macOS-style traffic lights: solid dots, dimmed (muted grey) when the
+    // window isn't focused, matching how real title bar controls fade on
+    // an inactive window instead of staying fully saturated.
+    let close_color = if focused { COLOR_CONTROL_CLOSE } else { COLOR_TEXT_MUTED };
+    let maximize_color = if focused { COLOR_CONTROL_MAXIMIZE } else { COLOR_TEXT_MUTED };
+    fill_circle(frame, window.x as i32 + close_control_x(window), control_y, CONTROL_DOT_RADIUS, close_color);
+    fill_circle(frame, window.x as i32 + maximize_control_x(window), control_y, CONTROL_DOT_RADIUS, maximize_color);
 }
 
 fn push_digit(buffer: &mut [u8; 5], index: &mut usize, value: u32) {
@@ -466,15 +623,17 @@ fn push_digit(buffer: &mut [u8; 5], index: &mut usize, value: u32) {
 // drawn as a pure overlay with no window-table entry of its own.
 fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
     let width = SCREEN_WIDTH as i32 - 2 * PANEL_MARGIN;
-    fill_rect(frame, PANEL_MARGIN, PANEL_MARGIN, width as u32, PANEL_HEIGHT, COLOR_PANEL_BG);
+    draw_shadow(frame, PANEL_MARGIN, PANEL_MARGIN, width as u32, PANEL_HEIGHT);
+    blend_rounded_rect(frame, PANEL_MARGIN, PANEL_MARGIN, width as u32, PANEL_HEIGHT, CORNER_RADIUS, COLOR_PANEL_BG, PANEL_BLEND_ALPHA);
 
     let launcher_color = if launcher_open { COLOR_VIOLET } else { COLOR_EMBER };
-    fill_rect(
+    fill_rounded_rect(
         frame,
         LAUNCHER_BTN_X0,
         PANEL_MARGIN + 4,
         (LAUNCHER_BTN_X1 - LAUNCHER_BTN_X0) as u32,
         PANEL_HEIGHT - 8,
+        6,
         launcher_color,
     );
     draw_text(frame, LAUNCHER_BTN_X0 + 8, PANEL_MARGIN + 10, b"DEMONOS", COLOR_TEXT);
@@ -483,7 +642,7 @@ fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
     let dots_x = PANEL_MARGIN + width / 2 - 30;
     for dot in 0..WORKSPACE_COUNT {
         let color = if dot == current_workspace { COLOR_EMBER } else { COLOR_TEXT_MUTED };
-        fill_rect(frame, dots_x + dot as i32 * 10, PANEL_MARGIN + 12, 6, 6, color);
+        fill_circle(frame, dots_x + dot as i32 * 10 + 3, PANEL_MARGIN + 15, 3, color);
     }
 
     // Clock, centered: real wall-clock time from CMOS/RTC, not uptime.
@@ -502,8 +661,8 @@ fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
 
     // Tray placeholders, right-aligned.
     for slot in 0..3 {
-        let tray_x = PANEL_MARGIN + width - 12 - slot * 22 - 14;
-        fill_rect(frame, tray_x, PANEL_MARGIN + 8, 14, 14, COLOR_TEXT_MUTED);
+        let tray_x = PANEL_MARGIN + width - 12 - slot * 22 - 7;
+        fill_circle(frame, tray_x, PANEL_MARGIN + 15, 6, COLOR_TEXT_MUTED);
     }
 }
 
@@ -545,6 +704,9 @@ fn composite(
         let window = table[index];
         if !window.in_use || window.workspace != current_workspace {
             continue;
+        }
+        if window.id >= DEMONX_WINDOW_ID_BASE {
+            draw_shadow(frame, window.x as i32, decoration_top(&window) as i32, window.width, window.height + TITLE_HEIGHT);
         }
         if window.mapped_address != 0 {
             // Blit at most the surface's own real dimensions -- resize only
