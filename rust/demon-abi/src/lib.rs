@@ -120,6 +120,19 @@ pub fn real_time_of_day() -> u64 {
 pub fn anonymous_map(byte_count: u64) -> u64 {
     unsafe { syscall1(40, byte_count) }
 }
+// Spawns a foreground app that takes exclusive DISPLAY/SURFACE ownership
+// (a full-screen game like Doom/Quake/ClassiCube, not an ordinary
+// compositor-windowed client) and BLOCKS the caller until it exits,
+// returning its exit status (or UINT64_MAX if it couldn't be spawned).
+// See syscall 50's own comment in src/arch/x86_64/userspace.c for why
+// this exists as its own syscall rather than reusing spawn+wait: it also
+// cancels the caller's own pending IPC/input waits first, the same way
+// src/makobox.c's launch_app does before handing the screen to a
+// foreground app, so events meant for the game don't wake the caller
+// (the compositor, here) instead.
+pub fn launch_foreground(path: &[u8], capabilities: u64) -> u64 {
+    unsafe { syscall3(50, path.as_ptr() as u64, path.len() as u64, capabilities) }
+}
 // Full screen resolution -- the wallpaper file at /system/wallpaper.argb
 // (see grub-desktop.cfg's own module2 line) is shipped at this exact size,
 // not the quarter-resolution copy linked into the kernel binary for its

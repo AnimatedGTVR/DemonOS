@@ -117,24 +117,42 @@ const TASKBAR_ITEM_WIDTH: u32 = 120;
 const TASKBAR_ITEM_GAP: i32 = 8;
 
 // The launcher popover, opened by clicking the panel's DEMONOS button.
-// Deliberately a single entry, not demonwm's full app grid: every other
-// "app" in this build (Doom, Quake, ClassiCube, NXEngine) takes exclusive
-// raw display ownership instead of rendering into a compositor window
-// (see their CAPABILITY_SERVICE_DISPLAY grants in src/makobox.c's
-// launch_app), so they cannot coexist with the desktop session as a
-// windowed launcher entry the way DemonWM's grid pretended they could.
-// xterm is the only real windowed client that exists today, so it's the
-// only candidate entry -- but it isn't wired to actually spawn one (see
-// the click handler's own comment): a second instance of an
-// already-running process was proven to crash the whole compositor via a
-// real, separate kernel IPC/input wait-state bug, not anything in this
-// file. The cell exists and closes the launcher on click so the UI reads
-// as real rather than decorative, without shipping the one known-unsafe
-// action available today.
+// Two entries:
+//
+// - Terminal: xterm is the only real windowed compositor client that
+//   exists today, but this cell isn't wired to actually spawn a second
+//   one (see the click handler's own comment) -- that was tried and
+//   reproducibly crashed the whole compositor via a real, separate kernel
+//   IPC/input wait-state bug, not anything in this file. The cell exists
+//   and closes the launcher on click so the UI reads as real rather than
+//   decorative, without shipping the one known-unsafe action available
+//   for it today.
+// - ClassiCube: a real, working app, but a fundamentally different kind
+//   from xterm -- it takes exclusive DISPLAY/SURFACE ownership and draws
+//   directly to the screen instead of rendering into a compositor window
+//   (see its CAPABILITY_SERVICE_DISPLAY grant in src/makobox.c's
+//   launch_app). Launching it uses demon_abi::launch_foreground (syscall
+//   50), which blocks this whole compositor process until it exits --
+//   see that syscall's own comment in src/arch/x86_64/userspace.c for why
+//   a new syscall was needed rather than reusing plain spawn+wait.
 const LAUNCHER_X: i32 = PANEL_MARGIN;
 const LAUNCHER_Y: i32 = PANEL_MARGIN + PANEL_HEIGHT as i32 + 8;
-const LAUNCHER_WIDTH: u32 = 160;
-const LAUNCHER_HEIGHT: u32 = 60;
+const LAUNCHER_WIDTH: u32 = 170;
+const LAUNCHER_CELL_HEIGHT: i32 = 50;
+const LAUNCHER_CELL_GAP: i32 = 6;
+const LAUNCHER_CELL_COUNT: i32 = 3;
+const LAUNCHER_HEIGHT: u32 =
+    (LAUNCHER_CELL_HEIGHT * LAUNCHER_CELL_COUNT + LAUNCHER_CELL_GAP * (LAUNCHER_CELL_COUNT + 1)) as u32;
+// CONSOLE | PROCESS | INPUT | STORAGE | DISPLAY | SURFACE -- the exact
+// same capability set src/makobox.c's launch_app grants
+// /system/bin/classicube-core.elf.
+const CLASSICUBE_SERVICE_MASK: u64 =
+    (1 << 1) | (1 << 3) | (1 << 8) | (1 << 4) | (1 << 7) | (1 << 9);
+// Same base plus AUDIO -- the exact set launch_app grants
+// /system/bin/doom-full.elf, the one real sustained-play build (unlike
+// classicube-core.elf, currently only a self-test/demo milestone that
+// loads a world and exits quickly).
+const DOOM_SERVICE_MASK: u64 = CLASSICUBE_SERVICE_MASK | (1 << 11);
 
 #[derive(Clone, Copy)]
 struct Window {
@@ -321,16 +339,38 @@ fn in_launcher_button(x: i32, y: i32) -> bool {
     x >= LAUNCHER_BTN_X0 && x < LAUNCHER_BTN_X1 && y >= PANEL_MARGIN && y < PANEL_MARGIN + PANEL_HEIGHT as i32
 }
 
-fn in_launcher_cell(x: i32, y: i32) -> bool {
-    x >= LAUNCHER_X && x < LAUNCHER_X + LAUNCHER_WIDTH as i32 &&
-    y >= LAUNCHER_Y && y < LAUNCHER_Y + LAUNCHER_HEIGHT as i32
+fn launcher_cell_y(index: i32) -> i32 {
+    LAUNCHER_Y + LAUNCHER_CELL_GAP + index * (LAUNCHER_CELL_HEIGHT + LAUNCHER_CELL_GAP)
+}
+
+// Returns which cell (0 = Terminal, 1 = ClassiCube) a launcher click
+// landed on, or None if it missed both (still inside the popover, or
+// outside it entirely -- either way, not an app entry).
+fn launcher_cell_at(x: i32, y: i32) -> Option<i32> {
+    if x < LAUNCHER_X || x >= LAUNCHER_X + LAUNCHER_WIDTH as i32 {
+        return None;
+    }
+    for index in 0..LAUNCHER_CELL_COUNT {
+        let cell_y = launcher_cell_y(index);
+        if y >= cell_y && y < cell_y + LAUNCHER_CELL_HEIGHT {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn draw_launcher_cell(frame: &mut [u32], index: i32, icon_color: u32, label: &[u8]) {
+    let cell_y = launcher_cell_y(index);
+    fill_rounded_rect(frame, LAUNCHER_X + 8, cell_y + (LAUNCHER_CELL_HEIGHT - 20) / 2, 20, 20, 5, icon_color);
+    draw_text(frame, LAUNCHER_X + 36, cell_y + (LAUNCHER_CELL_HEIGHT - 5) / 2, label, COLOR_TEXT);
 }
 
 fn draw_launcher(frame: &mut [u32]) {
     draw_shadow(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT);
     blend_rounded_rect(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT, CORNER_RADIUS, 0xff20242c, PANEL_BLEND_ALPHA);
-    fill_rounded_rect(frame, LAUNCHER_X + 8, LAUNCHER_Y + 8, 20, 20, 5, COLOR_VIOLET);
-    draw_text(frame, LAUNCHER_X + 8, LAUNCHER_Y + 36, b"TERMINAL", COLOR_TEXT);
+    draw_launcher_cell(frame, 0, COLOR_VIOLET, b"TERMINAL");
+    draw_launcher_cell(frame, 1, COLOR_CONTROL_MAXIMIZE, b"CLASSICUBE");
+    draw_launcher_cell(frame, 2, COLOR_CONTROL_CLOSE, b"DOOM");
 }
 
 fn find_free_slot(table: &[Window; WINDOW_LIMIT]) -> Option<usize> {
@@ -1112,28 +1152,48 @@ pub extern "C" fn rust_main() -> ! {
                     if in_launcher_button(cursor_x as i32, cursor_y as i32) {
                         launcher_open = !launcher_open;
                         repaint = true;
-                    } else if launcher_open && in_launcher_cell(cursor_x as i32, cursor_y as i32) {
-                        // Deliberately NOT wired to demon_abi::spawn yet: spawning
-                        // a second xterm.elf while one is already running was
-                        // tested and reproducibly took the whole compositor down
-                        // (compositor_wait itself started returning an
-                        // unrecognized value, hitting RUST_COMPOSITOR_FAIL and a
-                        // clean exit -- not a panic in this file's own code).
-                        // Isolated by removing the spawn call and repeating the
-                        // exact same click sequence, which then reproduced
-                        // cleanly with no failure at all, so the trigger is
-                        // specifically spawning a second instance of an
-                        // already-running process, not the launcher UI itself.
-                        // Root cause is in shared kernel IPC/input wait-state
-                        // bookkeeping (src/ipc.c's ipc_wait_select/
-                        // ipc_process_cleanup, src/input.c's input_wait), not
-                        // this compositor -- real, pre-existing, and worth a
-                        // dedicated investigation, but out of scope to guess-fix
-                        // here. The cell still closes the launcher so clicking
-                        // it does something reasonable rather than nothing.
-                        launcher_open = false;
-                        repaint = true;
                     } else if launcher_open {
+                        if let Some(cell) = launcher_cell_at(cursor_x as i32, cursor_y as i32) {
+                            if cell == 1 {
+                                // ClassiCube: a real full-screen app launch. This
+                                // call BLOCKS this entire process until ClassiCube
+                                // exits (see demon_abi::launch_foreground's own
+                                // comment) -- everything below only runs again
+                                // once the game has already quit and control
+                                // returns here.
+                                let _ = demon_abi::launch_foreground(
+                                    b"/system/bin/classicube-core.elf",
+                                    CLASSICUBE_SERVICE_MASK,
+                                );
+                            } else if cell == 2 {
+                                // Doom: the one real sustained-play build (see
+                                // DOOM_SERVICE_MASK's own comment) -- same
+                                // blocking launch_foreground call, just a
+                                // longer real session before it returns.
+                                let _ = demon_abi::launch_foreground(
+                                    b"/system/bin/doom-full.elf",
+                                    DOOM_SERVICE_MASK,
+                                );
+                            }
+                            // Cell 0 (Terminal) is deliberately NOT wired to
+                            // demon_abi::spawn: spawning a second xterm.elf while
+                            // one is already running was tested and reproducibly
+                            // took the whole compositor down (compositor_wait
+                            // itself started returning an unrecognized value,
+                            // hitting RUST_COMPOSITOR_FAIL and a clean exit -- not
+                            // a panic in this file's own code). Isolated by
+                            // removing the spawn call and repeating the exact
+                            // same click sequence, which then reproduced cleanly
+                            // with no failure at all, so the trigger is
+                            // specifically spawning a second instance of an
+                            // already-running process, not the launcher UI
+                            // itself. Root cause is in shared kernel IPC/input
+                            // wait-state bookkeeping (src/ipc.c's
+                            // ipc_wait_select/ipc_process_cleanup, src/input.c's
+                            // input_wait), not this compositor -- real,
+                            // pre-existing, and worth a dedicated investigation,
+                            // but out of scope to guess-fix here.
+                        }
                         launcher_open = false;
                         repaint = true;
                     } else if let Some(dot) = workspace_dot_at(cursor_x as i32, cursor_y as i32) {

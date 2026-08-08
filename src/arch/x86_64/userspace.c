@@ -1474,6 +1474,46 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
         frame->rax = real_time_of_day();
         return frame_address;
     }
+    if (number == 50u) {
+        /* Spawn a foreground app that takes exclusive DISPLAY/SURFACE
+           ownership (Doom, Quake, ClassiCube -- see their own capability
+           grants in src/makobox.c's launch_app) and block the CALLER (the
+           compositor, launching one from its own desktop launcher) until
+           it exits, returning the exit status the same way syscall 12's
+           plain wait() does.
+           Mirrors launch_app's own ipc_cancel_wait/input_cancel_wait step
+           exactly -- stops input/IPC events meant for the game from
+           waking the compositor early, since it's about to have nothing
+           useful to do with them anyway (it can't safely repaint while
+           the game owns the screen). Unlike launch_app, this cannot use
+           userspace_run_init to drive the game to completion: that
+           function performs a top-level ring-3 entry meant to be called
+           exactly once, from the kernel's own boot sequence, never
+           reentrantly from inside an already-active syscall (this one)
+           -- doing so would nest two ring-3 entries and corrupt the
+           single top-level "last exit" continuation it relies on.
+           scheduler_on_wait (the same primitive syscall 12 itself calls)
+           is the real, reentrancy-safe way to block a task until a
+           specific child exits: it just marks this task BLOCKED and lets
+           the ordinary scheduler dispatch loop pick the next READY task
+           (the newly spawned game) on its own, with no special nesting
+           at all. */
+        if (!user_range(frame->rdi, frame->rsi) || frame->rsi == 0u || frame->rsi > 127u) {
+            frame->rax = (uint64_t)-1;
+            return frame_address;
+        }
+        const uint32_t caller = scheduler_current_pid();
+        (void)ipc_cancel_wait(caller);
+        (void)input_cancel_wait(caller);
+        const uint32_t pid = userspace_spawn_path(caller,
+            (const char *)(uintptr_t)frame->rdi, (size_t)frame->rsi,
+            "game", (uint32_t)frame->rdx);
+        if (pid == 0u) {
+            frame->rax = (uint64_t)-1;
+            return frame_address;
+        }
+        return scheduler_on_wait(frame_address, pid);
+    }
     frame->rax = (uint64_t)-1;
     return frame_address;
 }
