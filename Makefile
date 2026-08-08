@@ -1726,6 +1726,9 @@ $(BUILD)/framebuffer.o: src/framebuffer.c include/demon/assets.h include/demon/g
 $(BUILD)/makobox.o: src/makobox.c include/kernel/makobox.h include/kernel/apps.h include/kernel/capability.h include/kernel/framebuffer.h include/kernel/git.h include/kernel/init.h include/kernel/interrupts.h include/kernel/ipc.h include/kernel/runas.h include/kernel/ramfs.h include/kernel/scheduler.h include/kernel/serial.h include/kernel/terminal.h include/kernel/userspace.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/shell_commands.o: shared/shell_commands.c include/demon/shell_commands.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/scheduler.o: src/scheduler.c include/kernel/scheduler.h include/kernel/interrupt_frame.h include/kernel/userspace.h include/kernel/ipc.h include/demon/input.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -1867,12 +1870,12 @@ $(DEMONWM_ELF): $(BUILD)/demonwm_entry.o $(BUILD)/demonwm.o $(BUILD)/demonx_xlib
 $(BUILD)/xterm_entry.o: apps/xterm/entry.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
-$(BUILD)/xterm.o: apps/xterm/xterm.c include/X11/Xlib.h include/demon/c_app.h include/demon/demonx.h | $(BUILD)
+$(BUILD)/xterm.o: apps/xterm/xterm.c include/X11/Xlib.h include/demon/c_app.h include/demon/demonx.h include/demon/shell_commands.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(XTERM_ELF): $(BUILD)/xterm_entry.o $(BUILD)/xterm.o $(BUILD)/demonx_xlib.o user/linker.ld
+$(XTERM_ELF): $(BUILD)/xterm_entry.o $(BUILD)/xterm.o $(BUILD)/demonx_xlib.o $(BUILD)/shell_commands.o user/linker.ld
 	$(LD) $(USER_LDFLAGS) $(BUILD)/xterm_entry.o \
-		$(BUILD)/xterm.o $(BUILD)/demonx_xlib.o -o $@
+		$(BUILD)/xterm.o $(BUILD)/demonx_xlib.o $(BUILD)/shell_commands.o -o $@
 	$(STRIP) -s $@
 
 $(BUILD)/portkit_entry.o: apps/portcheck/entry.S | $(BUILD)

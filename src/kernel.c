@@ -1043,14 +1043,22 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     struct userspace_memory processes[SCHEDULER_PROCESS_LIMIT - 1u];
     size_t code_page_total = 0u;
     for (size_t process = 0u; process < SCHEDULER_PROCESS_LIMIT - 1u; ++process) {
-        size_t code_pages = 12u;
+        size_t code_pages = 20u;
         if (process < 2u) code_pages = 4u;
         if (process == 2u) code_pages = USERSPACE_CODE_PAGES;
+        /* xterm now links in shared/shell_commands.c (the same portable
+           command set MakoBox exposes: cat/ls/head/tail/wc/grep/...),
+           which pushed its image past the old 12-page/48 KiB slot size.
+           Every non-init/worker/large slot is bumped to 20 pages (80 KiB)
+           instead of picking just one, since whichever slot happens to be
+           free when xterm spawns (the compositor and DemonX are already
+           alive and holding slots of their own by that point) needs to be
+           big enough on its own. */
         if (!allocate_process_memory(&processes[process], pdpt, code_pages))
             boot_fatal("Dynamic process frame-pool allocation failed");
         code_page_total += code_pages;
     }
-    if (code_page_total != 104u)
+    if (code_page_total != 136u)
         boot_fatal("Userspace executable pool budget changed unexpectedly");
     serial_write("USERSPACE_CODE_POOLS_OK pages=");
     serial_write_u64(code_page_total);

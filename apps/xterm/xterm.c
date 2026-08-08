@@ -17,6 +17,7 @@
 #include <demon/c_app.h>
 #include <demon/demonx.h>
 #include <demon/input.h>
+#include <demon/shell_commands.h>
 #include <stdint.h>
 
 /* DemonX-specific extension (see lib/demonx/xlib.c's own comment) -- not
@@ -259,6 +260,99 @@ static int command_matches(const char *line, const char *name) {
     return line[index] == '\0' || line[index] == ' ';
 }
 
+/* Wires xterm's CLI into shared/shell_commands.c -- the same portable
+   file/logic command set MakoBox exposes (cat, ls, head, tail, wc, grep,
+   rm, cp, mv, stat, find, tree, du, seq, calc, ...), so a user doesn't get
+   a smaller, different shell just because they're inside xterm instead of
+   the kernel console. MakoBox's own kernel-side implementations are left
+   untouched (zero-copy, unbounded by RAMFS file size); this backend goes
+   through the ordinary demon_file_open/demon_dir_list syscalls instead,
+   so file reads here are capped by the shared module's 16 KiB scratch
+   buffer. Kernel-only diagnostics (mem, ps, frames, caps, git, runit,
+   apps, desktop, ...) aren't part of the shared module and stay
+   MakoBox-only. */
+static void xterm_shell_emit(void *context, const char *text) {
+    (void)context;
+    char buffer[LINE_CAPACITY];
+    uint32_t index = 0u;
+    while (text[index] != '\0' && index < LINE_CAPACITY - 1u) {
+        buffer[index] = text[index];
+        ++index;
+    }
+    buffer[index] = '\0';
+    append_scrollback(buffer);
+}
+
+static bool xterm_shell_read_file(void *context, const char *path, size_t path_length,
+                                  uint8_t *buffer, size_t capacity, size_t *out_length) {
+    (void)context;
+    const uint64_t storage = demon_service_open(4u); /* CAPABILITY_SERVICE_STORAGE */
+    if (storage == UINT64_MAX) return false;
+    const uint64_t handle = demon_file_open(storage, path, path_length, 0u);
+    if (handle == UINT64_MAX) return false;
+    const uint64_t read = demon_handle_read(handle, buffer, capacity);
+    demon_handle_close(handle);
+    if (read == UINT64_MAX) return false;
+    *out_length = (size_t)read;
+    return true;
+}
+
+static bool xterm_shell_write_file(void *context, const char *path, size_t path_length,
+                                   const uint8_t *data, size_t length) {
+    (void)context;
+    const uint64_t storage = demon_service_open(4u);
+    if (storage == UINT64_MAX) return false;
+    const uint64_t handle = demon_file_open(storage, path, path_length, 1u);
+    if (handle == UINT64_MAX) return false;
+    const uint64_t written = demon_handle_write(handle, data, length);
+    demon_handle_close(handle);
+    return written != UINT64_MAX;
+}
+
+static bool xterm_shell_delete_file(void *context, const char *path, size_t path_length) {
+    (void)context;
+    const uint64_t storage = demon_service_open(4u);
+    if (storage == UINT64_MAX) return false;
+    return demon_file_delete(storage, path, path_length) == UINT64_MAX ? false : true;
+}
+
+static bool xterm_shell_rename_file(void *context, const char *old_path, size_t old_length,
+                                    const char *new_path, size_t new_length) {
+    (void)context;
+    const uint64_t storage = demon_service_open(4u);
+    if (storage == UINT64_MAX) return false;
+    return demon_file_rename(storage, old_path, old_length, new_path, new_length) == UINT64_MAX
+        ? false : true;
+}
+
+static bool xterm_shell_list_dir(void *context, const char *prefix, size_t prefix_length,
+                                 size_t index, char *name_out, size_t name_capacity,
+                                 size_t *name_length_out, size_t *size_out,
+                                 bool *is_directory_out) {
+    (void)context;
+    const uint64_t storage = demon_service_open(4u);
+    if (storage == UINT64_MAX) return false;
+    struct demon_dir_entry entry;
+    if (demon_dir_list(storage, prefix, prefix_length, index, &entry) != 1u) return false;
+    size_t copy_length = entry.name_length;
+    if (copy_length > name_capacity) copy_length = name_capacity;
+    for (size_t i = 0u; i < copy_length; ++i) name_out[i] = entry.name[i];
+    *name_length_out = copy_length;
+    *size_out = (size_t)entry.size;
+    *is_directory_out = entry.is_directory != 0u;
+    return true;
+}
+
+static const struct shell_backend xterm_shell_backend = {
+    .context = NULL,
+    .emit_line = xterm_shell_emit,
+    .read_file = xterm_shell_read_file,
+    .write_file = xterm_shell_write_file,
+    .delete_file = xterm_shell_delete_file,
+    .rename_file = xterm_shell_rename_file,
+    .list_dir = xterm_shell_list_dir,
+};
+
 static void terminal_execute(void) {
     char line[LINE_CAPACITY];
     copy_string(line, PROMPT);
@@ -278,7 +372,9 @@ static void terminal_execute(void) {
     remember_command();
 
     if (command_matches(command, "help")) {
-        append_scrollback("Commands: help, clear, echo <text>, edit <file>, about, exit");
+        append_scrollback("Commands: help, clear, edit <file>, about, exit");
+        append_scrollback("Also: cat ls head tail wc grep rm cp mv stat find");
+        append_scrollback("tree du echo seq calc sort uniq tac rev basename dirname");
     } else if (command_matches(command, "clear")) {
         scrollback_count = 0u;
         scrollback_start = 0u;
@@ -303,6 +399,8 @@ static void terminal_execute(void) {
         } else {
             editor_open(name);
         }
+    } else if (shell_dispatch(&xterm_shell_backend, command)) {
+        /* handled by the shared file/logic command module */
     } else {
         char reply[LINE_CAPACITY];
         copy_string(reply, "mako: command not found: ");
