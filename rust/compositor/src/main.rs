@@ -66,19 +66,26 @@ const RESIZE_GRIP: u32 = 10;
 const MIN_WINDOW_WIDTH: u32 = 96;
 const MIN_WINDOW_HEIGHT: u32 = 64;
 const RESERVED_TOP: u32 = 34; // kMargin(6) + kPanelHeight(28), matching demonwm's own panel band
-const COLOR_TITLE_FOCUSED: u32 = 0xff6c4fe0;
-const COLOR_TITLE_UNFOCUSED: u32 = 0xff2a2e37;
-const COLOR_TEXT: u32 = 0xfff1f3f5;
-const COLOR_TEXT_MUTED: u32 = 0xff9ba3af;
-const COLOR_EMBER: u32 = 0xffff5c42;
-const COLOR_VIOLET: u32 = 0xff8b6bff;
-const COLOR_PANEL_BG: u32 = 0xff1a1d24;
+// A cohesive indigo/violet identity instead of the earlier muddier
+// gray-and-orange mix: richer, more saturated focused accents, a deep
+// near-black indigo (not flat gray-black) for chrome surfaces, and a
+// warmer ember reserved for the one or two spots that need a genuine
+// "hot" accent (active workspace dot, closed launcher button) rather
+// than sprinkled everywhere.
+const COLOR_TITLE_FOCUSED: u32 = 0xff7c5cfc;
+const COLOR_TITLE_UNFOCUSED: u32 = 0xff2e3348;
+const COLOR_TEXT: u32 = 0xfff5f6fa;
+const COLOR_TEXT_MUTED: u32 = 0xffa9b1c6;
+const COLOR_EMBER: u32 = 0xffff6b4a;
+const COLOR_VIOLET: u32 = 0xff9b7bff;
+const COLOR_PANEL_BG: u32 = 0xff141622;
+const COLOR_TASKBAR_ITEM: u32 = 0xff272c42;
 // macOS-style traffic-light controls: red = close, green = maximize/
 // restore. No decorative third circle -- every button drawn actually
 // does something when clicked (see title_control_at), unlike a plain
 // unwired "minimize" dot would.
 const COLOR_CONTROL_CLOSE: u32 = 0xffff5f57;
-const COLOR_CONTROL_MAXIMIZE: u32 = 0xff28c840;
+const COLOR_CONTROL_MAXIMIZE: u32 = 0xff30d158;
 const CORNER_RADIUS: i32 = 8;
 // Chrome surfaces (panel, launcher) blend into the wallpaper instead of a
 // flat opaque fill -- a soft frosted-glass read instead of a solid card
@@ -94,6 +101,20 @@ const PANEL_HEIGHT: u32 = 28;
 const LAUNCHER_BTN_X0: i32 = PANEL_MARGIN + 4;
 const LAUNCHER_BTN_X1: i32 = LAUNCHER_BTN_X0 + 72;
 const WORKSPACE_COUNT: u32 = 3;
+
+// A real taskbar along the bottom edge, mirroring the top panel's own
+// margin/height convention. Shows one entry per open window on the
+// current workspace -- clicking one focuses and raises it, the same
+// action a real click on the window itself would trigger.
+const BOTTOM_BAR_HEIGHT: u32 = 40;
+const BOTTOM_BAR_MARGIN: i32 = 6;
+const BOTTOM_BAR_Y: i32 = SCREEN_HEIGHT as i32 - BOTTOM_BAR_MARGIN - BOTTOM_BAR_HEIGHT as i32;
+// How much vertical space windows must leave clear at the bottom of the
+// screen so dragging/resizing never lets them slide under the taskbar --
+// mirrors RESERVED_TOP's own role for the top panel.
+const RESERVED_BOTTOM: u32 = (BOTTOM_BAR_MARGIN as u32) * 2 + BOTTOM_BAR_HEIGHT;
+const TASKBAR_ITEM_WIDTH: u32 = 120;
+const TASKBAR_ITEM_GAP: i32 = 8;
 
 // The launcher popover, opened by clicking the panel's DEMONOS button.
 // Deliberately a single entry, not demonwm's full app grid: every other
@@ -242,6 +263,26 @@ fn workspace_dot_at(x: i32, y: i32) -> Option<u32> {
         if x >= dot_x && x < dot_x + 6 {
             return Some(dot);
         }
+    }
+    None
+}
+
+// Same "walk the table in slot order, skip anything not real/on this
+// workspace" filter as draw_taskbar -- kept identical between the two so
+// an item's drawn position always matches where clicking it is detected.
+fn taskbar_item_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: i32, y: i32) -> Option<u32> {
+    if y < BOTTOM_BAR_Y || y >= BOTTOM_BAR_Y + BOTTOM_BAR_HEIGHT as i32 {
+        return None;
+    }
+    let mut item_x = BOTTOM_BAR_MARGIN + 8;
+    for window in table.iter() {
+        if !window.in_use || window.workspace != workspace || window.id < DEMONX_WINDOW_ID_BASE {
+            continue;
+        }
+        if x >= item_x && x < item_x + TASKBAR_ITEM_WIDTH as i32 {
+            return Some(window.id);
+        }
+        item_x += TASKBAR_ITEM_WIDTH as i32 + TASKBAR_ITEM_GAP;
     }
     None
 }
@@ -666,6 +707,28 @@ fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
     }
 }
 
+// Bottom taskbar: one pill-shaped entry per open window on the current
+// workspace, the focused one highlighted in the accent color. Real, not
+// decorative -- see taskbar_item_at's matching hit-test, wired to the
+// same focus+raise action clicking the window itself triggers.
+fn draw_taskbar(frame: &mut [u32], table: &[Window; WINDOW_LIMIT], workspace: u32, focused_window: u32) {
+    let width = SCREEN_WIDTH as i32 - 2 * BOTTOM_BAR_MARGIN;
+    draw_shadow(frame, BOTTOM_BAR_MARGIN, BOTTOM_BAR_Y, width as u32, BOTTOM_BAR_HEIGHT);
+    blend_rounded_rect(frame, BOTTOM_BAR_MARGIN, BOTTOM_BAR_Y, width as u32, BOTTOM_BAR_HEIGHT, CORNER_RADIUS, COLOR_PANEL_BG, PANEL_BLEND_ALPHA);
+
+    let mut item_x = BOTTOM_BAR_MARGIN + 8;
+    for window in table.iter() {
+        if !window.in_use || window.workspace != workspace || window.id < DEMONX_WINDOW_ID_BASE {
+            continue;
+        }
+        let focused = window.id == focused_window;
+        let item_color = if focused { COLOR_TITLE_FOCUSED } else { COLOR_TASKBAR_ITEM };
+        fill_rounded_rect(frame, item_x, BOTTOM_BAR_Y + 6, TASKBAR_ITEM_WIDTH, BOTTOM_BAR_HEIGHT - 12, 8, item_color);
+        draw_text(frame, item_x + 10, BOTTOM_BAR_Y + 16, b"DEMONOS", COLOR_TEXT);
+        item_x += TASKBAR_ITEM_WIDTH as i32 + TASKBAR_ITEM_GAP;
+    }
+}
+
 // Clear to the desktop background, then paint every live window back to
 // front by ascending z -- a real zero-copy blit from its mapped surface, or
 // a flat placeholder if it has none mapped, exactly like
@@ -741,6 +804,7 @@ fn composite(
         }
     }
     draw_panel(frame, current_workspace, launcher_open);
+    draw_taskbar(frame, table, current_workspace, focused_window);
     if launcher_open {
         draw_launcher(frame);
     }
@@ -970,7 +1034,7 @@ pub extern "C" fn rust_main() -> ! {
                             new_x = new_x.max(0).min((SCREEN_WIDTH - width.min(SCREEN_WIDTH)) as i32);
                             new_y = new_y
                                 .max(RESERVED_TOP as i32 + TITLE_HEIGHT as i32)
-                                .min((SCREEN_HEIGHT - height.min(SCREEN_HEIGHT)) as i32);
+                                .min((SCREEN_HEIGHT - RESERVED_BOTTOM - height.min(SCREEN_HEIGHT - RESERVED_BOTTOM)) as i32);
                             table[slot].x = new_x as u32;
                             table[slot].y = new_y as u32;
                             table[slot].maximized = false;
@@ -987,7 +1051,7 @@ pub extern "C" fn rust_main() -> ! {
                                 .min((SCREEN_WIDTH - window.x) as i32);
                             height = height
                                 .max(MIN_WINDOW_HEIGHT as i32)
-                                .min((SCREEN_HEIGHT - window.y) as i32);
+                                .min((SCREEN_HEIGHT - RESERVED_BOTTOM - window.y) as i32);
                             table[slot].width = width as u32;
                             table[slot].height = height as u32;
                             table[slot].maximized = false;
@@ -1044,6 +1108,13 @@ pub extern "C" fn rust_main() -> ! {
                         current_workspace = dot;
                         focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
                         repaint = true;
+                    } else if let Some(id) = taskbar_item_at(&table, current_workspace, cursor_x as i32, cursor_y as i32) {
+                        if let Some(slot) = find_slot(&table, id) {
+                            focused_window = id;
+                            table[slot].z = next_z;
+                            next_z += 1;
+                            repaint = true;
+                        }
                     } else if let Some(slot) = decoration_hit_at(&table, current_workspace, cursor_x, cursor_y) {
                         let window = table[slot];
                         focused_window = window.id;
@@ -1078,7 +1149,7 @@ pub extern "C" fn rust_main() -> ! {
                                     table[slot].x = 0;
                                     table[slot].y = RESERVED_TOP + TITLE_HEIGHT;
                                     table[slot].width = SCREEN_WIDTH;
-                                    table[slot].height = SCREEN_HEIGHT - table[slot].y;
+                                    table[slot].height = SCREEN_HEIGHT - RESERVED_BOTTOM - table[slot].y;
                                     table[slot].maximized = true;
                                 }
                             }
