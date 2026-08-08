@@ -797,6 +797,15 @@ uint64_t xterm_main(void) {
     }
 
     smoke_write("XTERM_READY display=:3 grid=64x22\n");
+    /* The main loop below only repaints in response to a KeyPress or
+       ConfigureNotify event -- with neither having happened yet, the
+       window's surface starts out as whatever was already there (usually
+       blank) and stays that way until the user types something or the WM
+       moves/resizes it. xterm_smoke never hit this: terminal_feed_text
+       already renders after every command it feeds, so the smoke path
+       always painted at least once before checking anything. A real
+       interactive session has no such call before this point. */
+    render_terminal(display, window, gc);
 
     for (;;) {
         XEvent event;
