@@ -680,6 +680,14 @@ int XSetNormalHints(Display *, Window, XSizeHints *);
 Status XGetWMNormalHints(Display *, Window, XSizeHints *, long *);
 int XNextEvent(Display *display, XEvent *event_return);
 int XPending(Display *display);
+
+/* DemonX extension: attach a client-owned retained DemonOS surface to a
+   window before XMapWindow. Returns non-zero on success. */
+/* width/height describe the retained source surface. They may differ from
+   the X window's logical size; DemonOS scales presentation and input. */
+int DemonXAttachSurface(Display *display, Window window,
+                        uint64_t surface, unsigned int width,
+                        unsigned int height);
 int XFlush(Display *display);
 int XSync(Display *display, Bool discard);
 int XPutBackEvent(Display *display, XEvent *event);

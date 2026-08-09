@@ -113,6 +113,9 @@ static void applet_help(void) {
     line("  doom     launch Doom with the installed Freedoom IWAD");
     line("  classicube  launch the ClassiCube game (ESC pause, Q quit to console)");
     line("  quake / quake-core  boot the Quake engine (D4 full engine boot + frame)");
+    line("  butterscotch  run the native GameMaker runner port (D5 runtime slice)");
+    line("  deltarune-ch1  probe a user-supplied DELTARUNE Chapter 1 data.win");
+    line("  undertale-demo  probe a user-supplied UNDERTALE Demo data.win");
     line("  beep [Hz [ms]]  play a short square-wave bleep (defaults: 880 80)");
     line("  tone <Hz> [ms]  play a 20-20000 Hz tone for up to 90 ms");
     line("  bleeps   play a short three-note startup chime");
@@ -2052,6 +2055,7 @@ static bool command_exists(const char *name) {
     static const char *const names[] = {
         "help", "uname", "status", "mem", "frames", "paging", "ticks", "ps",
         "abi", "caps", "projects", "apps", "tetris", "doom", "classicube", "quake", "quake-core",
+        "butterscotch", "butterscotch-core", "deltarune-ch1", "undertale-demo",
         "nxengine", "nxengine-core", "nxengine-play-freeplay", "nxengine-freeplay", "cave-story", "beep", "tone",
         "bleeps", "git", "desktop", "runit",
         "runas", "ls", "cat", "head", "tail", "wc", "touch", "write", "edit", "rm",
@@ -2416,7 +2420,8 @@ static bool launch_app(const char *name) {
         capabilities |=
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
-            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE);
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO);
     }
     if (equal(app.path, "/system/bin/quake-core.elf")) {
         /* PortKit's arena bootstrap and file shims use the storage service;
@@ -2426,6 +2431,17 @@ static bool launch_app(const char *name) {
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
             CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE);
+    }
+    if (equal(app.path, "/system/bin/butterscotch-core.elf") ||
+        equal(app.path, "/system/bin/butterscotch-deltarune-ch1.elf") ||
+        equal(app.path, "/system/bin/butterscotch-undertale-demo.elf")) {
+        /* The D5 port loads game data, publishes its software-rendered
+           framebuffer through DemonX, and streams PCM through native audio. */
+        capabilities |=
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_DISPLAY) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO);
     }
     if (equal(app.path, "/system/bin/nxengine-core.elf")) {
         /* PortKit's arena bootstrap (demon_port_init_dynamic) opens the
@@ -2501,6 +2517,10 @@ bool makobox_run(const char *command_line) {
     else if (equal(command_line, "doom")) return launch_app("doom");
     else if (equal(command_line, "classicube")) return launch_app("classicube");
     else if (equal(command_line, "quake") || equal(command_line, "quake-core")) return launch_app("quake-core");
+    else if (equal(command_line, "butterscotch") || equal(command_line, "butterscotch-core"))
+        return launch_app("butterscotch-core");
+    else if (equal(command_line, "deltarune-ch1")) return launch_app("deltarune-ch1");
+    else if (equal(command_line, "undertale-demo")) return launch_app("undertale-demo");
     else if (equal(command_line, "nxengine") || equal(command_line, "nxengine-core")) return launch_app("nxengine-core");
     else if (equal(command_line, "nxengine-play-freeplay") || equal(command_line, "nxengine-freeplay") ||
              equal(command_line, "cave-story"))

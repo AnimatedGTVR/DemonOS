@@ -33,6 +33,9 @@ static const char *app_name_for_path(const char *path) {
     if (equal(path, "/system/bin/doom-full.elf")) return "doom";
     if (equal(path, "/system/bin/classicube-core.elf")) return "classicube";
     if (equal(path, "/system/bin/quake-core.elf")) return "quake-core";
+    if (equal(path, "/system/bin/butterscotch-core.elf")) return "butterscotch-core";
+    if (equal(path, "/system/bin/butterscotch-deltarune-ch1.elf")) return "deltarune-ch1";
+    if (equal(path, "/system/bin/butterscotch-undertale-demo.elf")) return "undertale-demo";
     if (equal(path, "/system/bin/nxengine-core.elf")) return "nxengine-core";
     if (equal(path, "/system/bin/nxengine-play-freeplay.elf")) return "nxengine-play-freeplay";
     if (equal(path, "/system/bin/calculator.elf")) return "calculator";

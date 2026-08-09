@@ -13,6 +13,7 @@ void demon_doom_install_backend(const struct demon_doom_backend *backend) {
     if (backend == 0) {
         active_backend.present = 0;
         active_backend.set_title = 0;
+        active_backend.poll_input = 0;
         active_backend.context = 0;
         return;
     }
@@ -101,7 +102,11 @@ static unsigned char translate_key(const struct input_event *event) {
 
 int DG_GetKey(int *pressed, unsigned char *key) {
     struct input_event event;
-    while (demon_port_poll_input(&event)) {
+    for (;;) {
+        const int received = active_backend.poll_input != 0 ?
+            active_backend.poll_input(&event, active_backend.context) :
+            demon_port_poll_input(&event);
+        if (!received) break;
         if (event.type != INPUT_KEY_DOWN && event.type != INPUT_KEY_UP) continue;
         const unsigned char translated = translate_key(&event);
         if (translated == 0) continue;

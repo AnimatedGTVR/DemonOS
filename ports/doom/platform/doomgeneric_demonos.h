@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <demon/input.h>
 
 /* The window/surface owner installs these callbacks before
    doomgeneric_Create().  Doom remains a normal compositor client: it never
@@ -11,6 +12,7 @@ struct demon_doom_backend {
     void (*present)(const uint32_t *pixels, uint32_t width, uint32_t height,
                     void *context);
     void (*set_title)(const char *title, void *context);
+    int (*poll_input)(struct input_event *event, void *context);
     void *context;
 };
 

@@ -17,6 +17,8 @@ of the License, or (at your option) any later version.
 #include <stdint.h>
 
 extern void IN_AccumulateMouse(int delta_x, int delta_y);
+extern int d_quake_poll_input(struct input_event *event);
+extern int d_quake_should_quit(void);
 
 #define QUAKE_MAX_HANDLES 10u
 
@@ -229,7 +231,7 @@ static int translate_key(const struct input_event *event) {
 
 void Sys_SendKeyEvents(void) {
     struct input_event event;
-    while (demon_port_poll_input(&event)) {
+    while (d_quake_poll_input(&event)) {
         switch (event.type) {
             case INPUT_KEY_DOWN:
             case INPUT_KEY_UP: {
@@ -255,6 +257,7 @@ void Sys_SendKeyEvents(void) {
                 break;
         }
     }
+    if (d_quake_should_quit()) Sys_Quit();
 }
 
 void Sys_LowFPPrecision(void) { }

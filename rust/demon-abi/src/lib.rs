@@ -175,6 +175,9 @@ pub fn spawn(path: &[u8], service_mask: u64) -> u64 {
 pub fn wait(pid: u64) -> u64 {
     unsafe { syscall1(12, pid) }
 }
+pub fn reap_exited() -> u64 {
+    unsafe { syscall0(51) }
+}
 pub fn channel_create(name: &[u8]) -> u64 {
     unsafe { syscall2(14, name.as_ptr() as u64, name.len() as u64) }
 }

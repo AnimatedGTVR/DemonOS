@@ -16,20 +16,11 @@ fn panic(_info: &PanicInfo) -> ! {
     demon_abi::exit(1);
 }
 
-// This Stage 3 port replaces user/compositor.mko as the one real compositor
-// in the desktop stack (kernel.c now spawns this binary, not compositor.elf
-// -- see the comment there). It is deliberately scoped to what actually
-// matters when DemonWM is the session shell (the only mode this desktop
-// stack boots today): real window bookkeeping, real zero-copy surface
-// compositing, and real input delivery to DemonX. Everything the MKO
-// compositor also carried for its own retired chrome -- the login gate
-// (permanently bypassed there already), the launcher/taskbar/settings
-// popovers, native window drag/resize, per-window titlebars, and
-// open/close fade animation -- belongs to a shell DemonWM has already
-// replaced, so none of it is ported here. DemonWM draws its own decorations
-// as ordinary window content; this compositor's only job is to place that
-// content on screen and route input to it, exactly like render_demonwm_backend
-// already scoped the old compositor down to when DemonWM was in charge.
+// Native Rust compositor and desktop shell. It owns real window bookkeeping,
+// zero-copy surface compositing, input delivery to DemonX, window chrome,
+// workspaces, launcher, and taskbar. Keeping those responsibilities together
+// avoids a second decorative shell process and makes the default desktop both
+// smaller and easier to reason about while the userspace stack matures.
 
 const SCREEN_WIDTH: u32 = 640;
 const SCREEN_HEIGHT: u32 = 480;
@@ -66,31 +57,33 @@ const RESIZE_GRIP: u32 = 10;
 const MIN_WINDOW_WIDTH: u32 = 96;
 const MIN_WINDOW_HEIGHT: u32 = 64;
 const RESERVED_TOP: u32 = 34; // kMargin(6) + kPanelHeight(28), matching demonwm's own panel band
-// A cohesive indigo/violet identity instead of the earlier muddier
-// gray-and-orange mix: richer, more saturated focused accents, a deep
-// near-black indigo (not flat gray-black) for chrome surfaces, and a
-// warmer ember reserved for the one or two spots that need a genuine
-// "hot" accent (active workspace dot, closed launcher button) rather
-// than sprinkled everywhere.
-const COLOR_TITLE_FOCUSED: u32 = 0xff7c5cfc;
-const COLOR_TITLE_UNFOCUSED: u32 = 0xff2e3348;
-const COLOR_TEXT: u32 = 0xfff5f6fa;
-const COLOR_TEXT_MUTED: u32 = 0xffa9b1c6;
-const COLOR_EMBER: u32 = 0xffff6b4a;
-const COLOR_VIOLET: u32 = 0xff9b7bff;
-const COLOR_PANEL_BG: u32 = 0xff141622;
-const COLOR_TASKBAR_ITEM: u32 = 0xff272c42;
-// macOS-style traffic-light controls: red = close, green = maximize/
-// restore. No decorative third circle -- every button drawn actually
-// does something when clicked (see title_control_at), unlike a plain
-// unwired "minimize" dot would.
+// DemonOS chrome deliberately stays compact and quiet: graphite/navy
+// surfaces, one cyan focus accent, and high-contrast text. This keeps the
+// desktop legible without spending fill bandwidth on large ornamental
+// gradients or making every control compete for attention.
+const COLOR_TITLE_FOCUSED: u32 = 0xff263a4a;
+const COLOR_TITLE_UNFOCUSED: u32 = 0xff1b2732;
+const COLOR_TEXT: u32 = 0xffedf4f7;
+const COLOR_TEXT_MUTED: u32 = 0xff91a5b2;
+const COLOR_ACCENT: u32 = 0xff35b8e6;
+const COLOR_ACCENT_DARK: u32 = 0xff176b8b;
+const COLOR_PANEL_BG: u32 = 0xff101a23;
+const COLOR_TASKBAR_ITEM: u32 = 0xff1c2a35;
+const COLOR_SURFACE_HOVER: u32 = 0xff2a3b48;
+const COLOR_BORDER: u32 = 0xff456174;
+// Native symbol controls. Close remains red because it is destructive;
+// minimize and maximize use the same neutral ink as the rest of the title.
 const COLOR_CONTROL_CLOSE: u32 = 0xffff5f57;
-const COLOR_CONTROL_MAXIMIZE: u32 = 0xff30d158;
-const CORNER_RADIUS: i32 = 8;
+const COLOR_CONTROL_MAXIMIZE: u32 = 0xffa9bbc5;
+const CORNER_RADIUS: i32 = 6;
+const SNAP_DISTANCE: u32 = 12;
+const CURSOR_ARROW: u64 = 0;
+const CURSOR_HAND: u64 = 1;
+const CURSOR_RESIZE_SE: u64 = 10;
 // Chrome surfaces (panel, launcher) blend into the wallpaper instead of a
 // flat opaque fill -- a soft frosted-glass read instead of a solid card
 // stacked on top of the desktop.
-const PANEL_BLEND_ALPHA: u8 = 235;
+const PANEL_BLEND_ALPHA: u8 = 244;
 
 // Panel geometry, ported from demonwm's kMargin/kPanelHeight/
 // kLauncherBtnX0/X1 -- drawn as a pure compositor overlay (never a window
@@ -100,6 +93,9 @@ const PANEL_MARGIN: i32 = 6;
 const PANEL_HEIGHT: u32 = 28;
 const LAUNCHER_BTN_X0: i32 = PANEL_MARGIN + 4;
 const LAUNCHER_BTN_X1: i32 = LAUNCHER_BTN_X0 + 72;
+const QUICK_LAUNCH_X: i32 = LAUNCHER_BTN_X1 + 8;
+const QUICK_LAUNCH_SIZE: i32 = 24;
+const QUICK_LAUNCH_GAP: i32 = 4;
 const WORKSPACE_COUNT: u32 = 3;
 
 // A real taskbar along the bottom edge, mirroring the top panel's own
@@ -115,44 +111,54 @@ const BOTTOM_BAR_Y: i32 = SCREEN_HEIGHT as i32 - BOTTOM_BAR_MARGIN - BOTTOM_BAR_
 const RESERVED_BOTTOM: u32 = (BOTTOM_BAR_MARGIN as u32) * 2 + BOTTOM_BAR_HEIGHT;
 const TASKBAR_ITEM_WIDTH: u32 = 120;
 const TASKBAR_ITEM_GAP: i32 = 8;
+const INPUT_MOD_ALT: u32 = 1 << 2;
+const KEY_ESCAPE: u16 = 0x01;
+const KEY_WORKSPACE_1: u16 = 0x02;
+const KEY_WORKSPACE_3: u16 = 0x04;
+const KEY_TAB: u16 = 0x0f;
+const KEY_ENTER: u16 = 0x1c;
+const KEY_SPACE: u16 = 0x39;
+const KEY_F4: u16 = 0x3e;
+const KEY_F9: u16 = 0x43;
+const KEY_F10: u16 = 0x44;
+// Extended Set-1 keys retain the E0 prefix in bit 8 (include/demon/input.h),
+// keeping the cursor cluster distinct from the numeric keypad.
+const KEY_UP: u16 = 0x148;
+const KEY_DOWN: u16 = 0x150;
 
-// The launcher popover, opened by clicking the panel's DEMONOS button.
-// Two entries:
+// The launcher popover, opened by clicking the panel's DEMON button.
+// Three entries:
 //
-// - Terminal: xterm is the only real windowed compositor client that
-//   exists today, but this cell isn't wired to actually spawn a second
-//   one (see the click handler's own comment) -- that was tried and
-//   reproducibly crashed the whole compositor via a real, separate kernel
-//   IPC/input wait-state bug, not anything in this file. The cell exists
-//   and closes the launcher on click so the UI reads as real rather than
-//   decorative, without shipping the one known-unsafe action available
-//   for it today.
-// - ClassiCube: a real, working app, but a fundamentally different kind
-//   from xterm -- it takes exclusive DISPLAY/SURFACE ownership and draws
-//   directly to the screen instead of rendering into a compositor window
-//   (see its CAPABILITY_SERVICE_DISPLAY grant in src/makobox.c's
-//   launch_app). Launching it uses demon_abi::launch_foreground (syscall
-//   50), which blocks this whole compositor process until it exits --
-//   see that syscall's own comment in src/arch/x86_64/userspace.c for why
-//   a new syscall was needed rather than reusing plain spawn+wait.
+// - Terminal: restores and raises the session's existing xterm. This avoids
+//   the known duplicate-spawn IPC issue while still making the launcher entry
+//   useful instead of decorative.
+// - ClassiCube and Doom: ordinary asynchronous DemonX clients. Each owns a
+//   retained surface which DemonX shares read-only with this compositor, so
+//   neither game takes over DISPLAY or blocks the desktop event loop.
 const LAUNCHER_X: i32 = PANEL_MARGIN;
 const LAUNCHER_Y: i32 = PANEL_MARGIN + PANEL_HEIGHT as i32 + 8;
-const LAUNCHER_WIDTH: u32 = 170;
-const LAUNCHER_CELL_HEIGHT: i32 = 50;
+const LAUNCHER_WIDTH: u32 = 196;
+const LAUNCHER_CELL_HEIGHT: i32 = 42;
 const LAUNCHER_CELL_GAP: i32 = 6;
-const LAUNCHER_CELL_COUNT: i32 = 3;
-const LAUNCHER_HEIGHT: u32 =
-    (LAUNCHER_CELL_HEIGHT * LAUNCHER_CELL_COUNT + LAUNCHER_CELL_GAP * (LAUNCHER_CELL_COUNT + 1)) as u32;
-// CONSOLE | PROCESS | INPUT | STORAGE | DISPLAY | SURFACE -- the exact
-// same capability set src/makobox.c's launch_app grants
-// /system/bin/classicube-core.elf.
+const LAUNCHER_CELL_COUNT: i32 = 4;
+const LAUNCHER_HEADER_HEIGHT: i32 = 30;
+const LAUNCHER_HEIGHT: u32 = (LAUNCHER_HEADER_HEIGHT + LAUNCHER_CELL_HEIGHT * LAUNCHER_CELL_COUNT
+    + LAUNCHER_CELL_GAP * (LAUNCHER_CELL_COUNT + 1)) as u32;
+// CONSOLE | PROCESS | STORAGE | IPC | SURFACE. Windowed games talk to input
+// and display through DemonX; they intentionally receive neither exclusive
+// DISPLAY nor raw INPUT ownership.
 const CLASSICUBE_SERVICE_MASK: u64 =
-    (1 << 1) | (1 << 3) | (1 << 8) | (1 << 4) | (1 << 7) | (1 << 9);
-// Same base plus AUDIO -- the exact set launch_app grants
-// /system/bin/doom-full.elf, the one real sustained-play build (unlike
-// classicube-core.elf, currently only a self-test/demo milestone that
-// loads a world and exits quickly).
+    (1 << 1) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 9);
+// Same base plus AUDIO for the real sustained-play Freedoom build.
 const DOOM_SERVICE_MASK: u64 = CLASSICUBE_SERVICE_MASK | (1 << 11);
+const SHELL_ICON_WIDTH: usize = 22;
+const SHELL_ICON_HEIGHT: usize = 22;
+const SHELL_ICON_COUNT: usize = 9;
+const SHELL_ICON_TERMINAL: usize = 0;
+const SHELL_ICON_APPLICATION: usize = 3;
+const SHELL_ICON_MINECRAFT: usize = 6;
+const SHELL_ICON_DOOM: usize = 7;
+const SHELL_ICON_QUAKE: usize = 8;
 
 #[derive(Clone, Copy)]
 struct Window {
@@ -165,16 +171,14 @@ struct Window {
     height: u32,
     surface_id: u32,
     mapped_address: u64,
-    // The mapped surface's own real pixel dimensions, fixed at Create time
-    // and never touched by resize -- composite() blits at most this many
-    // columns/rows regardless of the window's current on-screen width/
-    // height, so a resize never reads past what the client actually
-    // allocated (most clients here, like xterm, have a fixed-size surface
-    // and don't repaint at a new resolution; resizing them just crops or
-    // pads with background rather than reading out of bounds).
+    // The mapped surface's real pixel dimensions, queried from its handle
+    // at Create time and never changed by a logical resize. composite()
+    // scales exactly this bounded source into the window's content rect,
+    // while client_point() applies the inverse transform to mouse input.
     surface_width: u32,
     surface_height: u32,
     maximized: bool,
+    minimized: bool,
     restore_x: u32,
     restore_y: u32,
     restore_width: u32,
@@ -210,6 +214,7 @@ impl Window {
         surface_width: 0,
         surface_height: 0,
         maximized: false,
+        minimized: false,
         restore_x: 0,
         restore_y: 0,
         restore_width: 0,
@@ -243,25 +248,23 @@ fn decoration_top(window: &Window) -> u32 {
     window.y.saturating_sub(TITLE_HEIGHT)
 }
 
-// Traffic-light layout, macOS convention: close then maximize, left to
-// right, near the title bar's left edge. Both return the dot's CENTER x
-// offset from window.x, not a top-left corner -- these are circles, not
-// squares. (_window is unused for now: both positions are fixed offsets
-// regardless of window width, kept as a parameter in case a future control
-// needs width-relative placement the way the old right-aligned layout did.)
-fn close_control_x(_window: &Window) -> i32 {
-    16
+// Title controls are right aligned and represented by their center x offset
+// from window.x. Keeping the geometry in one place ensures drawing and hit
+// testing cannot drift apart.
+fn close_control_x(window: &Window) -> i32 {
+    window.width as i32 - 13
 }
 
-fn maximize_control_x(_window: &Window) -> i32 {
-    16 + CONTROL_GAP as i32 + CONTROL_SIZE as i32
+fn maximize_control_x(window: &Window) -> i32 {
+    close_control_x(window) - CONTROL_GAP as i32 - CONTROL_SIZE as i32
 }
 
-// 1 = hit the maximize control, 2 = hit the close control, 0 = neither
-// (just an ordinary drag-start point in the title bar). Hit region is a
-// square CONTROL_SIZE across, centered on each dot -- generous compared to
-// the visible circle radius, matching how real traffic lights have a
-// bigger click target than their drawn size.
+fn minimize_control_x(window: &Window) -> i32 {
+    maximize_control_x(window) - CONTROL_GAP as i32 - CONTROL_SIZE as i32
+}
+
+// 1 = maximize, 2 = close, 3 = minimize, 0 = ordinary title drag. The hit
+// region is CONTROL_SIZE square even though each glyph is smaller.
 fn title_control_at(window: &Window, local_x: u32) -> u32 {
     let half = CONTROL_SIZE as i32 / 2;
     let close_x = close_control_x(window);
@@ -272,6 +275,10 @@ fn title_control_at(window: &Window, local_x: u32) -> u32 {
     if (local_x as i32 - max_x).abs() <= half {
         return 1;
     }
+    let min_x = minimize_control_x(window);
+    if (local_x as i32 - min_x).abs() <= half {
+        return 3;
+    }
     0
 }
 
@@ -281,6 +288,7 @@ fn decoration_hit_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: u32, y: 
         .enumerate()
         .filter(|(_, w)| {
             w.in_use
+                && !w.minimized
                 && w.workspace == workspace
                 && w.id >= DEMONX_WINDOW_ID_BASE
                 && x >= w.x
@@ -303,8 +311,10 @@ fn workspace_dot_at(x: i32, y: i32) -> Option<u32> {
     let width = SCREEN_WIDTH as i32 - 2 * PANEL_MARGIN;
     let dots_x = PANEL_MARGIN + width / 2 - 30;
     for dot in 0..WORKSPACE_COUNT {
-        let dot_x = dots_x + dot as i32 * 10;
-        if x >= dot_x && x < dot_x + 6 {
+        let dot_x = dots_x + dot as i32 * 12;
+        // The visible mark is intentionally small; the 10px hit target is
+        // forgiving enough for real mouse use at 640x480.
+        if x >= dot_x - 1 && x < dot_x + 9 {
             return Some(dot);
         }
     }
@@ -318,17 +328,35 @@ fn taskbar_item_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: i32, y: i3
     if y < BOTTOM_BAR_Y || y >= BOTTOM_BAR_Y + BOTTOM_BAR_HEIGHT as i32 {
         return None;
     }
+    let item_width = taskbar_item_width(table, workspace);
     let mut item_x = BOTTOM_BAR_MARGIN + 8;
     for window in table.iter() {
         if !window.in_use || window.workspace != workspace || window.id < DEMONX_WINDOW_ID_BASE {
             continue;
         }
-        if x >= item_x && x < item_x + TASKBAR_ITEM_WIDTH as i32 {
+        if x >= item_x && x < item_x + item_width as i32 {
             return Some(window.id);
         }
-        item_x += TASKBAR_ITEM_WIDTH as i32 + TASKBAR_ITEM_GAP;
+        item_x += item_width as i32 + TASKBAR_ITEM_GAP;
     }
     None
+}
+
+fn taskbar_item_width(table: &[Window; WINDOW_LIMIT], workspace: u32) -> u32 {
+    let count = table
+        .iter()
+        .filter(|window| {
+            window.in_use && window.workspace == workspace && window.id >= DEMONX_WINDOW_ID_BASE
+        })
+        .count() as u32;
+    if count == 0 {
+        return TASKBAR_ITEM_WIDTH;
+    }
+    let inner_width = SCREEN_WIDTH - (BOTTOM_BAR_MARGIN as u32 * 2) - 16;
+    let gaps = TASKBAR_ITEM_GAP as u32 * count.saturating_sub(1);
+    ((inner_width.saturating_sub(gaps)) / count)
+        .min(TASKBAR_ITEM_WIDTH)
+        .max(64)
 }
 
 fn hits_resize_corner(window: &Window, x: u32, y: u32) -> bool {
@@ -339,12 +367,26 @@ fn in_launcher_button(x: i32, y: i32) -> bool {
     x >= LAUNCHER_BTN_X0 && x < LAUNCHER_BTN_X1 && y >= PANEL_MARGIN && y < PANEL_MARGIN + PANEL_HEIGHT as i32
 }
 
-fn launcher_cell_y(index: i32) -> i32 {
-    LAUNCHER_Y + LAUNCHER_CELL_GAP + index * (LAUNCHER_CELL_HEIGHT + LAUNCHER_CELL_GAP)
+fn quick_launch_at(x: i32, y: i32) -> Option<i32> {
+    if y < PANEL_MARGIN + 4 || y >= PANEL_MARGIN + PANEL_HEIGHT as i32 - 4 {
+        return None;
+    }
+    for index in 0..LAUNCHER_CELL_COUNT {
+        let left = QUICK_LAUNCH_X + index * (QUICK_LAUNCH_SIZE + QUICK_LAUNCH_GAP);
+        if x >= left && x < left + QUICK_LAUNCH_SIZE {
+            return Some(index);
+        }
+    }
+    None
 }
 
-// Returns which cell (0 = Terminal, 1 = ClassiCube) a launcher click
-// landed on, or None if it missed both (still inside the popover, or
+fn launcher_cell_y(index: i32) -> i32 {
+    LAUNCHER_Y + LAUNCHER_HEADER_HEIGHT + LAUNCHER_CELL_GAP
+        + index * (LAUNCHER_CELL_HEIGHT + LAUNCHER_CELL_GAP)
+}
+
+// Returns which cell (0 = Terminal, 1 = ClassiCube, 2 = Doom, 3 = Quake) a launcher
+// click landed on, or None if it missed all entries (still inside the popover, or
 // outside it entirely -- either way, not an app entry).
 fn launcher_cell_at(x: i32, y: i32) -> Option<i32> {
     if x < LAUNCHER_X || x >= LAUNCHER_X + LAUNCHER_WIDTH as i32 {
@@ -359,18 +401,112 @@ fn launcher_cell_at(x: i32, y: i32) -> Option<i32> {
     None
 }
 
-fn draw_launcher_cell(frame: &mut [u32], index: i32, icon_color: u32, label: &[u8]) {
-    let cell_y = launcher_cell_y(index);
-    fill_rounded_rect(frame, LAUNCHER_X + 8, cell_y + (LAUNCHER_CELL_HEIGHT - 20) / 2, 20, 20, 5, icon_color);
-    draw_text(frame, LAUNCHER_X + 36, cell_y + (LAUNCHER_CELL_HEIGHT - 5) / 2, label, COLOR_TEXT);
+// Familiar desktop edge tiling without a layout daemon. The target is
+// derived only while a title drag is active, so merely parking the pointer
+// at an edge never changes a window.
+fn snap_target(x: u32, y: u32) -> u32 {
+    if y <= RESERVED_TOP + SNAP_DISTANCE {
+        1 // maximize
+    } else if x <= SNAP_DISTANCE {
+        2 // left half
+    } else if x + SNAP_DISTANCE >= SCREEN_WIDTH {
+        3 // right half
+    } else {
+        0
+    }
 }
 
-fn draw_launcher(frame: &mut [u32]) {
+fn snap_geometry(target: u32) -> (u32, u32, u32, u32) {
+    let y = RESERVED_TOP + TITLE_HEIGHT;
+    let height = SCREEN_HEIGHT - RESERVED_BOTTOM - y;
+    match target {
+        2 => (0, y, SCREEN_WIDTH / 2, height),
+        3 => (SCREEN_WIDTH / 2, y, SCREEN_WIDTH - SCREEN_WIDTH / 2, height),
+        _ => (0, y, SCREEN_WIDTH, height),
+    }
+}
+
+fn cursor_icon_at(
+    table: &[Window; WINDOW_LIMIT],
+    workspace: u32,
+    x: u32,
+    y: u32,
+    dragging_id: u32,
+    resizing_id: u32,
+    launcher_open: bool,
+) -> u64 {
+    if resizing_id != 0 {
+        return CURSOR_RESIZE_SE;
+    }
+    if dragging_id != 0 {
+        return CURSOR_HAND;
+    }
+    if in_launcher_button(x as i32, y as i32)
+        || quick_launch_at(x as i32, y as i32).is_some()
+        || workspace_dot_at(x as i32, y as i32).is_some()
+        || taskbar_item_at(table, workspace, x as i32, y as i32).is_some()
+        || (launcher_open && launcher_cell_at(x as i32, y as i32).is_some())
+        || decoration_hit_at(table, workspace, x, y).is_some()
+    {
+        return CURSOR_HAND;
+    }
+    if let Some(slot) = top_slot_at(table, workspace, x, y) {
+        if table[slot].id >= DEMONX_WINDOW_ID_BASE
+            && hits_resize_corner(&table[slot], x, y)
+        {
+            return CURSOR_RESIZE_SE;
+        }
+    }
+    CURSOR_ARROW
+}
+
+fn draw_launcher_cell(
+    frame: &mut [u32],
+    index: i32,
+    label: &[u8],
+    hovered: bool,
+    shell_icons: &[u32],
+    shell_icons_loaded: bool,
+) {
+    let cell_y = launcher_cell_y(index);
+    if hovered {
+        fill_rounded_rect(frame, LAUNCHER_X + 6, cell_y, LAUNCHER_WIDTH - 12,
+                          LAUNCHER_CELL_HEIGHT as u32, 4, COLOR_SURFACE_HOVER);
+    }
+    let icon_x = LAUNCHER_X + 15;
+    let icon_y = cell_y + 10;
+    let icon = if index == 0 {
+        SHELL_ICON_TERMINAL
+    } else if index == 1 {
+        SHELL_ICON_MINECRAFT
+    } else if index == 2 {
+        SHELL_ICON_DOOM
+    } else {
+        SHELL_ICON_QUAKE
+    };
+    draw_shell_icon(frame, shell_icons, shell_icons_loaded, icon, icon_x, icon_y, 22);
+    draw_text(frame, LAUNCHER_X + 48, cell_y + 18, label, COLOR_TEXT);
+}
+
+fn draw_launcher(
+    frame: &mut [u32],
+    selection: i32,
+    shell_icons: &[u32],
+    shell_icons_loaded: bool,
+) {
     draw_shadow(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT);
-    blend_rounded_rect(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT, CORNER_RADIUS, 0xff20242c, PANEL_BLEND_ALPHA);
-    draw_launcher_cell(frame, 0, COLOR_VIOLET, b"TERMINAL");
-    draw_launcher_cell(frame, 1, COLOR_CONTROL_MAXIMIZE, b"CLASSICUBE");
-    draw_launcher_cell(frame, 2, COLOR_CONTROL_CLOSE, b"DOOM");
+    blend_rounded_rect(frame, LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH,
+                       LAUNCHER_HEIGHT, CORNER_RADIUS, COLOR_PANEL_BG, PANEL_BLEND_ALPHA);
+    draw_text(frame, LAUNCHER_X + 12, LAUNCHER_Y + 11, b"APPLICATIONS", COLOR_TEXT_MUTED);
+    fill_rect(frame, LAUNCHER_X + 8, LAUNCHER_Y + LAUNCHER_HEADER_HEIGHT - 1,
+              LAUNCHER_WIDTH - 16, 1, COLOR_BORDER);
+    // Mouse motion updates `selection` in the event loop, so drawing from one
+    // shared value lets the last input method win. In particular, a pointer
+    // left resting over Terminal must not mask a later Down-arrow selection.
+    draw_launcher_cell(frame, 0, b"TERMINAL", selection == 0, shell_icons, shell_icons_loaded);
+    draw_launcher_cell(frame, 1, b"CLASSICUBE", selection == 1, shell_icons, shell_icons_loaded);
+    draw_launcher_cell(frame, 2, b"DOOM", selection == 2, shell_icons, shell_icons_loaded);
+    draw_launcher_cell(frame, 3, b"QUAKE", selection == 3, shell_icons, shell_icons_loaded);
 }
 
 fn find_free_slot(table: &[Window; WINDOW_LIMIT]) -> Option<usize> {
@@ -385,9 +521,172 @@ fn find_top_slot(table: &[Window; WINDOW_LIMIT], workspace: u32) -> Option<usize
     table
         .iter()
         .enumerate()
-        .filter(|(_, w)| w.in_use && w.workspace == workspace)
+        .filter(|(_, w)| w.in_use && !w.minimized && w.workspace == workspace)
         .max_by_key(|(_, w)| w.z)
         .map(|(index, _)| index)
+}
+
+fn toggle_maximize(window: &mut Window) {
+    window.minimized = false;
+    if window.maximized {
+        window.x = window.restore_x;
+        window.y = window.restore_y;
+        window.width = window.restore_width;
+        window.height = window.restore_height;
+        window.maximized = false;
+    } else {
+        window.restore_x = window.x;
+        window.restore_y = window.y;
+        window.restore_width = window.width;
+        window.restore_height = window.height;
+        let (x, y, width, height) = snap_geometry(1);
+        window.x = x;
+        window.y = y;
+        window.width = width;
+        window.height = height;
+        window.maximized = true;
+    }
+}
+
+// User-requested closes notify the owning DemonX client before releasing the
+// compositor's mapped surface. This is shared by the title button and
+// Alt+F4, so neither path can leave a headless game process behind.
+fn close_window(
+    table: &mut [Window; WINDOW_LIMIT],
+    slot: usize,
+    workspace: u32,
+) -> u32 {
+    let window = table[slot];
+    if window.id >= DEMONX_WINDOW_ID_BASE {
+        send_window_event(window.id, WindowOpcode::Close, 9, 0, 0, 0, 0);
+    }
+    if window.surface_id != 0 {
+        demon_abi::surface_unmap(window.surface_id as u64);
+        demon_abi::handle_close(window.surface_id as u64);
+    }
+    table[slot] = Window::EMPTY;
+    find_top_slot(table, workspace).map_or(0, |top| table[top].id)
+}
+
+fn shell_icon_for_window(window: &Window) -> usize {
+    let mut title = [0u8; 24];
+    let length = window.title_text(&mut title);
+    if &title[..length] == b"XTERM" {
+        SHELL_ICON_TERMINAL
+    } else if &title[..length] == b"CLASSICUBE" {
+        SHELL_ICON_MINECRAFT
+    } else if &title[..length] == b"FREEDOOM" {
+        SHELL_ICON_DOOM
+    } else if &title[..length] == b"QUAKE" {
+        SHELL_ICON_QUAKE
+    } else {
+        SHELL_ICON_APPLICATION
+    }
+}
+
+fn find_window_by_title(table: &[Window; WINDOW_LIMIT], wanted: &[u8]) -> Option<usize> {
+    table.iter().position(|window| {
+        if !window.in_use || window.id < DEMONX_WINDOW_ID_BASE {
+            return false;
+        }
+        let mut title = [0u8; 24];
+        let length = window.title_text(&mut title);
+        length == wanted.len() && &title[..length] == wanted
+    })
+}
+
+// Select the most recently used window other than the focused one. Raising
+// the result after every cycle naturally maintains MRU order without another
+// allocation or list. Minimized windows participate and are restored when
+// selected, matching familiar desktop Alt+Tab behavior.
+fn find_cycle_slot(
+    table: &[Window; WINDOW_LIMIT],
+    workspace: u32,
+    focused_window: u32,
+) -> Option<usize> {
+    table
+        .iter()
+        .enumerate()
+        .filter(|(_, window)| {
+            window.in_use
+                && window.workspace == workspace
+                && window.id >= DEMONX_WINDOW_ID_BASE
+                && window.id != focused_window
+        })
+        .max_by_key(|(_, window)| window.z)
+        .map(|(index, _)| index)
+        .or_else(|| find_slot(table, focused_window))
+}
+
+fn activate_launcher_cell(
+    cell: i32,
+    table: &mut [Window; WINDOW_LIMIT],
+    current_workspace: &mut u32,
+    focused_window: &mut u32,
+    next_z: &mut u32,
+) {
+    if cell == 0 {
+        // The session starts one xterm already. Reuse it instead of
+        // triggering the known duplicate-spawn IPC bug.
+        if let Some(slot) = find_window_by_title(table, b"XTERM") {
+            *current_workspace = table[slot].workspace;
+            table[slot].minimized = false;
+            table[slot].z = *next_z;
+            *next_z += 1;
+            *focused_window = table[slot].id;
+        }
+    } else if cell == 1 {
+        if let Some(slot) = find_window_by_title(table, b"ClassiCube") {
+            *current_workspace = table[slot].workspace;
+            table[slot].minimized = false;
+            table[slot].z = *next_z;
+            *next_z += 1;
+            *focused_window = table[slot].id;
+        } else {
+            let pid = demon_abi::spawn(
+                b"/system/bin/classicube-core.elf",
+                CLASSICUBE_SERVICE_MASK,
+            );
+            if pid == u64::MAX {
+                demon_abi::write(b"CLASSICUBE_WINDOW_SPAWN_FAILED\n");
+            } else {
+                demon_abi::write(b"CLASSICUBE_WINDOW_SPAWNED\n");
+            }
+        }
+    } else if cell == 2 {
+        if let Some(slot) = find_window_by_title(table, b"Freedoom") {
+            *current_workspace = table[slot].workspace;
+            table[slot].minimized = false;
+            table[slot].z = *next_z;
+            *next_z += 1;
+            *focused_window = table[slot].id;
+        } else {
+            let pid = demon_abi::spawn(b"/system/bin/doom-full.elf", DOOM_SERVICE_MASK);
+            if pid == u64::MAX {
+                demon_abi::write(b"FREEDOOM_WINDOW_SPAWN_FAILED\n");
+            } else {
+                demon_abi::write(b"FREEDOOM_WINDOW_SPAWNED\n");
+            }
+        }
+    } else if cell == 3 {
+        if let Some(slot) = find_window_by_title(table, b"Quake") {
+            *current_workspace = table[slot].workspace;
+            table[slot].minimized = false;
+            table[slot].z = *next_z;
+            *next_z += 1;
+            *focused_window = table[slot].id;
+        } else {
+            let pid = demon_abi::spawn(
+                b"/system/bin/quake-core.elf",
+                CLASSICUBE_SERVICE_MASK,
+            );
+            if pid == u64::MAX {
+                demon_abi::write(b"QUAKE_WINDOW_SPAWN_FAILED\n");
+            } else {
+                demon_abi::write(b"QUAKE_WINDOW_SPAWNED\n");
+            }
+        }
+    }
 }
 
 fn top_slot_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: u32, y: u32) -> Option<usize> {
@@ -396,6 +695,7 @@ fn top_slot_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: u32, y: u32) -
         .enumerate()
         .filter(|(_, w)| {
             w.in_use
+                && !w.minimized
                 && w.workspace == workspace
                 && x >= w.x
                 && x < w.x + w.width
@@ -404,6 +704,49 @@ fn top_slot_at(table: &[Window; WINDOW_LIMIT], workspace: u32, x: u32, y: u32) -
         })
         .max_by_key(|(_, w)| w.z)
         .map(|(index, _)| index)
+}
+
+// Fit a client's fixed-size retained surface into its current logical
+// window while preserving the source aspect ratio. The allocation never
+// grows when the user resizes or maximizes a window, keeping the bounded
+// surface arena cheap enough for xterm, Doom and ClassiCube to coexist.
+fn content_rect(window: &Window) -> (u32, u32, u32, u32) {
+    if window.surface_width == 0 || window.surface_height == 0 ||
+       window.width == 0 || window.height == 0 {
+        return (window.x, window.y, window.width, window.height);
+    }
+    let mut width = window.width;
+    let mut height = ((width as u64 * window.surface_height as u64) /
+                      window.surface_width as u64) as u32;
+    if height > window.height {
+        height = window.height;
+        width = ((height as u64 * window.surface_width as u64) /
+                 window.surface_height as u64) as u32;
+    }
+    width = width.max(1);
+    height = height.max(1);
+    (
+        window.x + (window.width - width) / 2,
+        window.y + (window.height - height) / 2,
+        width,
+        height,
+    )
+}
+
+// Rendering and input share the exact same transform. A click therefore
+// continues to land on the same client pixel after resizing instead of
+// drifting with the enlarged desktop coordinates.
+fn client_point(window: &Window, x: u32, y: u32) -> Option<(i32, i32)> {
+    let (content_x, content_y, content_width, content_height) = content_rect(window);
+    if x < content_x || y < content_y ||
+       x >= content_x + content_width || y >= content_y + content_height {
+        return None;
+    }
+    let source_x = ((x - content_x) as u64 * window.surface_width as u64 /
+                    content_width as u64) as i32;
+    let source_y = ((y - content_y) as u64 * window.surface_height as u64 /
+                    content_height as u64) as i32;
+    Some((source_x, source_y))
 }
 
 // Connect to a window's native event channel and deliver a 64-byte
@@ -538,6 +881,14 @@ fn fill_rect(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32, color: 
     }
 }
 
+fn stroke_rect(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32, color: u32) {
+    if width == 0 || height == 0 { return; }
+    fill_rect(frame, x, y, width, 1, color);
+    fill_rect(frame, x, y + height as i32 - 1, width, 1, color);
+    fill_rect(frame, x, y, 1, height, color);
+    fill_rect(frame, x + width as i32 - 1, y, 1, height, color);
+}
+
 // Alpha-blends `color`'s RGB into whatever is already at (x, y), weighted
 // by `alpha` (0..=255). Used for the drop shadow -- a hard-edged shadow
 // rect would just look like a second, darker rectangle; blending against
@@ -562,35 +913,64 @@ fn blend_pixel(frame: &mut [u32], x: i32, y: i32, color: u32, alpha: u8) {
         | blend_channel(0);
 }
 
-// A soft rectangular shadow: rather than a hard-edged alpha rect (which
-// just reads as a second, flat-gray rectangle), alpha fades linearly over
-// SHADOW_FEATHER pixels at each edge, so it actually reads as something
-// glowing/receding behind the window rather than another decoration.
-const SHADOW_FEATHER: i32 = 8;
-fn draw_shadow(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32) {
-    let x0 = x - SHADOW_FEATHER;
-    let y0 = y - SHADOW_FEATHER;
-    let x1 = x + width as i32 + SHADOW_FEATHER;
-    let y1 = y + height as i32 + SHADOW_FEATHER;
-    for row in y0..y1 {
-        let fade_y = ((row - y0).min(y1 - 1 - row) + 1).clamp(0, SHADOW_FEATHER);
-        for col in x0..x1 {
-            let fade_x = ((col - x0).min(x1 - 1 - col) + 1).clamp(0, SHADOW_FEATHER);
-            let fade = fade_x.min(fade_y);
-            let alpha = (fade * 70 / SHADOW_FEATHER) as u8;
-            if alpha > 0 {
-                blend_pixel(frame, col, row, 0xff000000, alpha);
+// The atlas is generated from the repository's Fluent SVGs at build time.
+// Scaling here is nearest-neighbour and allocation-free; the same 22px asset
+// can therefore serve a compact title bar and a full-size launcher row.
+fn draw_shell_icon(
+    frame: &mut [u32],
+    atlas: &[u32],
+    loaded: bool,
+    icon: usize,
+    x: i32,
+    y: i32,
+    size: u32,
+) {
+    if !loaded || icon >= SHELL_ICON_COUNT || size == 0 {
+        return;
+    }
+    let icon_offset = icon * SHELL_ICON_WIDTH * SHELL_ICON_HEIGHT;
+    for destination_y in 0..size {
+        let source_y = destination_y as usize * SHELL_ICON_HEIGHT / size as usize;
+        for destination_x in 0..size {
+            let source_x = destination_x as usize * SHELL_ICON_WIDTH / size as usize;
+            let pixel = atlas[icon_offset + source_y * SHELL_ICON_WIDTH + source_x];
+            let alpha = (pixel >> 24) as u8;
+            if alpha == 255 {
+                put_pixel(frame, x + destination_x as i32, y + destination_y as i32, pixel);
+            } else if alpha != 0 {
+                blend_pixel(
+                    frame,
+                    x + destination_x as i32,
+                    y + destination_y as i32,
+                    pixel,
+                    alpha,
+                );
             }
         }
     }
 }
 
-fn fill_circle(frame: &mut [u32], center_x: i32, center_y: i32, radius: i32, color: u32) {
-    for row in -radius..=radius {
-        for col in -radius..=radius {
-            if col * col + row * row <= radius * radius {
-                put_pixel(frame, center_x + col, center_y + row, color);
-            }
+// A soft perimeter shadow. Only the narrow bands outside the surface are
+// touched; the older implementation blended the entire covered rectangle
+// even though the window immediately painted over it. This preserves the
+// same depth cue with substantially less CPU and memory traffic.
+const SHADOW_FEATHER: i32 = 8;
+fn draw_shadow(frame: &mut [u32], x: i32, y: i32, width: u32, height: u32) {
+    let right = x + width as i32;
+    let bottom = y + height as i32;
+    for distance in 1..=SHADOW_FEATHER {
+        let alpha = ((SHADOW_FEATHER - distance + 1) * 64 / SHADOW_FEATHER) as u8;
+        let left_x = x - distance;
+        let right_x = right - 1 + distance;
+        for row in (y - distance)..(bottom + distance) {
+            blend_pixel(frame, left_x, row, 0xff000000, alpha);
+            blend_pixel(frame, right_x, row, 0xff000000, alpha);
+        }
+        let top_y = y - distance;
+        let bottom_y = bottom - 1 + distance;
+        for col in x..right {
+            blend_pixel(frame, col, top_y, 0xff000000, alpha);
+            blend_pixel(frame, col, bottom_y, 0xff000000, alpha);
         }
     }
 }
@@ -693,13 +1073,17 @@ fn draw_text(frame: &mut [u32], x: i32, y: i32, text: &[u8], color: u32) {
     }
 }
 
-// Decoration strip for one window: title bar fill, close/maximize
-// controls, ported from Desktop/demonwm/demonwm.cc's drawFrame -- drawn as
-// a compositor-level overlay above the window's own content rather than a
-// second reparented frame window (see this file's own decoration comment).
-const CONTROL_DOT_RADIUS: i32 = 6;
-
-fn draw_decoration(frame: &mut [u32], window: &Window, focused: bool) {
+// Decoration strip for one window. Hover feedback is deliberately confined
+// to the topmost title bar, making the controls feel responsive without an
+// animation timer or another backing surface.
+fn draw_decoration(
+    frame: &mut [u32],
+    window: &Window,
+    focused: bool,
+    hovered_control: u32,
+    shell_icons: &[u32],
+    shell_icons_loaded: bool,
+) {
     let top = decoration_top(window) as i32;
     let title_color = if focused {
         COLOR_TITLE_FOCUSED
@@ -707,18 +1091,53 @@ fn draw_decoration(frame: &mut [u32], window: &Window, focused: bool) {
         COLOR_TITLE_UNFOCUSED
     };
     fill_rounded_rect_top(frame, window.x as i32, top, window.width, TITLE_HEIGHT, CORNER_RADIUS, title_color);
+    if focused {
+        fill_rect(frame, window.x as i32 + CORNER_RADIUS, top,
+                  window.width.saturating_sub((CORNER_RADIUS * 2) as u32), 2, COLOR_ACCENT);
+    }
+    draw_shell_icon(
+        frame,
+        shell_icons,
+        shell_icons_loaded,
+        shell_icon_for_window(window),
+        window.x as i32 + 7,
+        top + 5,
+        14,
+    );
     let mut title_buffer = [0u8; 24];
-    let title_length = window.title_text(&mut title_buffer);
-    draw_text(frame, window.x as i32 + 44, top + 8, &title_buffer[..title_length], COLOR_TEXT);
+    let title_length = window.title_text(&mut title_buffer)
+        .min((window.width.saturating_sub(104) / 5) as usize);
+    draw_text(frame, window.x as i32 + 27, top + 9,
+              &title_buffer[..title_length], if focused { COLOR_TEXT } else { COLOR_TEXT_MUTED });
 
     let control_y = top + TITLE_HEIGHT as i32 / 2;
-    // macOS-style traffic lights: solid dots, dimmed (muted grey) when the
-    // window isn't focused, matching how real title bar controls fade on
-    // an inactive window instead of staying fully saturated.
-    let close_color = if focused { COLOR_CONTROL_CLOSE } else { COLOR_TEXT_MUTED };
-    let maximize_color = if focused { COLOR_CONTROL_MAXIMIZE } else { COLOR_TEXT_MUTED };
-    fill_circle(frame, window.x as i32 + close_control_x(window), control_y, CONTROL_DOT_RADIUS, close_color);
-    fill_circle(frame, window.x as i32 + maximize_control_x(window), control_y, CONTROL_DOT_RADIUS, maximize_color);
+    let symbol = if focused { COLOR_CONTROL_MAXIMIZE } else { COLOR_TEXT_MUTED };
+    let min_x = window.x as i32 + minimize_control_x(window);
+    let max_x = window.x as i32 + maximize_control_x(window);
+    let close_x = window.x as i32 + close_control_x(window);
+    if hovered_control == 3 {
+        fill_rounded_rect(frame, min_x - 8, control_y - 8, CONTROL_SIZE, CONTROL_SIZE,
+                          4, COLOR_SURFACE_HOVER);
+    } else if hovered_control == 1 {
+        fill_rounded_rect(frame, max_x - 8, control_y - 8, CONTROL_SIZE, CONTROL_SIZE,
+                          4, COLOR_SURFACE_HOVER);
+    } else if hovered_control == 2 {
+        fill_rounded_rect(frame, close_x - 8, control_y - 8, CONTROL_SIZE, CONTROL_SIZE,
+                          4, 0xffb43d46);
+    }
+    fill_rect(frame, min_x - 4, control_y + 3, 8, 1, symbol);
+    stroke_rect(frame, max_x - 4, control_y - 4, 8, 8, symbol);
+    let close_color = if hovered_control == 2 {
+        COLOR_TEXT
+    } else if focused {
+        COLOR_CONTROL_CLOSE
+    } else {
+        COLOR_TEXT_MUTED
+    };
+    for offset in -3..=3 {
+        put_pixel(frame, close_x + offset, control_y + offset, close_color);
+        put_pixel(frame, close_x + offset, control_y - offset, close_color);
+    }
 }
 
 fn push_digit(buffer: &mut [u8; 5], index: &mut usize, value: u32) {
@@ -726,16 +1145,31 @@ fn push_digit(buffer: &mut [u8; 5], index: &mut usize, value: u32) {
     *index += 1;
 }
 
-// Top panel: launcher button, workspace dots, a real HH:MM clock (see
+// Top panel: launcher button, workspace marks, a real HH:MM clock (see
 // syscall 48 / demon_abi::real_time_of_day -- CMOS/RTC time, not kernel
-// uptime), and tray placeholders. Ported from demonwm's own drawPanel,
-// drawn as a pure overlay with no window-table entry of its own.
-fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
+// uptime), and compact status glyphs. It is a compositor overlay with no
+// window-table entry of its own.
+fn draw_panel(
+    frame: &mut [u32],
+    current_workspace: u32,
+    launcher_open: bool,
+    cursor_x: u32,
+    cursor_y: u32,
+    shell_icons: &[u32],
+    shell_icons_loaded: bool,
+) {
     let width = SCREEN_WIDTH as i32 - 2 * PANEL_MARGIN;
     draw_shadow(frame, PANEL_MARGIN, PANEL_MARGIN, width as u32, PANEL_HEIGHT);
     blend_rounded_rect(frame, PANEL_MARGIN, PANEL_MARGIN, width as u32, PANEL_HEIGHT, CORNER_RADIUS, COLOR_PANEL_BG, PANEL_BLEND_ALPHA);
 
-    let launcher_color = if launcher_open { COLOR_VIOLET } else { COLOR_EMBER };
+    let launcher_hovered = in_launcher_button(cursor_x as i32, cursor_y as i32);
+    let launcher_color = if launcher_open {
+        COLOR_ACCENT_DARK
+    } else if launcher_hovered {
+        COLOR_SURFACE_HOVER
+    } else {
+        COLOR_TASKBAR_ITEM
+    };
     fill_rounded_rect(
         frame,
         LAUNCHER_BTN_X0,
@@ -745,13 +1179,50 @@ fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
         6,
         launcher_color,
     );
-    draw_text(frame, LAUNCHER_BTN_X0 + 8, PANEL_MARGIN + 10, b"DEMONOS", COLOR_TEXT);
+    draw_shell_icon(
+        frame,
+        shell_icons,
+        shell_icons_loaded,
+        SHELL_ICON_APPLICATION,
+        LAUNCHER_BTN_X0 + 3,
+        PANEL_MARGIN + 5,
+        18,
+    );
+    draw_text(frame, LAUNCHER_BTN_X0 + 25, PANEL_MARGIN + 10, b"DEMON", COLOR_TEXT);
 
-    // Workspace dots, just left of center.
+    // Always-visible launchers keep common apps one click away. They call
+    // the same activation function as the menu, so an already-open app is
+    // focused and raised instead of duplicated.
+    for index in 0..LAUNCHER_CELL_COUNT {
+        let x = QUICK_LAUNCH_X + index * (QUICK_LAUNCH_SIZE + QUICK_LAUNCH_GAP);
+        if quick_launch_at(cursor_x as i32, cursor_y as i32) == Some(index) {
+            fill_rounded_rect(frame, x, PANEL_MARGIN + 4,
+                              QUICK_LAUNCH_SIZE as u32,
+                              PANEL_HEIGHT - 8, 5, COLOR_SURFACE_HOVER);
+        }
+        let icon = if index == 0 {
+            SHELL_ICON_TERMINAL
+        } else if index == 1 {
+            SHELL_ICON_MINECRAFT
+        } else if index == 2 {
+            SHELL_ICON_DOOM
+        } else {
+            SHELL_ICON_QUAKE
+        };
+        draw_shell_icon(frame, shell_icons, shell_icons_loaded, icon,
+                        x + 3, PANEL_MARGIN + 7, 18);
+    }
+
+    // Workspace marks. The active desktop expands into a short cyan capsule,
+    // which is easier to identify at a glance than three equal dots.
     let dots_x = PANEL_MARGIN + width / 2 - 30;
     for dot in 0..WORKSPACE_COUNT {
-        let color = if dot == current_workspace { COLOR_EMBER } else { COLOR_TEXT_MUTED };
-        fill_circle(frame, dots_x + dot as i32 * 10 + 3, PANEL_MARGIN + 15, 3, color);
+        let active = dot == current_workspace;
+        let hovered = workspace_dot_at(cursor_x as i32, cursor_y as i32) == Some(dot);
+        let mark_width = if active { 8 } else { 4 };
+        fill_rounded_rect(frame, dots_x + dot as i32 * 12, PANEL_MARGIN + 13,
+                          mark_width, 4, 2,
+                          if active { COLOR_ACCENT } else if hovered { COLOR_TEXT } else { COLOR_TEXT_MUTED });
     }
 
     // Clock, centered: real wall-clock time from CMOS/RTC, not uptime.
@@ -768,34 +1239,78 @@ fn draw_panel(frame: &mut [u32], current_workspace: u32, launcher_open: bool) {
     push_digit(&mut clock_text, &mut index, minute % 10);
     draw_text(frame, PANEL_MARGIN + width / 2 + 8, PANEL_MARGIN + 10, &clock_text, COLOR_TEXT);
 
-    // Tray placeholders, right-aligned.
-    for slot in 0..3 {
-        let tray_x = PANEL_MARGIN + width - 12 - slot * 22 - 7;
-        fill_circle(frame, tray_x, PANEL_MARGIN + 15, 6, COLOR_TEXT_MUTED);
+    // Small, low-cost status glyphs: signal strength, audio and power. They
+    // communicate purpose without pretending to expose unavailable data.
+    let tray_right = PANEL_MARGIN + width - 12;
+    for bar in 0..3 {
+        fill_rect(frame, tray_right - 8 + bar * 4, PANEL_MARGIN + 18 - bar * 3,
+                  2, (4 + bar * 3) as u32, COLOR_TEXT_MUTED);
     }
+    fill_rect(frame, tray_right - 34, PANEL_MARGIN + 12, 4, 7, COLOR_TEXT_MUTED);
+    fill_rect(frame, tray_right - 30, PANEL_MARGIN + 10, 2, 11, COLOR_TEXT_MUTED);
+    stroke_rect(frame, tray_right - 58, PANEL_MARGIN + 10, 15, 9, COLOR_TEXT_MUTED);
+    fill_rect(frame, tray_right - 42, PANEL_MARGIN + 13, 2, 3, COLOR_TEXT_MUTED);
 }
 
 // Bottom taskbar: one pill-shaped entry per open window on the current
 // workspace, the focused one highlighted in the accent color. Real, not
 // decorative -- see taskbar_item_at's matching hit-test, wired to the
 // same focus+raise action clicking the window itself triggers.
-fn draw_taskbar(frame: &mut [u32], table: &[Window; WINDOW_LIMIT], workspace: u32, focused_window: u32) {
+fn draw_taskbar(
+    frame: &mut [u32],
+    table: &[Window; WINDOW_LIMIT],
+    workspace: u32,
+    focused_window: u32,
+    cursor_x: u32,
+    cursor_y: u32,
+    shell_icons: &[u32],
+    shell_icons_loaded: bool,
+) {
     let width = SCREEN_WIDTH as i32 - 2 * BOTTOM_BAR_MARGIN;
     draw_shadow(frame, BOTTOM_BAR_MARGIN, BOTTOM_BAR_Y, width as u32, BOTTOM_BAR_HEIGHT);
     blend_rounded_rect(frame, BOTTOM_BAR_MARGIN, BOTTOM_BAR_Y, width as u32, BOTTOM_BAR_HEIGHT, CORNER_RADIUS, COLOR_PANEL_BG, PANEL_BLEND_ALPHA);
 
+    let item_width = taskbar_item_width(table, workspace);
+    let hovered_window = taskbar_item_at(
+        table,
+        workspace,
+        cursor_x as i32,
+        cursor_y as i32,
+    ).unwrap_or(0);
     let mut item_x = BOTTOM_BAR_MARGIN + 8;
     for window in table.iter() {
         if !window.in_use || window.workspace != workspace || window.id < DEMONX_WINDOW_ID_BASE {
             continue;
         }
         let focused = window.id == focused_window;
-        let item_color = if focused { COLOR_TITLE_FOCUSED } else { COLOR_TASKBAR_ITEM };
-        fill_rounded_rect(frame, item_x, BOTTOM_BAR_Y + 6, TASKBAR_ITEM_WIDTH, BOTTOM_BAR_HEIGHT - 12, 8, item_color);
+        let item_color = if focused {
+            COLOR_TITLE_FOCUSED
+        } else if window.id == hovered_window {
+            COLOR_SURFACE_HOVER
+        } else {
+            COLOR_TASKBAR_ITEM
+        };
+        fill_rounded_rect(frame, item_x, BOTTOM_BAR_Y + 6, item_width,
+                          BOTTOM_BAR_HEIGHT - 12, 6, item_color);
+        draw_shell_icon(
+            frame,
+            shell_icons,
+            shell_icons_loaded,
+            shell_icon_for_window(window),
+            item_x + 6,
+            BOTTOM_BAR_Y + 9,
+            22,
+        );
         let mut title_buffer = [0u8; 24];
-        let title_length = window.title_text(&mut title_buffer);
-        draw_text(frame, item_x + 10, BOTTOM_BAR_Y + 16, &title_buffer[..title_length], COLOR_TEXT);
-        item_x += TASKBAR_ITEM_WIDTH as i32 + TASKBAR_ITEM_GAP;
+        let title_length = window.title_text(&mut title_buffer)
+            .min((item_width.saturating_sub(36) / 5) as usize);
+        draw_text(frame, item_x + 32, BOTTOM_BAR_Y + 16, &title_buffer[..title_length],
+                  if window.minimized { COLOR_TEXT_MUTED } else { COLOR_TEXT });
+        if focused && !window.minimized {
+            fill_rect(frame, item_x + 8, BOTTOM_BAR_Y + BOTTOM_BAR_HEIGHT as i32 - 4,
+                      item_width.saturating_sub(16), 2, COLOR_ACCENT);
+        }
+        item_x += item_width as i32 + TASKBAR_ITEM_GAP;
     }
 }
 
@@ -827,41 +1342,64 @@ fn composite(
     focused_window: u32,
     current_workspace: u32,
     launcher_open: bool,
+    launcher_selection: i32,
+    cursor_x: u32,
+    cursor_y: u32,
+    dragging_id: u32,
     wallpaper: &[u32],
     wallpaper_loaded: bool,
+    shell_icons: &[u32],
+    shell_icons_loaded: bool,
 ) {
     draw_wallpaper(frame, wallpaper, wallpaper_loaded);
+    let hovered_decoration = decoration_hit_at(table, current_workspace, cursor_x, cursor_y)
+        .map(|slot| table[slot].id)
+        .unwrap_or(0);
     let mut order: [usize; WINDOW_LIMIT] = [0, 1, 2, 3, 4, 5, 6, 7];
     order.sort_unstable_by_key(|&index| table[index].z);
     for &index in order.iter() {
         let window = table[index];
-        if !window.in_use || window.workspace != current_workspace {
+        if !window.in_use || window.minimized || window.workspace != current_workspace {
             continue;
         }
         if window.id >= DEMONX_WINDOW_ID_BASE {
             draw_shadow(frame, window.x as i32, decoration_top(&window) as i32, window.width, window.height + TITLE_HEIGHT);
         }
         if window.mapped_address != 0 {
-            // Blit at most the surface's own real dimensions -- resize only
-            // ever changes window.width/height (on-screen placement), never
-            // surface_width/height (what the client actually allocated), so
-            // this never reads past the mapped surface even mid-resize.
-            let copy_width = window.width.min(window.surface_width) as usize;
-            let copy_height = window.height.min(window.surface_height) as usize;
-            if copy_width < window.width as usize || copy_height < window.height as usize {
-                // Resized larger than the surface actually is: pad the
-                // uncovered strip with background instead of leaving
-                // whatever was there from the previous frame.
-                fill_rect(frame, window.x as i32, window.y as i32, window.width, window.height, BACKGROUND_COLOR);
-            }
             let pixels = window.surface_width as usize * window.surface_height as usize;
             let source =
                 unsafe { core::slice::from_raw_parts(window.mapped_address as *const u32, pixels) };
-            for row in 0..copy_height {
-                let src_start = row * window.surface_width as usize;
-                let dst_start = (window.y as usize + row) * SCREEN_WIDTH as usize + window.x as usize;
-                frame[dst_start..dst_start + copy_width]
-                    .copy_from_slice(&source[src_start..src_start + copy_width]);
+            let (content_x, content_y, content_width, content_height) = content_rect(&window);
+            if content_width != window.width || content_height != window.height {
+                fill_rect(frame, window.x as i32, window.y as i32,
+                          window.width, window.height, 0xff05080bu32);
+            }
+            if content_width == window.surface_width &&
+               content_height == window.surface_height {
+                for row in 0..content_height as usize {
+                    let src_start = row * window.surface_width as usize;
+                    let dst_start = (content_y as usize + row) * SCREEN_WIDTH as usize +
+                                    content_x as usize;
+                    frame[dst_start..dst_start + content_width as usize]
+                        .copy_from_slice(&source[src_start..src_start + content_width as usize]);
+                }
+            } else {
+                // Allocation-free nearest-neighbour scaling keeps pixel-art
+                // applications sharp and works without graphics hardware.
+                for destination_y in 0..content_height {
+                    let source_y = (destination_y as u64 *
+                                    window.surface_height as u64 /
+                                    content_height as u64) as usize;
+                    let dst_start = (content_y + destination_y) as usize *
+                                    SCREEN_WIDTH as usize + content_x as usize;
+                    for destination_x in 0..content_width {
+                        let source_x = (destination_x as u64 *
+                                        window.surface_width as u64 /
+                                        content_width as u64) as usize;
+                        frame[dst_start + destination_x as usize] =
+                            source[source_y * window.surface_width as usize + source_x];
+                    }
+                }
             }
         } else {
             for row in 0..window.height {
@@ -870,13 +1408,76 @@ fn composite(
             }
         }
         if window.id >= DEMONX_WINDOW_ID_BASE {
-            draw_decoration(frame, &window, window.id == focused_window);
+            stroke_rect(frame, window.x as i32, window.y as i32, window.width, window.height,
+                        if window.id == focused_window { COLOR_ACCENT_DARK } else { COLOR_BORDER });
+            // Three tiny diagonal marks make the real resize target visible.
+            for grip in 0..3 {
+                put_pixel(frame,
+                          window.x as i32 + window.width as i32 - 3 - grip,
+                          window.y as i32 + window.height as i32 - 2,
+                          COLOR_TEXT_MUTED);
+            }
+            let hovered_control = if window.id == hovered_decoration {
+                title_control_at(&window, cursor_x.saturating_sub(window.x))
+            } else {
+                0
+            };
+            draw_decoration(
+                frame,
+                &window,
+                window.id == focused_window,
+                hovered_control,
+                shell_icons,
+                shell_icons_loaded,
+            );
         }
     }
-    draw_panel(frame, current_workspace, launcher_open);
-    draw_taskbar(frame, table, current_workspace, focused_window);
+    if dragging_id != 0 {
+        let target = snap_target(cursor_x, cursor_y);
+        if target != 0 {
+            let (x, y, width, height) = snap_geometry(target);
+            let preview_top = y.saturating_sub(TITLE_HEIGHT);
+            blend_rounded_rect(
+                frame,
+                x as i32 + 4,
+                preview_top as i32 + 4,
+                width.saturating_sub(8),
+                height + TITLE_HEIGHT - 8,
+                CORNER_RADIUS,
+                COLOR_ACCENT_DARK,
+                92,
+            );
+            stroke_rect(
+                frame,
+                x as i32 + 4,
+                preview_top as i32 + 4,
+                width.saturating_sub(8),
+                height + TITLE_HEIGHT - 8,
+                COLOR_ACCENT,
+            );
+        }
+    }
+    draw_panel(
+        frame,
+        current_workspace,
+        launcher_open,
+        cursor_x,
+        cursor_y,
+        shell_icons,
+        shell_icons_loaded,
+    );
+    draw_taskbar(
+        frame,
+        table,
+        current_workspace,
+        focused_window,
+        cursor_x,
+        cursor_y,
+        shell_icons,
+        shell_icons_loaded,
+    );
     if launcher_open {
-        draw_launcher(frame);
+        draw_launcher(frame, launcher_selection, shell_icons, shell_icons_loaded);
     }
 }
 
@@ -934,6 +1535,11 @@ pub extern "C" fn rust_main() -> ! {
     // Workspace/launcher UI state.
     let mut current_workspace: u32 = 0;
     let mut launcher_open: bool = false;
+    let mut launcher_selection: i32 = 0;
+    // A launcher action can close the launcher on key-down. Remember that
+    // key so its matching key-up is not delivered to the newly focused app
+    // without a preceding key-down.
+    let mut suppressed_key_up: u16 = 0;
     if demon_abi::display_cursor_move(display, cursor_x as u64, cursor_y as u64, 0) == UINT64_MAX {
         demon_abi::write(b"RUST_COMPOSITOR_FAIL cursor-init\n");
         demon_abi::exit(1);
@@ -951,7 +1557,17 @@ pub extern "C" fn rust_main() -> ! {
     // at all.
     const WALLPAPER_PIXELS: usize = demon_abi::WALLPAPER_WIDTH * demon_abi::WALLPAPER_HEIGHT;
     const WALLPAPER_BYTES: usize = WALLPAPER_PIXELS * 4;
-    let wallpaper_address = demon_abi::anonymous_map(WALLPAPER_BYTES as u64);
+    const SHELL_ICON_PIXELS: usize =
+        SHELL_ICON_WIDTH * SHELL_ICON_HEIGHT * SHELL_ICON_COUNT;
+    const SHELL_ICON_BYTES: usize = SHELL_ICON_PIXELS * 4;
+    const DESKTOP_ASSET_BYTES: usize = WALLPAPER_BYTES + SHELL_ICON_BYTES;
+
+    // anonymous_map is intentionally a one-shot, process-lifetime allocator.
+    // Reserve both assets together and partition that single mapping; trying
+    // to map the icon atlas separately made its second allocation fail and
+    // left every carefully positioned icon invisible.
+    let desktop_assets_address = demon_abi::anonymous_map(DESKTOP_ASSET_BYTES as u64);
+    let wallpaper_address = desktop_assets_address;
     let wallpaper_loaded = if wallpaper_address != UINT64_MAX {
         let storage = demon_abi::service_open(CapabilityService::Storage as u64);
         let handle = if storage != UINT64_MAX {
@@ -979,12 +1595,62 @@ pub extern "C" fn rust_main() -> ! {
         &[]
     };
 
+    // Keep artwork outside the executable: the 15 KiB atlas is an ordinary
+    // RAMFS resource generated from the Fluent SVG pack. It occupies the
+    // aligned tail of the same anonymous asset mapping as the wallpaper.
+    let shell_icons_address = if desktop_assets_address != UINT64_MAX {
+        desktop_assets_address + WALLPAPER_BYTES as u64
+    } else {
+        UINT64_MAX
+    };
+    let shell_icons_loaded = if shell_icons_address != UINT64_MAX {
+        let storage = demon_abi::service_open(CapabilityService::Storage as u64);
+        let handle = if storage != UINT64_MAX {
+            demon_abi::file_open(storage, b"/system/shell-icons.argb", false)
+        } else {
+            UINT64_MAX
+        };
+        let read_bytes = if handle != UINT64_MAX {
+            let destination = unsafe {
+                core::slice::from_raw_parts_mut(
+                    shell_icons_address as *mut u8,
+                    SHELL_ICON_BYTES,
+                )
+            };
+            let result = demon_abi::handle_read(handle, destination);
+            demon_abi::handle_close(handle);
+            result
+        } else {
+            UINT64_MAX
+        };
+        read_bytes == SHELL_ICON_BYTES as u64
+    } else {
+        false
+    };
+    let shell_icons: &[u32] = if shell_icons_loaded {
+        unsafe {
+            core::slice::from_raw_parts(
+                shell_icons_address as *const u32,
+                SHELL_ICON_PIXELS,
+            )
+        }
+    } else {
+        &[]
+    };
+
     let mut dirty = true;
     let mut next_frame_tick = demon_abi::ticks() + 5;
 
     demon_abi::write(b"RUST_COMPOSITOR_READY\n");
+    demon_abi::write(
+        b"RUST_DESKTOP_SHELL_READY style=native-blue minimize=1 workspaces=3 keyboard=1\n",
+    );
 
     loop {
+        /* Games are asynchronous children of the desktop. Collect completed
+           ones without blocking this event loop or consuming one of the
+           kernel's bounded process slots indefinitely. */
+        while demon_abi::reap_exited() != UINT64_MAX {}
         let now = demon_abi::ticks();
         let wait_ticks = if now < next_frame_tick {
             next_frame_tick - now
@@ -1023,6 +1689,7 @@ pub extern "C" fn rust_main() -> ! {
                                 surface_width: message.width,
                                 surface_height: message.height,
                                 maximized: false,
+                                minimized: false,
                                 restore_x: message.x as u32,
                                 restore_y: message.y as u32,
                                 restore_width: message.width,
@@ -1033,10 +1700,32 @@ pub extern "C" fn rust_main() -> ! {
                             };
                             next_z += 1;
                             if message.surface_id != 0 {
-                                let address = demon_abi::surface_map(message.surface_id as u64);
+                                // A logical X window may intentionally be
+                                // larger than its lightweight pixel surface.
+                                // Query the handle instead of assuming both
+                                // dimensions match the CREATE message.
+                                let queried_width =
+                                    demon_abi::handle_query(message.surface_id as u64, 0);
+                                let queried_height =
+                                    demon_abi::handle_query(message.surface_id as u64, 1);
+                                let queried_pixels =
+                                    demon_abi::handle_query(message.surface_id as u64, 2);
+                                let valid_dimensions = queried_width > 0 && queried_height > 0 &&
+                                    queried_width <= SCREEN_WIDTH as u64 &&
+                                    queried_height <= SCREEN_HEIGHT as u64 &&
+                                    queried_width.saturating_mul(queried_height) == queried_pixels;
+                                let address = if valid_dimensions {
+                                    demon_abi::surface_map(message.surface_id as u64)
+                                } else {
+                                    UINT64_MAX
+                                };
                                 if address != 0 && address != UINT64_MAX {
                                     table[slot].surface_id = message.surface_id;
                                     table[slot].mapped_address = address;
+                                    table[slot].surface_width = queried_width as u32;
+                                    table[slot].surface_height = queried_height as u32;
+                                } else {
+                                    demon_abi::handle_close(message.surface_id as u64);
                                 }
                             }
                             focused_window = message.window_id;
@@ -1060,6 +1749,7 @@ pub extern "C" fn rust_main() -> ! {
                 }
                 x if x == WindowOpcode::Focus as u16 => {
                     if let Some(slot) = find_slot(&table, message.window_id) {
+                        table[slot].minimized = false;
                         table[slot].z = next_z;
                         next_z += 1;
                         focused_window = message.window_id;
@@ -1096,9 +1786,34 @@ pub extern "C" fn rust_main() -> ! {
                 k if k == INPUT_MOUSE_MOVE => {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
-                    demon_abi::display_cursor_move(display, cursor_x as u64, cursor_y as u64, 0);
+                    if launcher_open {
+                        if let Some(cell) = launcher_cell_at(cursor_x as i32, cursor_y as i32) {
+                            launcher_selection = cell;
+                        }
+                    }
                     if dragging_id != 0 {
                         if let Some(slot) = find_slot(&table, dragging_id) {
+                            // Pull a maximized or snapped window out at its
+                            // remembered size before continuing the drag.
+                            // Preserve the pointer's proportional horizontal
+                            // position so the window does not jump sideways.
+                            if table[slot].maximized {
+                                let old = table[slot];
+                                let restored_width = old.restore_width
+                                    .max(MIN_WINDOW_WIDTH)
+                                    .min(SCREEN_WIDTH);
+                                let restored_height = old.restore_height
+                                    .max(MIN_WINDOW_HEIGHT)
+                                    .min(SCREEN_HEIGHT - RESERVED_BOTTOM - RESERVED_TOP - TITLE_HEIGHT);
+                                let local_x = cursor_x.saturating_sub(old.x).min(old.width);
+                                drag_grab_x = ((local_x as u64 * restored_width as u64)
+                                    / old.width.max(1) as u64) as i32;
+                                table[slot].x = old.restore_x;
+                                table[slot].y = old.restore_y;
+                                table[slot].width = restored_width;
+                                table[slot].height = restored_height;
+                                table[slot].maximized = false;
+                            }
                             let width = table[slot].width;
                             let height = table[slot].height;
                             let mut new_x = cursor_x as i32 - drag_grab_x;
@@ -1133,17 +1848,35 @@ pub extern "C" fn rust_main() -> ! {
                     } else if let Some(slot) = top_slot_at(&table, current_workspace, cursor_x, cursor_y) {
                         let window = table[slot];
                         if window.id >= DEMONX_WINDOW_ID_BASE {
-                            send_window_event(
-                                window.id,
-                                WindowOpcode::Pointer,
-                                5,
-                                (cursor_x - window.x) as i32,
-                                (cursor_y - window.y) as i32,
-                                0,
-                                0,
-                            );
+                            if let Some((client_x, client_y)) =
+                                client_point(&window, cursor_x, cursor_y) {
+                                send_window_event(
+                                    window.id,
+                                    WindowOpcode::Pointer,
+                                    5,
+                                    client_x,
+                                    client_y,
+                                    0,
+                                    0,
+                                );
+                            }
                         }
                     }
+                    let cursor_icon = cursor_icon_at(
+                        &table,
+                        current_workspace,
+                        cursor_x,
+                        cursor_y,
+                        dragging_id,
+                        resizing_id,
+                        launcher_open,
+                    );
+                    demon_abi::display_cursor_move(
+                        display,
+                        cursor_x as u64,
+                        cursor_y as u64,
+                        cursor_icon,
+                    );
                     repaint = true;
                 }
                 k if k == INPUT_MOUSE_BUTTON_DOWN => {
@@ -1151,48 +1884,30 @@ pub extern "C" fn rust_main() -> ! {
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
                     if in_launcher_button(cursor_x as i32, cursor_y as i32) {
                         launcher_open = !launcher_open;
+                        launcher_selection = 0;
+                        repaint = true;
+                    } else if let Some(cell) = quick_launch_at(
+                        cursor_x as i32,
+                        cursor_y as i32,
+                    ) {
+                        activate_launcher_cell(
+                            cell,
+                            &mut table,
+                            &mut current_workspace,
+                            &mut focused_window,
+                            &mut next_z,
+                        );
+                        launcher_open = false;
                         repaint = true;
                     } else if launcher_open {
                         if let Some(cell) = launcher_cell_at(cursor_x as i32, cursor_y as i32) {
-                            if cell == 1 {
-                                // ClassiCube: a real full-screen app launch. This
-                                // call BLOCKS this entire process until ClassiCube
-                                // exits (see demon_abi::launch_foreground's own
-                                // comment) -- everything below only runs again
-                                // once the game has already quit and control
-                                // returns here.
-                                let _ = demon_abi::launch_foreground(
-                                    b"/system/bin/classicube-core.elf",
-                                    CLASSICUBE_SERVICE_MASK,
-                                );
-                            } else if cell == 2 {
-                                // Doom: the one real sustained-play build (see
-                                // DOOM_SERVICE_MASK's own comment) -- same
-                                // blocking launch_foreground call, just a
-                                // longer real session before it returns.
-                                let _ = demon_abi::launch_foreground(
-                                    b"/system/bin/doom-full.elf",
-                                    DOOM_SERVICE_MASK,
-                                );
-                            }
-                            // Cell 0 (Terminal) is deliberately NOT wired to
-                            // demon_abi::spawn: spawning a second xterm.elf while
-                            // one is already running was tested and reproducibly
-                            // took the whole compositor down (compositor_wait
-                            // itself started returning an unrecognized value,
-                            // hitting RUST_COMPOSITOR_FAIL and a clean exit -- not
-                            // a panic in this file's own code). Isolated by
-                            // removing the spawn call and repeating the exact
-                            // same click sequence, which then reproduced cleanly
-                            // with no failure at all, so the trigger is
-                            // specifically spawning a second instance of an
-                            // already-running process, not the launcher UI
-                            // itself. Root cause is in shared kernel IPC/input
-                            // wait-state bookkeeping (src/ipc.c's
-                            // ipc_wait_select/ipc_process_cleanup, src/input.c's
-                            // input_wait), not this compositor -- real,
-                            // pre-existing, and worth a dedicated investigation,
-                            // but out of scope to guess-fix here.
+                            activate_launcher_cell(
+                                cell,
+                                &mut table,
+                                &mut current_workspace,
+                                &mut focused_window,
+                                &mut next_z,
+                            );
                         }
                         launcher_open = false;
                         repaint = true;
@@ -1202,9 +1917,16 @@ pub extern "C" fn rust_main() -> ! {
                         repaint = true;
                     } else if let Some(id) = taskbar_item_at(&table, current_workspace, cursor_x as i32, cursor_y as i32) {
                         if let Some(slot) = find_slot(&table, id) {
-                            focused_window = id;
-                            table[slot].z = next_z;
-                            next_z += 1;
+                            if focused_window == id && !table[slot].minimized {
+                                table[slot].minimized = true;
+                                focused_window = find_top_slot(&table, current_workspace)
+                                    .map_or(0, |top| table[top].id);
+                            } else {
+                                table[slot].minimized = false;
+                                focused_window = id;
+                                table[slot].z = next_z;
+                                next_z += 1;
+                            }
                             repaint = true;
                         }
                     } else if let Some(slot) = decoration_hit_at(&table, current_workspace, cursor_x, cursor_y) {
@@ -1215,35 +1937,21 @@ pub extern "C" fn rust_main() -> ! {
                         let local_x = cursor_x - window.x;
                         match title_control_at(&window, local_x) {
                             2 => {
-                                // Close: same cleanup WindowOpcode::Close already
-                                // does for a client-initiated close.
-                                if window.surface_id != 0 {
-                                    demon_abi::surface_unmap(window.surface_id as u64);
-                                    demon_abi::handle_close(window.surface_id as u64);
-                                }
-                                table[slot] = Window::EMPTY;
-                                if focused_window == window.id {
-                                    focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
-                                }
+                                focused_window = close_window(
+                                    &mut table,
+                                    slot,
+                                    current_workspace,
+                                );
                             }
                             1 => {
-                                if window.maximized {
-                                    table[slot].x = window.restore_x;
-                                    table[slot].y = window.restore_y;
-                                    table[slot].width = window.restore_width;
-                                    table[slot].height = window.restore_height;
-                                    table[slot].maximized = false;
-                                } else {
-                                    table[slot].restore_x = window.x;
-                                    table[slot].restore_y = window.y;
-                                    table[slot].restore_width = window.width;
-                                    table[slot].restore_height = window.height;
-                                    table[slot].x = 0;
-                                    table[slot].y = RESERVED_TOP + TITLE_HEIGHT;
-                                    table[slot].width = SCREEN_WIDTH;
-                                    table[slot].height = SCREEN_HEIGHT - RESERVED_BOTTOM - table[slot].y;
-                                    table[slot].maximized = true;
-                                }
+                                toggle_maximize(&mut table[slot]);
+                            }
+                            3 => {
+                                table[slot].minimized = true;
+                                dragging_id = 0;
+                                resizing_id = 0;
+                                focused_window = find_top_slot(&table, current_workspace)
+                                    .map_or(0, |top| table[top].id);
                             }
                             _ => {
                                 dragging_id = window.id;
@@ -1264,15 +1972,18 @@ pub extern "C" fn rust_main() -> ! {
                             resize_start_width = window.width;
                             resize_start_height = window.height;
                         } else if window.id >= DEMONX_WINDOW_ID_BASE {
-                            send_window_event(
-                                window.id,
-                                WindowOpcode::Button,
-                                4,
-                                (cursor_x - window.x) as i32,
-                                (cursor_y - window.y) as i32,
-                                1,
-                                event.code as u32,
-                            );
+                            if let Some((client_x, client_y)) =
+                                client_point(&window, cursor_x, cursor_y) {
+                                send_window_event(
+                                    window.id,
+                                    WindowOpcode::Button,
+                                    4,
+                                    client_x,
+                                    client_y,
+                                    1,
+                                    event.code as u32,
+                                );
+                            }
                         }
                         repaint = true;
                     }
@@ -1280,35 +1991,176 @@ pub extern "C" fn rust_main() -> ! {
                 k if k == INPUT_MOUSE_BUTTON_UP => {
                     cursor_x = (event.x.max(0) as u32).min(SCREEN_WIDTH - 1);
                     cursor_y = (event.y.max(0) as u32).min(SCREEN_HEIGHT - 1);
-                    dragging_id = 0;
-                    resizing_id = 0;
-                    if let Some(slot) = top_slot_at(&table, current_workspace, cursor_x, cursor_y) {
-                        let window = table[slot];
-                        if window.id >= DEMONX_WINDOW_ID_BASE {
-                            send_window_event(
-                                window.id,
-                                WindowOpcode::Button,
-                                6,
-                                (cursor_x - window.x) as i32,
-                                (cursor_y - window.y) as i32,
-                                2,
-                                event.code as u32,
-                            );
+                    let finished_drag = dragging_id;
+                    let finished_resize = resizing_id;
+                    if finished_drag != 0 {
+                        let target = snap_target(cursor_x, cursor_y);
+                        if target != 0 {
+                            if let Some(slot) = find_slot(&table, finished_drag) {
+                                let window = table[slot];
+                                table[slot].restore_x = window.x;
+                                table[slot].restore_y = window.y;
+                                table[slot].restore_width = window.width;
+                                table[slot].restore_height = window.height;
+                                let (x, y, width, height) = snap_geometry(target);
+                                table[slot].x = x;
+                                table[slot].y = y;
+                                table[slot].width = width;
+                                table[slot].height = height;
+                                table[slot].maximized = true;
+                            }
                         }
                     }
+                    dragging_id = 0;
+                    resizing_id = 0;
+                    if finished_drag == 0 && finished_resize == 0 {
+                      if let Some(slot) = top_slot_at(&table, current_workspace, cursor_x, cursor_y) {
+                        let window = table[slot];
+                        if window.id >= DEMONX_WINDOW_ID_BASE {
+                            if let Some((client_x, client_y)) =
+                                client_point(&window, cursor_x, cursor_y) {
+                                send_window_event(
+                                    window.id,
+                                    WindowOpcode::Button,
+                                    6,
+                                    client_x,
+                                    client_y,
+                                    2,
+                                    event.code as u32,
+                                );
+                            }
+                        }
+                      }
+                    }
+                    let cursor_icon = cursor_icon_at(
+                        &table,
+                        current_workspace,
+                        cursor_x,
+                        cursor_y,
+                        0,
+                        0,
+                        launcher_open,
+                    );
+                    demon_abi::display_cursor_move(
+                        display,
+                        cursor_x as u64,
+                        cursor_y as u64,
+                        cursor_icon,
+                    );
+                    repaint = true;
                 }
                 k if k == INPUT_KEY_DOWN || k == INPUT_KEY_UP => {
-                    // Ctrl+1/2/3 switches workspaces directly, without ever
-                    // reaching the focused client -- scan codes 0x02/0x03/
-                    // 0x04 are the physical '1'/'2'/'3' keys regardless of
-                    // shift state, matching the panel dots 1:1.
-                    if k == INPUT_KEY_DOWN
-                        && (event.modifiers & demon_abi::INPUT_MOD_CTRL) != 0
-                        && (0x02..=0x04).contains(&event.code)
-                    {
-                        current_workspace = (event.code - 0x02) as u32;
-                        focused_window = find_top_slot(&table, current_workspace).map_or(0, |s| table[s].id);
-                        repaint = true;
+                    if k == INPUT_KEY_UP && suppressed_key_up == event.code {
+                        suppressed_key_up = 0;
+                        continue;
+                    }
+                    let ctrl = (event.modifiers & demon_abi::INPUT_MOD_CTRL) != 0;
+                    let alt = (event.modifiers & INPUT_MOD_ALT) != 0;
+                    let workspace_shortcut = ctrl
+                        && (KEY_WORKSPACE_1..=KEY_WORKSPACE_3).contains(&event.code);
+                    let launcher_shortcut = ctrl && event.code == KEY_SPACE;
+                    let cycle_shortcut = alt && event.code == KEY_TAB;
+                    let window_shortcut = alt
+                        && (event.code == KEY_F4
+                            || event.code == KEY_F9
+                            || event.code == KEY_F10);
+
+                    // Shortcut key-up events are swallowed too, preventing an
+                    // application from seeing half of a desktop-level chord.
+                    if workspace_shortcut {
+                        if k == INPUT_KEY_DOWN {
+                            suppressed_key_up = event.code;
+                            current_workspace = (event.code - KEY_WORKSPACE_1) as u32;
+                            focused_window = find_top_slot(&table, current_workspace)
+                                .map_or(0, |slot| table[slot].id);
+                            launcher_open = false;
+                            repaint = true;
+                        }
+                    } else if launcher_shortcut {
+                        if k == INPUT_KEY_DOWN {
+                            suppressed_key_up = event.code;
+                            launcher_open = !launcher_open;
+                            launcher_selection = 0;
+                            repaint = true;
+                        }
+                    } else if cycle_shortcut {
+                        if k == INPUT_KEY_DOWN {
+                            suppressed_key_up = event.code;
+                            if let Some(slot) = find_cycle_slot(
+                                &table,
+                                current_workspace,
+                                focused_window,
+                            ) {
+                                table[slot].minimized = false;
+                                table[slot].z = next_z;
+                                next_z += 1;
+                                focused_window = table[slot].id;
+                            }
+                            launcher_open = false;
+                            repaint = true;
+                        }
+                    } else if window_shortcut {
+                        if k == INPUT_KEY_DOWN {
+                            suppressed_key_up = event.code;
+                            if let Some(slot) = find_slot(&table, focused_window) {
+                                if event.code == KEY_F4 {
+                                    focused_window = close_window(
+                                        &mut table,
+                                        slot,
+                                        current_workspace,
+                                    );
+                                } else if event.code == KEY_F9 {
+                                    table[slot].minimized = true;
+                                    focused_window = find_top_slot(&table, current_workspace)
+                                        .map_or(0, |top| table[top].id);
+                                } else {
+                                    toggle_maximize(&mut table[slot]);
+                                }
+                            }
+                            dragging_id = 0;
+                            resizing_id = 0;
+                            launcher_open = false;
+                            repaint = true;
+                        }
+                    } else if launcher_open {
+                        if k == INPUT_KEY_DOWN {
+                            if event.code == KEY_ESCAPE {
+                                suppressed_key_up = event.code;
+                                launcher_open = false;
+                            } else if event.code == KEY_UP {
+                                launcher_selection =
+                                    (launcher_selection + LAUNCHER_CELL_COUNT - 1)
+                                        % LAUNCHER_CELL_COUNT;
+                            } else if event.code == KEY_DOWN {
+                                launcher_selection =
+                                    (launcher_selection + 1) % LAUNCHER_CELL_COUNT;
+                            } else if event.code == KEY_ENTER {
+                                suppressed_key_up = event.code;
+                                activate_launcher_cell(
+                                    launcher_selection,
+                                    &mut table,
+                                    &mut current_workspace,
+                                    &mut focused_window,
+                                    &mut next_z,
+                                );
+                                launcher_open = false;
+                            } else if (KEY_WORKSPACE_1..=KEY_WORKSPACE_3)
+                                .contains(&event.code)
+                            {
+                                suppressed_key_up = event.code;
+                                launcher_selection =
+                                    (event.code - KEY_WORKSPACE_1) as i32;
+                                activate_launcher_cell(
+                                    launcher_selection,
+                                    &mut table,
+                                    &mut current_workspace,
+                                    &mut focused_window,
+                                    &mut next_z,
+                                );
+                                launcher_open = false;
+                            }
+                            repaint = true;
+                        }
                     } else if focused_window != 0 {
                         let packed_type_code = event.kind as u32 | ((event.code as u32) << 16);
                         send_window_event(
@@ -1340,7 +2192,9 @@ pub extern "C" fn rust_main() -> ! {
         let present_now = demon_abi::ticks();
         if dirty && (ready == 3 || present_now >= next_frame_tick) {
             let frame = unsafe { &mut *core::ptr::addr_of_mut!(FRAME) };
-            composite(&table, frame, focused_window, current_workspace, launcher_open, wallpaper, wallpaper_loaded);
+            composite(&table, frame, focused_window, current_workspace, launcher_open,
+                      launcher_selection, cursor_x, cursor_y, dragging_id,
+                      wallpaper, wallpaper_loaded, shell_icons, shell_icons_loaded);
             let submit = DisplaySubmit {
                 x: 0,
                 y: 0,

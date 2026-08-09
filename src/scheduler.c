@@ -5,6 +5,10 @@
 #include <demon/input.h>
 
 #define INIT_QUANTUM_TICKS 4u
+/* PID 0 is the public wait(0) "any child" value. Keep a distinct internal
+   sentinel for tasks blocked on IPC/input/timers; otherwise any child exit
+   can overwrite an unrelated blocked syscall's return frame. */
+#define SCHEDULER_WAIT_NONE UINT32_MAX
 /* Every syscall (int 0x80) runs on this ring-0 stack, including
    display_submit's framebuffer_blit call chain -- and unlike the per-process
    USERSPACE_STACK_PAGES budget, this is static kernel BSS, not frame-pool
@@ -85,7 +89,8 @@ static uintptr_t return_idle(void) {
 }
 
 void scheduler_init(uintptr_t kernel_space) {
-    for (uint32_t pid = 0u; pid < SCHEDULER_PROCESS_LIMIT; ++pid) tasks[pid] = (struct task){.pid = pid};
+    for (uint32_t pid = 0u; pid < SCHEDULER_PROCESS_LIMIT; ++pid)
+        tasks[pid] = (struct task){.pid = pid, .waiting_for = SCHEDULER_WAIT_NONE};
     // Captured here, right after kernel.c's enable_fpu() left the FPU
     // freshly fninit'd and before anything else touches it, so this is a
     // known-clean state every task slot starts from.
@@ -103,6 +108,7 @@ uint32_t scheduler_create_user(uint32_t parent, const char *name, uint64_t entry
         parent >= SCHEDULER_PROCESS_LIMIT) return 0u;
     for (uint32_t pid = 1u; pid < SCHEDULER_PROCESS_LIMIT; ++pid) if (tasks[pid].state == SCHEDULER_TASK_UNUSED) {
         tasks[pid] = (struct task){.pid = pid, .parent_pid = parent, .state = SCHEDULER_TASK_READY,
+            .waiting_for = SCHEDULER_WAIT_NONE,
             .address_space = space}; copy_name(tasks[pid].name, name);
         tasks[pid].saved_frame = prepare_frame(pid, entry, stack);
         // Reseed from the clean template: this pid slot may be a reused
@@ -142,6 +148,7 @@ uintptr_t scheduler_on_timer_tick(uintptr_t frame) {
         saved->rax = waiting->timeout_result;
         saved->rdx = 0u;
         waiting->timed_wait = false;
+        waiting->waiting_for = SCHEDULER_WAIT_NONE;
         waiting->state = SCHEDULER_TASK_READY;
     }
     struct task *current = &tasks[current_pid];
@@ -156,10 +163,12 @@ uintptr_t scheduler_on_yield(uintptr_t frame) {
 static void wake_waiting_parent(uint32_t child) {
     uint32_t parent = tasks[child].parent_pid;
     if (parent == 0u || parent >= SCHEDULER_PROCESS_LIMIT || tasks[parent].state != SCHEDULER_TASK_BLOCKED ||
+        tasks[parent].waiting_for == SCHEDULER_WAIT_NONE ||
         (tasks[parent].waiting_for != 0u && tasks[parent].waiting_for != child)) return;
     struct interrupt_frame *frame = (struct interrupt_frame *)tasks[parent].saved_frame;
     frame->rax = child;
     frame->rdx = tasks[child].exit_code;
+    tasks[parent].waiting_for = SCHEDULER_WAIT_NONE;
     tasks[parent].state = SCHEDULER_TASK_READY;
     userspace_release_process(child);
     tasks[child] = (struct task){.pid = child};
@@ -183,6 +192,7 @@ uintptr_t scheduler_block_current(uintptr_t frame) {
     if (!initialized || !users_running || current_pid == 0u) return frame;
     tasks[current_pid].saved_frame = frame;
     tasks[current_pid].state = SCHEDULER_TASK_BLOCKED;
+    tasks[current_pid].waiting_for = SCHEDULER_WAIT_NONE;
     return reschedule(frame);
 }
 uintptr_t scheduler_block_current_timeout(uintptr_t frame, uint64_t delay,
@@ -194,6 +204,7 @@ uintptr_t scheduler_block_current_timeout(uintptr_t frame, uint64_t delay,
     tasks[current_pid].wake_tick = scheduler_ticks + delay;
     tasks[current_pid].timeout_result = result;
     tasks[current_pid].timed_wait = true;
+    tasks[current_pid].waiting_for = SCHEDULER_WAIT_NONE;
     return reschedule(frame);
 }
 bool scheduler_wake(uint32_t pid, uint64_t result, uint64_t detail) {
@@ -203,6 +214,7 @@ bool scheduler_wake(uint32_t pid, uint64_t result, uint64_t detail) {
     frame->rax = result;
     frame->rdx = detail;
     tasks[pid].timed_wait = false;
+    tasks[pid].waiting_for = SCHEDULER_WAIT_NONE;
     tasks[pid].state = SCHEDULER_TASK_READY;
     return true;
 }
@@ -217,6 +229,14 @@ bool scheduler_reap(uint32_t parent, uint32_t child, uint64_t *code) {
     if (code != NULL) *code = tasks[child].exit_code;
     userspace_release_process(child);
     tasks[child] = (struct task){.pid = child}; return true;
+}
+uint32_t scheduler_reap_exited(uint32_t parent, uint64_t *code) {
+    for (uint32_t child = 1u; child < SCHEDULER_PROCESS_LIMIT; ++child) {
+        if (tasks[child].parent_pid == parent &&
+            tasks[child].state == SCHEDULER_TASK_EXITED &&
+            scheduler_reap(parent, child, code)) return child;
+    }
+    return 0u;
 }
 bool scheduler_has_live_users(void) {
     for (uint32_t pid = 1u; pid < SCHEDULER_PROCESS_LIMIT; ++pid)

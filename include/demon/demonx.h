@@ -75,7 +75,20 @@ enum demonx_core_opcode {
        (see demonx_draw_string_scaled/draw_text_scaled) for clients like
        xterm that want adjustable font size without a real X font server. */
     DEMONX_POLY_TEXT8_SCALED = 200u,
+    /* DemonOS zero-copy surface extension. The client creates and owns a
+       retained SURFACE, grants a read-only handle to DemonX, and attaches
+       it before MapWindow. Surface dimensions may be smaller than the X
+       window's logical dimensions; the compositor scales the source and
+       applies the inverse transform to input. This keeps framebuffer-style
+       applications such as Doom and ClassiCube in comfortably sized desktop
+       windows without inflating their retained buffers. */
+    DEMONX_ATTACH_SURFACE = 201u,
 };
+
+/* Synthetic ClientMessage type emitted when the native compositor's close
+   button asks DemonX to close a window. It deliberately is not an X atom:
+   the compact server has no WM protocol round trip on this native path. */
+#define DEMONX_CLIENT_CLOSE_MESSAGE 0x4458434cu /* "DXCL" */
 
 #define DEMONX_PASSIVE_GRAB_LIMIT 8u
 struct demonx_passive_grab {

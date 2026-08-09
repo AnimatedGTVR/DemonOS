@@ -20,11 +20,16 @@ submit).  Service numbers and request layouts match include/demon/c_app.h.
 #include "d_local.h"
 
 #include <demon/c_app.h>
+#include <demon/demonx.h>
+#include <demon/input.h>
 #include <demon/portkit.h>
+#include <X11/Xlib.h>
 #include <stdint.h>
 
 #define D_BASEWIDTH	320
 #define D_BASEHEIGHT	200
+#define D_WINDOWWIDTH	480
+#define D_WINDOWHEIGHT	300
 
 /* Video buffers live on the demon heap (not BSS) so the whole ELF fits the
    1 MiB large-app image: 614K surface cache + 256K ARGB + 128K Z + 64K
@@ -72,6 +77,11 @@ static uint32_t *d_scaled = NULL;
 static uint32_t d_scale = 1u;
 static int d_presented = 0;
 static int d_frames = 0;
+static Display *d_x_display;
+static Window d_x_window;
+static int d_pointer_x;
+static int d_pointer_y;
+static int d_quit_requested;
 
 void VID_Shutdown (void);
 void VID_SetPalette (unsigned char *palette);
@@ -86,6 +96,17 @@ static void d_build_tables (void)
 	int i;
 
 	for (i = 0; i < 256; ++i)
+	if (d_x_display != NULL)
+	{
+		++d_frames;
+		if (!d_presented)
+		{
+			d_presented = 1;
+			Sys_Printf ("QUAKE_D4_VID_OK surface=%ux%u frames=%i windowed=1\n",
+				    D_BASEWIDTH, D_BASEHEIGHT, d_frames);
+		}
+	}
+	else
 	{
 		d_8to16table[i] = (unsigned short)
 			((((d_palette[i * 3 + 0] & 0xF8u) << 8) |
@@ -271,21 +292,28 @@ void VID_Init (unsigned char *palette)
 	d_pzbuffer = d_zbuffer;
 	D_InitCaches (d_surfcache, D_SURFCACHE_BYTES);
 
-	/* Wire the display service.  demo services match the Doom port:
-	   7 == DISPLAY, 9 == SURFACE factory. */
-	d_display = demon_service_open (7u);
+	/* Prefer a retained DemonX window. The direct display remains a fallback
+	   for the dedicated Quake boot image where no desktop server is running. */
+	d_x_display = XOpenDisplay (":6");
+	d_x_window = None;
+	d_quit_requested = 0;
+	d_pointer_x = d_pointer_y = 0;
+	d_display = d_x_display == NULL ? demon_service_open (7u) : UINT64_MAX;
 	d_surface_factory = demon_service_open (9u);
-	if (d_display == UINT64_MAX || d_surface_factory == UINT64_MAX)
+	if ((d_x_display == NULL && d_display == UINT64_MAX) ||
+	    d_surface_factory == UINT64_MAX)
 	{
 		Sys_Printf ("QUAKE_D4_VID_FAIL display=unavailable\n");
 		return;
 	}
-	if (demon_display_info (d_display, &d_info) == UINT64_MAX)
+	if (d_x_display == NULL &&
+	    demon_display_info (d_display, &d_info) == UINT64_MAX)
 	{
 		Sys_Printf ("QUAKE_D4_VID_FAIL display=no-info\n");
 		return;
 	}
 
+	if (d_x_display == NULL)
 	{
 		uint64_t scale = d_info.width / D_BASEWIDTH;
 		uint64_t vscale = d_info.height / D_BASEHEIGHT;
@@ -318,6 +346,27 @@ void VID_Init (unsigned char *palette)
 					 (uint64_t)D_BASEHEIGHT);
 	if (d_surface == UINT64_MAX)
 		Sys_Printf ("QUAKE_D4_VID_FAIL surface=unavailable\n");
+	else if (d_x_display != NULL)
+	{
+		d_scale = 1u;
+		d_x_window = XCreateSimpleWindow (d_x_display,
+			XDefaultRootWindow (d_x_display), 108, 92,
+			D_WINDOWWIDTH, D_WINDOWHEIGHT, 0u, 0u, 0xff080808u);
+		if (d_x_window == None ||
+		    !DemonXAttachSurface (d_x_display, d_x_window, d_surface,
+			D_BASEWIDTH, D_BASEHEIGHT))
+		{
+			Sys_Printf ("QUAKE_WINDOW_ATTACH_FAILED\n");
+			return;
+		}
+		(void)XStoreName (d_x_display, d_x_window, "Quake");
+		(void)XSelectInput (d_x_display, d_x_window,
+			KeyPressMask | KeyReleaseMask | ButtonPressMask |
+			ButtonReleaseMask | PointerMotionMask | FocusChangeMask |
+			StructureNotifyMask);
+		(void)XMapWindow (d_x_display, d_x_window);
+		Sys_Printf ("QUAKE_WINDOW_READY surface=320x200 window=480x300\n");
+	}
 	else
 		Sys_Printf ("QUAKE_D4_VID_INIT surface=%ux%u scale=%u\n",
 			    D_BASEWIDTH, D_BASEHEIGHT, d_scale);
@@ -330,6 +379,14 @@ VID_Shutdown
 */
 void VID_Shutdown (void)
 {
+	if (d_x_display != NULL)
+	{
+		if (d_x_window != None)
+			(void)XDestroyWindow (d_x_display, d_x_window);
+		(void)XCloseDisplay (d_x_display);
+	}
+	d_x_display = NULL;
+	d_x_window = None;
 	if (d_surface != UINT64_MAX)
 		(void)demon_handle_close (d_surface);
 	d_surface = UINT64_MAX;
@@ -370,4 +427,69 @@ Frames actually presented to the DemonOS display, for the D4/D5 markers.
 int d_video_frames (void)
 {
 	return d_frames;
+}
+
+/* Translate focused DemonX events back into the same unified input records
+   the original direct-input backend consumes. Keeping that contract means
+   the actual Quake key/mouse code needs no desktop-specific branch. */
+int d_quake_poll_input (struct input_event *event)
+{
+	if (event == NULL)
+		return 0;
+	if (d_x_display == NULL)
+		return demon_port_poll_input (event);
+	while (XPending (d_x_display))
+	{
+		XEvent xevent;
+		if (XNextEvent (d_x_display, &xevent) != 0)
+			return 0;
+		if (xevent.type == ClientMessage &&
+		    xevent.xclient.message_type == DEMONX_CLIENT_CLOSE_MESSAGE)
+		{
+			d_x_window = None;
+			d_quit_requested = 1;
+			continue;
+		}
+		memset (event, 0, sizeof(*event));
+		if (xevent.type == KeyPress || xevent.type == KeyRelease)
+		{
+			event->type = xevent.type == KeyPress ?
+				INPUT_KEY_DOWN : INPUT_KEY_UP;
+			event->code = (uint16_t)xevent.xkey.keycode;
+			if (event->code == 0x48u || event->code == 0x4bu ||
+			    event->code == 0x4du || event->code == 0x50u)
+				event->code |= 0x100u;
+			event->value = xevent.xkey.value;
+			event->modifiers = xevent.xkey.state;
+			return 1;
+		}
+		if (xevent.type == MotionNotify)
+		{
+			event->type = INPUT_MOUSE_MOVE;
+			event->x = xevent.xmotion.x;
+			event->y = xevent.xmotion.y;
+			event->delta_x = event->x - d_pointer_x;
+			event->delta_y = event->y - d_pointer_y;
+			d_pointer_x = event->x;
+			d_pointer_y = event->y;
+			return 1;
+		}
+		if (xevent.type == ButtonPress || xevent.type == ButtonRelease)
+		{
+			event->type = xevent.type == ButtonPress ?
+				INPUT_MOUSE_BUTTON_DOWN : INPUT_MOUSE_BUTTON_UP;
+			event->code = xevent.xbutton.button == 1u ? INPUT_MOUSE_LEFT :
+				(xevent.xbutton.button == 2u ? INPUT_MOUSE_MIDDLE :
+				 INPUT_MOUSE_RIGHT);
+			event->x = xevent.xbutton.x;
+			event->y = xevent.xbutton.y;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int d_quake_should_quit (void)
+{
+	return d_quit_requested;
 }

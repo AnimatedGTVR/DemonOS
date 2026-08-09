@@ -74,6 +74,16 @@ FREEDOOM_PLAY_ISO := $(BUILD)/kernel-freedoom-play.iso
 QUAKE_DATA_DIR := $(BUILD)/quake-data
 QUAKE_PAK := $(QUAKE_DATA_DIR)/pak0.pak
 QUAKE_PLAY_ISO := $(BUILD)/kernel-quake-play.iso
+BUTTERSCOTCH_SOURCE := $(BUILD)/butterscotch-upstream
+BUTTERSCOTCH_COMMIT := 9cb6287ec6b400b7b0ef8d4668e91ebea75761c3
+BUTTERSCOTCH_BUILD := $(BUILD)/butterscotch
+BUTTERSCOTCH_CORE_ELF := $(BUILD)/butterscotch-core.elf
+BUTTERSCOTCH_DELTARUNE_ELF := $(BUILD)/butterscotch-deltarune-ch1.elf
+BUTTERSCOTCH_UNDERTALE_ELF := $(BUILD)/butterscotch-undertale-demo.elf
+BUTTERSCOTCH_TEST_DATA := $(BUTTERSCOTCH_SOURCE)/tests/object-index-iteration-test/data.win
+BUTTERSCOTCH_DELTARUNE_DATA := $(BUILD)/local-games/deltarune-ch1/data.win
+BUTTERSCOTCH_UNDERTALE_DATA := $(BUILD)/local-games/undertale-demo/data.win
+BUTTERSCOTCH_GAMES_ISO := $(BUILD)/kernel-butterscotch-games.iso
 QEMU_AUDIO_TEST := -audiodev none,id=demon_audio -device AC97,audiodev=demon_audio
 QEMU_AUDIO_RUN := -audiodev pipewire,id=demon_audio -device AC97,audiodev=demon_audio
 DOOM_UPSTREAM := $(BUILD)/doomgeneric-upstream
@@ -119,7 +129,7 @@ OBJECTS += $(BUILD)/scheduler.o $(BUILD)/userspace.o $(BUILD)/elf64.o \
 	$(BUILD)/kernel_slot_table_test.o \
 	$(BUILD)/user_program_blob.o
 
-.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-cave-story run-quake run-wayland run-sdl run-vnc desktop-iso run-desktop installer-iso run-installer smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
+.PHONY: all iso iso-check project portkit-check wine-pe-check mem-reserve-check wine-pe-load-check wine-pe-import-check wine-pe-reloc-check doom-source doom-platform-audit doom-engine-audit doom-runtime-audit doom-check classicube-source classicube-port-audit classicube-core quake-source quake-port-audit quake-core quake-smoke quake-data butterscotch-source butterscotch-port-audit butterscotch-core butterscotch-game-probes butterscotch-deltarune-data butterscotch-undertale-data butterscotch-games-iso run-butterscotch-games wolf3d-source wolf3d-source-audit nxengine-source nxengine-source-audit nxengine-platform-audit nxengine-data nxengine-core nxengine-smoke nxengine-play-iso nxengine-play-smoke nxengine-play-freeplay nxengine-play-freeplay-iso nxengine-play-freeplay-smoke quake-play-iso quake-play-smoke freedoom-assets freedoom-iso freedoom-play-iso freedoom-smoke freedoom-command-smoke qemu run run-doom run-cave-story run-quake run-wayland run-sdl run-vnc desktop-iso run-desktop installer-iso run-installer smoke framebuffer-fallback-smoke keyboard-smoke process-smoke ipc-smoke vfs-smoke mako-check footprint-check check size clean FORCE
 
 QUAKE_SOURCE := $(BUILD)/quake-upstream
 QUAKE_COMMIT := bf4ac424ce754894ac8f1dae6a3981954bc9852d
@@ -128,6 +138,39 @@ quake-source: $(QUAKE_SOURCE)/.demonos-pinned
 
 $(QUAKE_SOURCE)/.demonos-pinned: tools/fetch-quake.sh
 	sh tools/fetch-quake.sh $(QUAKE_SOURCE)
+
+butterscotch-source: $(BUTTERSCOTCH_SOURCE)/.demonos-pinned
+
+$(BUTTERSCOTCH_SOURCE)/.demonos-pinned: tools/fetch-butterscotch.sh
+	sh tools/fetch-butterscotch.sh $(BUTTERSCOTCH_SOURCE)
+
+$(BUTTERSCOTCH_TEST_DATA): $(BUTTERSCOTCH_SOURCE)/.demonos-pinned
+	@test -f $@
+
+butterscotch-deltarune-data:
+	@test -n "$(SOURCE)" || { echo "usage: make $@ SOURCE=/path/to/DELTARUNE/data.win"; exit 2; }
+	sh tools/import-butterscotch-game.sh deltarune-ch1 "$(SOURCE)" "$(BUTTERSCOTCH_DELTARUNE_DATA)"
+
+butterscotch-undertale-data:
+	@test -n "$(SOURCE)" || { echo "usage: make $@ SOURCE=/path/to/UNDERTALE/data.win"; exit 2; }
+	sh tools/import-butterscotch-game.sh undertale-demo "$(SOURCE)" "$(BUTTERSCOTCH_UNDERTALE_DATA)"
+
+butterscotch-port-audit: butterscotch-source
+	@test "$$(git -C $(BUTTERSCOTCH_SOURCE) rev-parse HEAD)" = "$(BUTTERSCOTCH_COMMIT)"
+	@grep -q 'BinaryUtils_readUint32' $(BUTTERSCOTCH_SOURCE)/src/binary_utils.h
+	@grep -q 'BinaryReader_setBuffer' $(BUTTERSCOTCH_SOURCE)/src/binary_reader.c
+	@grep -q 'DataWin_parse' $(BUTTERSCOTCH_SOURCE)/src/data_win.c
+	@grep -q 'platformSwapBuffers' $(BUTTERSCOTCH_SOURCE)/src/desktop/platformdefs.h
+	@test -f $(BUTTERSCOTCH_TEST_DATA)
+	@test -f ports/butterscotch/platform/core_main.c
+	@test -f ports/butterscotch/platform/datawin_index.c
+	@test -f ports/butterscotch/platform/video.c
+	@test -f ports/butterscotch/platform/entry.S
+	@test -x tools/import-butterscotch-game.sh
+	@test -f docs/butterscotch-games.md
+	@grep -q 'BUTTERSCOTCH_GAME_PROBE_OK' ports/butterscotch/platform/core_main.c
+	@grep -q 'demon_port_read' ports/butterscotch/platform/compat.c
+	@echo "Butterscotch D4 source/platform contract audit passed"
 
 quake-port-audit: quake-source
 	@test "$$(git -C $(QUAKE_SOURCE) rev-parse HEAD)" = "$(QUAKE_COMMIT)"
@@ -1064,6 +1107,172 @@ nxengine-play-freeplay-smoke: $(NXENGINE_FREEPLAY_ISO)
 	@! grep -q "PAGE FAULT\|\[FAILED\]" $(BUILD)/nxengine-freeplay.log
 	@echo "NXEngine D37 freeplay smoke test passed"
 
+# The first Butterscotch slice intentionally links only the real upstream
+# binary primitives plus the DemonOS platform entry. That keeps the milestone
+# runnable while the much larger DataWin/VM/renderer dependency graph is being
+# moved off hosted libc, GLFW, and SDL in later stages.
+BUTTERSCOTCH_CFLAGS := -std=c11 -Os -g -Wall -Wextra -Werror \
+	-ffreestanding -fno-builtin -fno-stack-protector -fno-pie -fno-pic \
+	-ffunction-sections -fdata-sections -m64 -mno-red-zone -msse2 \
+	-DNO_STRINGS_H -Iinclude -Iapps/doom -I$(BUTTERSCOTCH_SOURCE)/src
+BUTTERSCOTCH_IMAGE_CFLAGS := $(BUTTERSCOTCH_CFLAGS) \
+	-I$(BUTTERSCOTCH_SOURCE)/vendor/stb/image
+
+$(BUTTERSCOTCH_BUILD):
+	mkdir -p $@
+
+$(BUTTERSCOTCH_BUILD)/entry.o: ports/butterscotch/platform/entry.S | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/core_main.o: ports/butterscotch/platform/core_main.c \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/core_deltarune_ch1.o: ports/butterscotch/platform/core_main.c \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -DBUTTERSCOTCH_COMPAT_PROBE \
+		-DBUTTERSCOTCH_PROFILE_NAME='"deltarune-ch1"' \
+		-DDATA_WIN_PATH='"/games/butterscotch/deltarune-ch1/data.win"' \
+		-DCONFIG_PATH='"/home/demon/deltarune-ch1.cfg"' \
+		-DCONFIG_TEMP_PATH='"/home/demon/deltarune-ch1.tmp"' -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/core_undertale_demo.o: ports/butterscotch/platform/core_main.c \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -DBUTTERSCOTCH_COMPAT_PROBE \
+		-DBUTTERSCOTCH_PROFILE_NAME='"undertale-demo"' \
+		-DDATA_WIN_PATH='"/games/butterscotch/undertale-demo/data.win"' \
+		-DCONFIG_PATH='"/home/demon/undertale-demo.cfg"' \
+		-DCONFIG_TEMP_PATH='"/home/demon/undertale-demo.tmp"' -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/binary_reader.o: $(BUTTERSCOTCH_SOURCE)/src/binary_reader.c \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -include apps/doom/libc.h -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/compat.o: ports/butterscotch/platform/compat.c \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/datawin_index.o: ports/butterscotch/platform/datawin_index.c \
+		ports/butterscotch/platform/datawin_index.h \
+		ports/butterscotch/platform/bzip2_decode.h \
+		ports/butterscotch/platform/qoi_decode.h \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/bzip2_decode.o: ports/butterscotch/platform/bzip2_decode.c \
+		ports/butterscotch/platform/bzip2_decode.h | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/qoi_decode.o: ports/butterscotch/platform/qoi_decode.c \
+		ports/butterscotch/platform/qoi_decode.h | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/image_decode.o: ports/butterscotch/platform/image_decode.c \
+		ports/butterscotch/platform/image_decode.h \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_IMAGE_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/bytecode_scan.o: ports/butterscotch/platform/bytecode_scan.c \
+		ports/butterscotch/platform/bytecode_scan.h \
+		ports/butterscotch/platform/datawin_index.h \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/vm_fixture.o: ports/butterscotch/platform/vm_fixture.c \
+		ports/butterscotch/platform/vm_fixture.h \
+		ports/butterscotch/platform/datawin_index.h \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/video.o: ports/butterscotch/platform/video.c \
+		ports/butterscotch/platform/video.h ports/butterscotch/platform/image_decode.h \
+		include/X11/Xlib.h include/demon/demonx.h | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/audio.o: ports/butterscotch/platform/audio.c \
+		ports/butterscotch/platform/audio.h include/demon/c_app.h | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/persistence.o: ports/butterscotch/platform/persistence.c \
+		ports/butterscotch/platform/persistence.h include/demon/portkit.h | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/software_renderer.o: \
+		ports/butterscotch/platform/software_renderer.c \
+		ports/butterscotch/platform/software_renderer.h \
+		ports/butterscotch/platform/datawin_index.h | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -Iports/butterscotch/platform -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/stb_image_impl.o: ports/butterscotch/platform/stb_image_impl.c \
+		$(BUTTERSCOTCH_SOURCE)/.demonos-pinned | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_IMAGE_CFLAGS) -Wno-unused-function -c $< -o $@
+
+$(BUTTERSCOTCH_BUILD)/libc.o: apps/doom/libc.c apps/doom/libc.h \
+		include/demon/portkit.h | $(BUTTERSCOTCH_BUILD)
+	$(CC) $(BUTTERSCOTCH_CFLAGS) -c $< -o $@
+
+$(BUTTERSCOTCH_CORE_ELF): $(BUTTERSCOTCH_BUILD)/entry.o \
+		$(BUTTERSCOTCH_BUILD)/core_main.o $(BUTTERSCOTCH_BUILD)/binary_reader.o \
+		$(BUTTERSCOTCH_BUILD)/compat.o $(BUTTERSCOTCH_BUILD)/datawin_index.o \
+		$(BUTTERSCOTCH_BUILD)/bzip2_decode.o \
+		$(BUTTERSCOTCH_BUILD)/qoi_decode.o \
+		$(BUTTERSCOTCH_BUILD)/image_decode.o $(BUTTERSCOTCH_BUILD)/stb_image_impl.o \
+		$(BUTTERSCOTCH_BUILD)/bytecode_scan.o \
+		$(BUTTERSCOTCH_BUILD)/vm_fixture.o \
+		$(BUTTERSCOTCH_BUILD)/video.o $(BUTTERSCOTCH_BUILD)/audio.o $(BUTTERSCOTCH_BUILD)/persistence.o $(BUTTERSCOTCH_BUILD)/software_renderer.o \
+		$(BUILD)/demonx_xlib.o \
+		$(BUTTERSCOTCH_BUILD)/libc.o \
+		$(BUILD)/portkit.o ports/butterscotch/linker.ld
+	$(LD) -nostdlib --gc-sections -z max-page-size=0x1000 \
+		-T ports/butterscotch/linker.ld $(BUTTERSCOTCH_BUILD)/entry.o \
+		$(BUILD)/portkit.o $(BUTTERSCOTCH_BUILD)/libc.o \
+		$(BUTTERSCOTCH_BUILD)/compat.o $(BUTTERSCOTCH_BUILD)/binary_reader.o \
+		$(BUTTERSCOTCH_BUILD)/datawin_index.o \
+		$(BUTTERSCOTCH_BUILD)/bzip2_decode.o $(BUTTERSCOTCH_BUILD)/qoi_decode.o \
+		$(BUTTERSCOTCH_BUILD)/image_decode.o $(BUTTERSCOTCH_BUILD)/stb_image_impl.o \
+		$(BUTTERSCOTCH_BUILD)/bytecode_scan.o \
+		$(BUTTERSCOTCH_BUILD)/vm_fixture.o \
+		$(BUTTERSCOTCH_BUILD)/video.o $(BUTTERSCOTCH_BUILD)/audio.o $(BUTTERSCOTCH_BUILD)/persistence.o $(BUTTERSCOTCH_BUILD)/software_renderer.o \
+		$(BUILD)/demonx_xlib.o \
+		$(BUTTERSCOTCH_BUILD)/core_main.o -o $@
+	$(STRIP) -s $@
+
+butterscotch-core: $(BUTTERSCOTCH_CORE_ELF)
+	@readelf -h $< | grep -q 'Class:.*ELF64'
+	@readelf -h $< | grep -q 'Entry point address:.*0x20000000'
+	@readelf -lW $< | grep -q 'LOAD.*0x0000000020000000'
+	@echo "Butterscotch D4 native window ELF linked at isolated large-app base"
+
+BUTTERSCOTCH_PROFILE_OBJECTS := $(BUTTERSCOTCH_BUILD)/binary_reader.o \
+	$(BUTTERSCOTCH_BUILD)/compat.o $(BUTTERSCOTCH_BUILD)/datawin_index.o \
+	$(BUTTERSCOTCH_BUILD)/bzip2_decode.o $(BUTTERSCOTCH_BUILD)/qoi_decode.o \
+	$(BUTTERSCOTCH_BUILD)/image_decode.o $(BUTTERSCOTCH_BUILD)/stb_image_impl.o \
+	$(BUTTERSCOTCH_BUILD)/bytecode_scan.o $(BUTTERSCOTCH_BUILD)/vm_fixture.o \
+	$(BUTTERSCOTCH_BUILD)/video.o $(BUTTERSCOTCH_BUILD)/audio.o \
+	$(BUTTERSCOTCH_BUILD)/persistence.o $(BUTTERSCOTCH_BUILD)/software_renderer.o \
+	$(BUILD)/demonx_xlib.o $(BUTTERSCOTCH_BUILD)/libc.o $(BUILD)/portkit.o
+
+$(BUTTERSCOTCH_DELTARUNE_ELF): $(BUTTERSCOTCH_BUILD)/entry.o \
+		$(BUTTERSCOTCH_BUILD)/core_deltarune_ch1.o $(BUTTERSCOTCH_PROFILE_OBJECTS) \
+		ports/butterscotch/linker.ld
+	$(LD) -nostdlib --gc-sections -z max-page-size=0x1000 \
+		-T ports/butterscotch/linker.ld $(BUTTERSCOTCH_BUILD)/entry.o \
+		$(BUTTERSCOTCH_PROFILE_OBJECTS) $(BUTTERSCOTCH_BUILD)/core_deltarune_ch1.o -o $@
+	$(STRIP) -s $@
+
+$(BUTTERSCOTCH_UNDERTALE_ELF): $(BUTTERSCOTCH_BUILD)/entry.o \
+		$(BUTTERSCOTCH_BUILD)/core_undertale_demo.o $(BUTTERSCOTCH_PROFILE_OBJECTS) \
+		ports/butterscotch/linker.ld
+	$(LD) -nostdlib --gc-sections -z max-page-size=0x1000 \
+		-T ports/butterscotch/linker.ld $(BUTTERSCOTCH_BUILD)/entry.o \
+		$(BUTTERSCOTCH_PROFILE_OBJECTS) $(BUTTERSCOTCH_BUILD)/core_undertale_demo.o -o $@
+	$(STRIP) -s $@
+
+butterscotch-game-probes: $(BUTTERSCOTCH_DELTARUNE_ELF) $(BUTTERSCOTCH_UNDERTALE_ELF)
+	@readelf -h $(BUTTERSCOTCH_DELTARUNE_ELF) | grep -q 'Class:.*ELF64'
+	@readelf -h $(BUTTERSCOTCH_UNDERTALE_ELF) | grep -q 'Class:.*ELF64'
+	@echo "Butterscotch game-profile probes linked: Deltarune Chapter 1, Undertale Demo"
+
 QUAKE_BUILD := $(BUILD)/quake
 QUAKE_CORE_ELF := $(BUILD)/quake-core.elf
 QUAKE_CFLAGS := -std=gnu89 -Os -g -Wall -Wno-format -Wno-unused-variable \
@@ -1159,13 +1368,13 @@ $(QUAKE_CORE_ELF): $(QUAKE_BUILD)/entry.o $(QUAKE_BUILD)/core_main.o \
 		$(QUAKE_BUILD)/zone.o $(QUAKE_BUILD)/mathlib.o \
 		$(QUAKE_BUILD)/crc.o $(QUAKE_BUILD)/cmd.o $(QUAKE_BUILD)/cvar.o \
 		$(QUAKE_BUILD)/quake_libc.o \
-		$(BUILD)/portkit.o ports/quake/linker.ld
+		$(BUILD)/portkit.o $(BUILD)/demonx_xlib.o ports/quake/linker.ld
 	$(LD) -nostdlib --gc-sections -z max-page-size=0x1000 -T ports/quake/linker.ld \
 		$(QUAKE_BUILD)/entry.o $(BUILD)/portkit.o \
 		$(QUAKE_BUILD)/quake_libc.o $(QUAKE_PLATFORM_OBJS) \
 		$(QUAKE_ENGINE_OBJS) $(QUAKE_BUILD)/zone.o $(QUAKE_BUILD)/mathlib.o \
 		$(QUAKE_BUILD)/crc.o $(QUAKE_BUILD)/cmd.o $(QUAKE_BUILD)/cvar.o \
-		$(QUAKE_BUILD)/core_main.o -o $@
+		$(QUAKE_BUILD)/core_main.o $(BUILD)/demonx_xlib.o -o $@
 	$(STRIP) -s $@
 
 quake-core: $(QUAKE_CORE_ELF)
@@ -1256,7 +1465,7 @@ $(CLASSICUBE_CORE_ELF): $(CLASSICUBE_BUILD)/entry.o $(CLASSICUBE_BUILD)/core_mai
 		$(CLASSICUBE_BUILD)/Input.o $(CLASSICUBE_BUILD)/Generator.o \
 		$(CLASSICUBE_BUILD)/Graphics_SoftGPU.o \
 		$(CLASSICUBE_BUILD)/Platform_DemonOS.o $(CLASSICUBE_BUILD)/Window_DemonOS.o \
-		$(BUILD)/portkit.o $(BUILD)/doom_libc.o user/linker.ld
+		$(BUILD)/portkit.o $(BUILD)/doom_libc.o $(BUILD)/demonx_xlib.o user/linker.ld
 	$(LD) $(USER_LDFLAGS) --gc-sections $(CLASSICUBE_BUILD)/entry.o $(BUILD)/portkit.o \
 		$(BUILD)/doom_libc.o $(CLASSICUBE_BUILD)/String.o \
 		$(CLASSICUBE_BUILD)/Stream.o $(CLASSICUBE_BUILD)/Bitmap.o \
@@ -1265,6 +1474,7 @@ $(CLASSICUBE_CORE_ELF): $(CLASSICUBE_BUILD)/entry.o $(CLASSICUBE_BUILD)/core_mai
 		$(CLASSICUBE_BUILD)/Generator.o \
 		$(CLASSICUBE_BUILD)/Graphics_SoftGPU.o \
 		$(CLASSICUBE_BUILD)/Platform_DemonOS.o $(CLASSICUBE_BUILD)/Window_DemonOS.o \
+		$(BUILD)/demonx_xlib.o \
 		$(CLASSICUBE_BUILD)/core_main.o -o $@
 	$(STRIP) -s $@
 
@@ -1350,7 +1560,7 @@ $(DOOM_ENGINE_BUILD)/entry.o: ports/doom/platform/entry.S | $(DOOM_ENGINE_BUILD)
 $(DOOM_ENGINE_BUILD)/main.o: ports/doom/platform/main.c include/demon/portkit.h | $(DOOM_ENGINE_BUILD)
 	$(CC) $(DOOM_CFLAGS) -Iinclude -c $< -o $@
 
-$(DOOM_ENGINE_BUILD)/engine_main.o: ports/doom/platform/engine_main.c include/demon/portkit.h | $(DOOM_SOURCE_STAMP) $(DOOM_ENGINE_BUILD)
+$(DOOM_ENGINE_BUILD)/engine_main.o: ports/doom/platform/engine_main.c include/demon/portkit.h include/demon/demonx.h include/X11/Xlib.h | $(DOOM_SOURCE_STAMP) $(DOOM_ENGINE_BUILD)
 	$(CC) $(DOOM_CFLAGS) -Iinclude -c $< -o $@
 
 $(DOOM_ELF): $(DOOM_ENGINE_BUILD)/entry.o $(DOOM_ENGINE_BUILD)/main.o $(DOOM_ENGINE_BUILD)/portkit.o user/linker.ld
@@ -1362,10 +1572,11 @@ doom-check: doom-runtime-audit $(DOOM_ELF)
 	@readelf -h $(DOOM_ELF) | grep -q 'Entry point address:.*0x300000'
 	@echo "DemonOS Doom D0 executable ready"
 
-$(DOOM_FULL_ELF): $(DOOM_ENGINE_BUILD)/entry.o $(DOOM_ENGINE_BUILD)/engine_main.o $(DOOM_ENGINE_BUILD)/doomgeneric-with-platform.o ports/doom/linker.ld
+$(DOOM_FULL_ELF): $(DOOM_ENGINE_BUILD)/entry.o $(DOOM_ENGINE_BUILD)/engine_main.o $(DOOM_ENGINE_BUILD)/doomgeneric-with-platform.o $(BUILD)/demonx_xlib.o ports/doom/linker.ld
 	$(LD) -nostdlib --gc-sections -z max-page-size=0x1000 -T ports/doom/linker.ld \
 		$(DOOM_ENGINE_BUILD)/entry.o $(DOOM_ENGINE_BUILD)/engine_main.o \
-		$(DOOM_ENGINE_BUILD)/doomgeneric-with-platform.o -o $@
+		$(DOOM_ENGINE_BUILD)/doomgeneric-with-platform.o \
+		$(BUILD)/demonx_xlib.o -o $@
 
 .PHONY: doom-full-check
 doom-full-check: doom-runtime-audit $(DOOM_FULL_ELF)
@@ -1704,7 +1915,10 @@ SHELL_ICON_SOURCES := \
 	"$(ICON_THEME)/src/scalable/apps/web-browser.svg" \
 	"$(ICON_THEME)/templates/app-blue-square.svg" \
 	"$(ICON_THEME)/src/scalable/apps/systemsettings.svg" \
-	"$(ICON_THEME)/src/scalable/devices/computer.svg"
+	"$(ICON_THEME)/src/scalable/devices/computer.svg" \
+	"$(ICON_THEME)/src/scalable/apps/minecraft.svg" \
+	"$(ICON_THEME)/src/scalable/apps/doom.svg" \
+	"$(ICON_THEME)/src/scalable/apps/applications-games.svg"
 
 $(BUILD)/shell_icons.argb: FORCE | $(BUILD)
 	rm -f $@
@@ -2037,7 +2251,7 @@ $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) &: tools/package-mako-source.sh FORCE | 
 
 iso: $(ISO) iso-check
 
-$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(DEMONX_ELF) $(DEMONWM_ELF) $(XTERM_ELF) $(RUST_HELLO_ELF) $(RUST_COMPOSITOR_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
+$(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF) $(DOOM_ELF) $(DOOM_FULL_ELF) $(CLASSICUBE_CORE_ELF) $(QUAKE_CORE_ELF) $(NXENGINE_CORE_ELF) $(BUTTERSCOTCH_CORE_ELF) $(BUTTERSCOTCH_DELTARUNE_ELF) $(BUTTERSCOTCH_UNDERTALE_ELF) $(BUTTERSCOTCH_TEST_DATA) $(DEMONX_ELF) $(DEMONWM_ELF) $(XTERM_ELF) $(RUST_HELLO_ELF) $(RUST_COMPOSITOR_ELF) $(MAKO_SOURCE_ARCHIVE) $(MAKO_MANIFEST) user/sdk.mko projects/hello/main.mko docs/init-system.md docs/apps-and-git.md docs/git-port.md docs/c-apps.md docs/native-porting.md docs/freedoom-port.md docs/classicube-port.md docs/quake-port.md docs/butterscotch-port.md docs/butterscotch-games.md docs/display-address-space.md docs/framebuffer-stage1.md docs/graphics-stage2.md docs/input-stage3.md docs/process-stage4.md docs/ipc-stage5.md docs/network-stage7.md grub/grub-test.cfg
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/grub $(ISO_ROOT)/boot/mako $(ISO_ROOT)/system/mako $(ISO_ROOT)/docs
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
@@ -2052,6 +2266,9 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF
 	cp $(CLASSICUBE_CORE_ELF) $(ISO_ROOT)/boot/mako/classicube-core.elf
 	cp $(QUAKE_CORE_ELF) $(ISO_ROOT)/boot/mako/quake-core.elf
 	cp $(NXENGINE_CORE_ELF) $(ISO_ROOT)/boot/mako/nxengine-core.elf
+	cp $(BUTTERSCOTCH_CORE_ELF) $(ISO_ROOT)/boot/mako/butterscotch-core.elf
+	cp $(BUTTERSCOTCH_DELTARUNE_ELF) $(ISO_ROOT)/boot/mako/butterscotch-deltarune-ch1.elf
+	cp $(BUTTERSCOTCH_UNDERTALE_ELF) $(ISO_ROOT)/boot/mako/butterscotch-undertale-demo.elf
 	cp $(RUST_HELLO_ELF) $(ISO_ROOT)/boot/mako/rust-hello.elf
 	cp $(RUST_COMPOSITOR_ELF) $(ISO_ROOT)/boot/mako/rust-compositor.elf
 	cp $(DEMONX_ELF) $(ISO_ROOT)/boot/mako/demonx.elf
@@ -2070,6 +2287,11 @@ $(ISO): $(KERNEL) $(PORTABLE_ELF) $(TETRIS_ELF) $(CXX_HELLO_ELF) $(PORTCHECK_ELF
 	cp docs/freedoom-port.md $(ISO_ROOT)/docs/freedoom-port.md
 	cp docs/classicube-port.md $(ISO_ROOT)/docs/classicube-port.md
 	cp docs/quake-port.md $(ISO_ROOT)/docs/quake-port.md
+	cp docs/butterscotch-port.md $(ISO_ROOT)/docs/butterscotch-port.md
+	cp docs/butterscotch-games.md $(ISO_ROOT)/docs/butterscotch-games.md
+	mkdir -p $(ISO_ROOT)/games/butterscotch $(ISO_ROOT)/licenses/butterscotch
+	cp $(BUTTERSCOTCH_TEST_DATA) $(ISO_ROOT)/games/butterscotch/object-index-iteration-test.win
+	cp $(BUTTERSCOTCH_SOURCE)/LICENSE $(ISO_ROOT)/licenses/butterscotch/MPL-2.0.txt
 	cp docs/display-address-space.md $(ISO_ROOT)/docs/display-address-space.md
 	cp docs/framebuffer-stage1.md $(ISO_ROOT)/docs/framebuffer-stage1.md
 	cp docs/graphics-stage2.md $(ISO_ROOT)/docs/graphics-stage2.md
@@ -2127,6 +2349,32 @@ $(RUN_ISO): $(ISO) freedoom-assets quake-data nxengine-data nxengine-source $(NX
 	cp grub/grub.cfg $(BUILD)/iso-run/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(BUILD)/iso-run >/dev/null 2>&1
 
+butterscotch-games-iso: $(BUTTERSCOTCH_GAMES_ISO)
+
+$(BUTTERSCOTCH_GAMES_ISO): $(ISO) $(BUTTERSCOTCH_DELTARUNE_ELF) \
+		$(BUTTERSCOTCH_UNDERTALE_ELF)
+	@test -f $(BUTTERSCOTCH_DELTARUNE_DATA) || test -f $(BUTTERSCOTCH_UNDERTALE_DATA) || { echo "no imported game data; run one of the butterscotch-*-data targets first"; exit 2; }
+	rm -rf $(BUILD)/iso-butterscotch-games
+	cp -r $(ISO_ROOT) $(BUILD)/iso-butterscotch-games
+	sed -i 's/ boottest//; s/ desktop//' $(BUILD)/iso-butterscotch-games/boot/grub/grub.cfg
+	@if test -f $(BUTTERSCOTCH_DELTARUNE_DATA); then \
+		mkdir -p $(BUILD)/iso-butterscotch-games/games/butterscotch/deltarune-ch1; \
+		cp $(BUTTERSCOTCH_DELTARUNE_DATA) $(BUILD)/iso-butterscotch-games/games/butterscotch/deltarune-ch1/data.win; \
+		sed -i '/object-index-iteration-test.win/a\    module2 /games/butterscotch/deltarune-ch1/data.win /games/butterscotch/deltarune-ch1/data.win' $(BUILD)/iso-butterscotch-games/boot/grub/grub.cfg; \
+	fi
+	@if test -f $(BUTTERSCOTCH_UNDERTALE_DATA); then \
+		mkdir -p $(BUILD)/iso-butterscotch-games/games/butterscotch/undertale-demo; \
+		cp $(BUTTERSCOTCH_UNDERTALE_DATA) $(BUILD)/iso-butterscotch-games/games/butterscotch/undertale-demo/data.win; \
+		sed -i '/object-index-iteration-test.win/a\    module2 /games/butterscotch/undertale-demo/data.win /games/butterscotch/undertale-demo/data.win' $(BUILD)/iso-butterscotch-games/boot/grub/grub.cfg; \
+	fi
+	grub-mkrescue -o $@ $(BUILD)/iso-butterscotch-games >/dev/null 2>&1
+	@echo "Built local-only Butterscotch game ISO: $@"
+
+run-butterscotch-games: $(BUTTERSCOTCH_GAMES_ISO)
+	env GDK_BACKEND=x11 qemu-system-x86_64 -cdrom $(BUTTERSCOTCH_GAMES_ISO) -m 512M -serial stdio \
+		$(QEMU_AUDIO_RUN) -usb -device usb-tablet \
+		-display gtk,grab-on-hover=on,zoom-to-fit=on -no-reboot -no-shutdown
+
 # Opt-in desktop image (see grub-desktop.cfg): the "desktop" cmdline needle
 # is what actually activates the compositor/DemonX/DemonWM/xterm session
 # (src/kernel.c's multiboot_desktop_mode) -- separate from $(RUN_ISO)'s
@@ -2135,10 +2383,11 @@ DESKTOP_ISO := $(BUILD)/kernel-desktop.iso
 
 desktop-iso: $(DESKTOP_ISO)
 
-$(DESKTOP_ISO): $(ISO) freedoom-assets quake-data grub/grub-desktop.cfg $(BUILD)/wallpaper-full.argb
+$(DESKTOP_ISO): $(ISO) freedoom-assets quake-data grub/grub-desktop.cfg $(BUILD)/wallpaper-full.argb $(BUILD)/shell_icons.argb
 	rm -rf $(BUILD)/iso-desktop
 	cp -r $(ISO_ROOT) $(BUILD)/iso-desktop
 	cp $(BUILD)/wallpaper-full.argb $(BUILD)/iso-desktop/boot/mako/wallpaper.argb
+	cp $(BUILD)/shell_icons.argb $(BUILD)/iso-desktop/boot/mako/shell-icons.argb
 	mkdir -p $(BUILD)/iso-desktop/games/freedoom $(BUILD)/iso-desktop/licenses/doom
 	cp $(FREEDOOM_WAD) $(BUILD)/iso-desktop/games/freedoom/freedoom1.wad
 	cp $(FREEDOOM_DIR)/COPYING.txt $(BUILD)/iso-desktop/licenses/doom/Freedoom-COPYING.txt
@@ -2196,6 +2445,12 @@ iso-check: $(ISO)
 	@xorriso -indev $(ISO) -find /boot/mako/doom-full.elf -type f 2>/dev/null | grep -q doom-full.elf
 	@xorriso -indev $(ISO) -find /boot/mako/classicube-core.elf -type f 2>/dev/null | grep -q classicube-core.elf
 	@xorriso -indev $(ISO) -find /boot/mako/quake-core.elf -type f 2>/dev/null | grep -q quake-core.elf
+	@xorriso -indev $(ISO) -find /boot/mako/butterscotch-core.elf -type f 2>/dev/null | grep -q butterscotch-core.elf
+	@xorriso -indev $(ISO) -find /boot/mako/butterscotch-deltarune-ch1.elf -type f 2>/dev/null | grep -q butterscotch-deltarune-ch1.elf
+	@xorriso -indev $(ISO) -find /boot/mako/butterscotch-undertale-demo.elf -type f 2>/dev/null | grep -q butterscotch-undertale-demo.elf
+	@xorriso -indev $(ISO) -find /games/butterscotch/object-index-iteration-test.win -type f 2>/dev/null | grep -q object-index-iteration-test.win
+	@xorriso -indev $(ISO) -find /docs/butterscotch-port.md -type f 2>/dev/null | grep -q butterscotch-port.md
+	@xorriso -indev $(ISO) -find /docs/butterscotch-games.md -type f 2>/dev/null | grep -q butterscotch-games.md
 	@xorriso -indev $(ISO) -find /boot/mako/rust-compositor.elf -type f 2>/dev/null | grep -q rust-compositor.elf
 	@xorriso -indev $(ISO) -find /boot/mako/demonx.elf -type f 2>/dev/null | grep -q demonx.elf
 	@xorriso -indev $(ISO) -find /boot/mako/demonwm.elf -type f 2>/dev/null | grep -q demonwm.elf
@@ -2358,6 +2613,42 @@ smoke: $(ISO)
 	@grep -q "RUST_COMPOSITOR_READY" $(BUILD)/serial.log
 	@grep -q "PORTKIT_READY allocator libc wad-validation reuse large-files seek timing input" $(BUILD)/serial.log
 	@grep -q "PORTKIT_RING3_OK pid=3 status=0" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D1_BINARY_UTILS_OK reads=u16,u32,u64,float endian=little" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_BINARY_READER_OK source=upstream mode=memory-buffer seek=bounds-checked" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_BOUNDS_SELFTEST_OK truncated=reject duplicates=reject" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D1_DATAWIN_OK magic=FORM bytes=6620" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_INDEX_OK chunks=24 duplicates=0 capacity=64" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_RESOURCES_OK strings=32 code=4 objects=4 rooms=1" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_STRG_OK entries=32 nonnull=32 bytes=416 max=33 fnv=02cd520c" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_GEN8_OK wad=16 game=661770190 version=1.0.0.9999 size=1024x768" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_CODE_OK entries=4 present=4 bytes=288 max=216 locals=4 args=0 blob=106c-118c fnv=a7ba6b75" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_OBJT_OK entries=4 present=4 lists=52 events=4 actions=4 code-actions=4 vertices=0 parents=0" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_ROOM_OK entries=1 present=1 max=1024x768 backgrounds=0/8 views=0/8 instances=5 bound=4 tiles=0 code-refs=0" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_TEXTURE_OK items=4/4 textures=1 embedded=1 png-bytes=848 atlas-pixels=4096 max=128x128 fnv=692d12ec" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_RGBA_OK size=128x128 bytes=65536 fnv=a938bba5 decoder=upstream-stb" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D3_BYTECODE_OK entries=4 instructions=52 operands=80 pushes=16 conv=12 math=4 stores=4 calls=8 branches=4 drops=4 exits=0 unknown=0" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D3_VM_OK entries=4 instructions=44 builtins=8 keys=4 messages=4 branches=2/4 stores=2 position=-4,4" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_INPUT_VM_OK keys=right,up start=10,20 position=14,16" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D3_INTEGER_OPS_OK operations=13 comparisons=6 branches=3 guards=divide-zero,shift-range" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D3_RVALUE_OK kinds=int,bool,real,string,undefined conversions=3 real-ops=3 guards=zero-divide" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D3_CONTROL_OK instructions=5 dup=1 terminators=2 stack-guards=underflow,overflow" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D2_AUDIO_RESOURCES_OK sounds=0/0 embedded=0 compressed=0 entries=0/0 bytes=0 max=0 fnv=811c9dc5 bounds=reject" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D5_PCM_OK codec=wav-pcm source=22050Hz/1ch/8bit frames=4 output=44100Hz/stereo/8 mix=saturating allocation=caller" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D5_VOICES_OK capacity=8 played=2 loop-wraps=2 paused-frames=2 controls=play,pause,resume,stop gain=q8 pan=q8" $(BUILD)/serial.log
+	@grep -Eq "BUTTERSCOTCH_D5_PERSISTENCE_OK bytes=32 checksum=[0-9a-f]{8} format=BSCF/1 write=staged-rename corruption=reject path=per-game" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_RENDER_OK commands=5 frame=320x240 bytes=307200 fnv=0d1e404e room=1024x768 instances=5 bound=4 vm-offset=-4,4" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_FRAMEBUFFER_OK buffer=retained bytes=307200 allocations=1 compose=in-place" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_COLLISION_OK player=object0 overlaps=3 bounds=tpag-target events=ready" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_EVENT_MAP_OK object0 collision-code-mask=0e dispatch=selective" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_LIFECYCLE_OK object0 step-code=0 collision-codes=1,2,3 source=objt-actions" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D5_TICK_OK rate=60Hz mode=fixed-step idle-events=1 idle-position=10,20" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D5_INPUT_STATE_OK pointer=absolute buttons=left,middle,right focus-loss=releases" $(BUILD)/serial.log
+	@grep -Eq "BUTTERSCOTCH_D5_AUDIO_OK rate=44100 channels=2 bits=16 available=[01] submitted=[01] buffers=[01] frames=(0|256) fallback=silent" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D3_STATE_OK scope=instance ticks=2 position=14,24 event-writes=persistent" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_VIDEO_OK surface=320x240 frames=1 window=smoke-offscreen input=keyboard,mouse" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_UPLOAD_OK buffer=retained capacity=76800 allocations=1 pixels=76800" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_SUBSYSTEMS_READY binary-utils binary-reader chunk-index pointer-tables strg gen8 code objt room sprt tpag txtr sond audo png rgba bytecode-decode vm-stack dup ret exit instance-state rvalue-real integer-ops comparisons branches builtins events storage persistence config checksum staged-write room-resolve lifecycle-map collision-map selective-dispatch fixed-step software-renderer retained-framebuffer tpag-blit alpha retained-upload surface demonx resize-state keyboard mouse mouse-state focus-release audio wav-pcm resample mixer voices loop gain pan pcm-ac97" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_CORE_RING3_OK" $(BUILD)/serial.log
 	@grep -q "CLASSICUBE_CORE_RING3_OK" $(BUILD)/serial.log
 	@grep -q "CLASSICUBE_D1_SUBSYSTEMS_READY stream rng bitmap" $(BUILD)/serial.log
 	@grep -q "CLASSICUBE_D2_FILE_ROUNDTRIP_OK bytes=8" $(BUILD)/serial.log

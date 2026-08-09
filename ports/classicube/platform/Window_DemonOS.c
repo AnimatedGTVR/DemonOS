@@ -1,6 +1,17 @@
 #include <demon/c_app.h>
 #include <demon/input.h>
 #include <demon/portkit.h>
+#include <demon/demonx.h>
+#include <X11/Xlib.h>
+
+/* Keep the native game genuinely windowed and inside the kernel's bounded
+   retained-surface arena. 320x240 is also ClassiCube's natural low-resource
+   software-rendering size: xterm + ClassiCube + Doom can all remain mapped
+   at once without growing the 1 MiB surface pool. */
+#define DEMONOS_WINDOWED_WIDTH  320
+#define DEMONOS_WINDOWED_HEIGHT 240
+#define DEMONOS_PRESENT_WIDTH   480
+#define DEMONOS_PRESENT_HEIGHT  360
 
 #include "Bitmap.h"
 #include "Errors.h"
@@ -39,6 +50,9 @@ static uint64_t present_count;
 static uint64_t input_count;
 static uint32_t last_checksum;
 static bool display_available;
+static Display *x_display;
+static Window x_window;
+static int pointer_x, pointer_y;
 
 static int translate_key(uint16_t code) {
     static const cc_uint8 letters[0x33] = {
@@ -142,11 +156,21 @@ void Window_PreInit(void) { }
 
 void Window_Init(void) {
     struct demon_display_info info;
-    display_handle  = demon_service_open(DEMON_DISPLAY_SERVICE);
-    input_handle    = demon_service_open(DEMON_INPUT_SERVICE);
+    /* Prefer the retained, compositor-managed DemonX path. DISPLAY and raw
+       INPUT are only a compatibility fallback for standalone boot tests. */
+    x_display = XOpenDisplay(":4");
+    display_handle  = x_display == NULL ?
+        demon_service_open(DEMON_DISPLAY_SERVICE) : DEMON_INVALID_HANDLE;
+    input_handle    = x_display == NULL ?
+        demon_service_open(DEMON_INPUT_SERVICE) : DEMON_INVALID_HANDLE;
     surface_factory = demon_service_open(DEMON_SURFACE_SERVICE);
-    display_available = display_handle != DEMON_INVALID_HANDLE &&
-        demon_display_info(display_handle, &info) != DEMON_INVALID_HANDLE;
+    display_available = x_display != NULL ||
+        (display_handle != DEMON_INVALID_HANDLE &&
+         demon_display_info(display_handle, &info) != DEMON_INVALID_HANDLE);
+    if (x_display != NULL) {
+        info.width = DEMONOS_WINDOWED_WIDTH;
+        info.height = DEMONOS_WINDOWED_HEIGHT;
+    }
     if (!display_available) {
         info.width = 640u; info.height = 480u;
     }
@@ -166,9 +190,17 @@ void Window_Init(void) {
     present_count = 0u;
     input_count = 0u;
     last_checksum = 0u;
+    x_window = None;
+    pointer_x = pointer_y = 0;
 }
 
 void Window_Free(void) {
+    if (x_display != NULL) {
+        if (x_window != None) (void)XDestroyWindow(x_display, x_window);
+        (void)XCloseDisplay(x_display);
+    }
+    x_display = NULL;
+    x_window = None;
     close_handle(&surface_handle);
     close_handle(&surface_factory);
     close_handle(&input_handle);
@@ -181,12 +213,46 @@ static void create_window(int width, int height, cc_bool is3D) {
     Window_Main.Is3D   = is3D;
     Window_Main.Exists = true;
     Window_Main.Focused = true;
+    if (x_display != NULL) {
+        x_window = XCreateSimpleWindow(x_display,
+            XDefaultRootWindow(x_display), 80, 68,
+            DEMONOS_PRESENT_WIDTH, DEMONOS_PRESENT_HEIGHT,
+            0u, 0u, 0xff101722u);
+        if (x_window == None || surface_factory == DEMON_INVALID_HANDLE) {
+            Window_Main.Exists = false;
+            return;
+        }
+        surface_handle = demon_surface_create(surface_factory,
+            (uint64_t)(unsigned)width, (uint64_t)(unsigned)height);
+        if (surface_handle == DEMON_INVALID_HANDLE ||
+            !DemonXAttachSurface(x_display, x_window, surface_handle,
+                (unsigned)width, (unsigned)height)) {
+            Window_Main.Exists = false;
+            return;
+        }
+        (void)XStoreName(x_display, x_window, "ClassiCube");
+        (void)XSelectInput(x_display, x_window,
+            KeyPressMask | KeyReleaseMask | ButtonPressMask |
+            ButtonReleaseMask | PointerMotionMask | FocusChangeMask |
+            StructureNotifyMask);
+        (void)XMapWindow(x_display, x_window);
+    }
 }
 
 void Window_Create2D(int width, int height) { create_window(width, height, false); }
 void Window_Create3D(int width, int height) { create_window(width, height, true); }
-void Window_Destroy(void) { close_handle(&surface_handle); Window_Main.Exists = false; }
-void Window_SetTitle(const cc_string *title) { (void)title; }
+void Window_Destroy(void) {
+    if (x_display != NULL && x_window != None)
+        (void)XDestroyWindow(x_display, x_window);
+    x_window = None;
+    close_handle(&surface_handle);
+    Window_Main.Exists = false;
+}
+void Window_SetTitle(const cc_string *title) {
+    (void)title;
+    if (x_display != NULL && x_window != None)
+        (void)XStoreName(x_display, x_window, "ClassiCube");
+}
 void Clipboard_GetText(cc_string *value) { value->length = 0; }
 void Clipboard_SetText(const cc_string *value) { (void)value; }
 int Window_GetWindowState(void) { return WINDOW_STATE_NORMAL; }
@@ -195,11 +261,76 @@ cc_result Window_ExitFullscreen(void) { return ERR_NOT_SUPPORTED; }
 int Window_IsObscured(void) { return 0; }
 void Window_Show(void) { Window_Main.Focused = true; }
 void Window_SetSize(int width, int height) { Window_Main.Width = width; Window_Main.Height = height; }
-void Window_RequestClose(void) { Window_Main.Exists = false; }
+void Window_RequestClose(void) {
+    if (x_display != NULL && x_window != None)
+        (void)XDestroyWindow(x_display, x_window);
+    x_window = None;
+    Window_Main.Exists = false;
+}
+
+static uint16_t x_key_code(unsigned int code) {
+    if (code == 0x48u || code == 0x4Bu || code == 0x4Du || code == 0x50u ||
+        code == 0x5Bu || code == 0x5Cu)
+        return (uint16_t)(0x100u | code);
+    return (uint16_t)code;
+}
+
+static void process_x_event(const XEvent *xevent) {
+    struct input_event event = {0};
+    if (xevent->type == ClientMessage &&
+        xevent->xclient.message_type == DEMONX_CLIENT_CLOSE_MESSAGE) {
+        x_window = None;
+        Window_Main.Exists = false;
+        return;
+    }
+    if (xevent->type == KeyPress || xevent->type == KeyRelease) {
+        event.type = xevent->type == KeyPress ? INPUT_KEY_DOWN : INPUT_KEY_UP;
+        event.code = x_key_code(xevent->xkey.keycode);
+        event.value = xevent->xkey.value;
+        event.modifiers = xevent->xkey.state;
+    } else if (xevent->type == MotionNotify) {
+        event.type = INPUT_MOUSE_MOVE;
+        event.x = xevent->xmotion.x;
+        event.y = xevent->xmotion.y;
+        event.delta_x = event.x - pointer_x;
+        event.delta_y = event.y - pointer_y;
+        pointer_x = event.x;
+        pointer_y = event.y;
+    } else if (xevent->type == ButtonPress ||
+               xevent->type == ButtonRelease) {
+        if (xevent->xbutton.button == 4u || xevent->xbutton.button == 5u) {
+            if (xevent->type == ButtonRelease) return;
+            event.type = INPUT_MOUSE_SCROLL;
+            event.value = xevent->xbutton.button == 4u ? 1 : -1;
+        } else {
+            event.type = xevent->type == ButtonPress ?
+                INPUT_MOUSE_BUTTON_DOWN : INPUT_MOUSE_BUTTON_UP;
+            event.code = xevent->xbutton.button == 1u ? INPUT_MOUSE_LEFT :
+                (xevent->xbutton.button == 2u ? INPUT_MOUSE_MIDDLE :
+                 INPUT_MOUSE_RIGHT);
+            event.x = xevent->xbutton.x;
+            event.y = xevent->xbutton.y;
+        }
+    } else if (xevent->type == FocusIn || xevent->type == FocusOut) {
+        Window_Main.Focused = xevent->type == FocusIn;
+        return;
+    } else {
+        return;
+    }
+    if (DemonOS_ApplyInputEvent(&event)) ++input_count;
+}
 
 void Window_ProcessEvents(float delta) {
     struct input_event event;
     (void)delta;
+    if (x_display != NULL) {
+        while (XPending(x_display)) {
+            XEvent event;
+            if (XNextEvent(x_display, &event) != 0) break;
+            process_x_event(&event);
+        }
+        return;
+    }
     if (input_handle == DEMON_INVALID_HANDLE) return;
     while (demon_input_poll(input_handle, &event) == 0u) {
         if (DemonOS_ApplyInputEvent(&event)) ++input_count;
@@ -227,7 +358,7 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap *bmp) {
         checksum ^= bmp->scan0[i]; checksum *= 16777619u;
     }
     last_checksum = checksum;
-    if (display_handle == DEMON_INVALID_HANDLE) return;
+    if (x_display == NULL && display_handle == DEMON_INVALID_HANDLE) return;
 
     /* The retained surface feeds the compositor's shared-window path, but a
        full-size 640x480 surface can exceed the kernel's shared surface arena,
@@ -245,6 +376,10 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap *bmp) {
             (void)demon_surface_damage(surface_handle, (uint64_t)r.x, (uint64_t)r.y,
                                        (uint64_t)r.width, (uint64_t)r.height);
         }
+    }
+    if (x_display != NULL) {
+        ++present_count;
+        return;
     }
     struct demon_display_submit request = {
         .x = DisplayInfo.Width > bmp->width ?

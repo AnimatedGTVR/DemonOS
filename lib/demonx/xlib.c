@@ -249,6 +249,24 @@ int XCloseDisplay(Display *display) {
     return 0;
 }
 
+int DemonXAttachSurface(Display *display, Window window, uint64_t surface,
+                        unsigned int width, unsigned int height) {
+    if (display != &singleton || !singleton_open || window == None ||
+        surface == UINT64_MAX || width == 0u || height == 0u ||
+        width > 640u || height > 480u)
+        return 0;
+    const uint64_t remote = demon_surface_share(surface, display->server);
+    if (remote == UINT64_MAX || remote > UINT32_MAX) return 0;
+    begin_packet(display, 16u, 0u);
+    display->packet.payload[0] = DEMONX_ATTACH_SURFACE;
+    write16(&display->packet.payload[2], 4u);
+    write32(&display->packet.payload[4], window);
+    write32(&display->packet.payload[8], (uint32_t)remote);
+    write16(&display->packet.payload[12], (uint16_t)width);
+    write16(&display->packet.payload[14], (uint16_t)height);
+    return send_packet(display);
+}
+
 Window XDefaultRootWindow(Display *display) {
     return display == &singleton ? DEMONX_ROOT_WINDOW : None;
 }

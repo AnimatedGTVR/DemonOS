@@ -7,12 +7,16 @@
 
 #include <demon/c_app.h>
 #include <demon/portkit.h>
+#include <demon/demonx.h>
+#include <X11/Xlib.h>
 #include <stdint.h>
 #include <stdio.h>
 
 #define DOOM_HEAP_BYTES (24u * 1024u * 1024u)
 #define DOOM_WIDTH 320u
 #define DOOM_HEIGHT 200u
+#define DOOM_WINDOW_WIDTH 480u
+#define DOOM_WINDOW_HEIGHT 300u
 #define DEMON_INVALID_HANDLE UINT64_MAX
 
 struct doom_display_info {
@@ -42,6 +46,9 @@ struct doom_video {
     uint32_t scale;
     uint8_t game_ready;
     uint8_t automated_exit;
+    Display *x_display;
+    Window x_window;
+    uint8_t quit_requested;
 };
 
 static void doom_present(const uint32_t *pixels, uint32_t width,
@@ -84,6 +91,9 @@ static void doom_present(const uint32_t *pixels, uint32_t width,
         present_pixels = video->scaled_pixels;
     }
 
+    if (video->x_display != 0) {
+        ++video->frames;
+    } else {
     const struct doom_display_submit request = {
         .x = video->info.width > present_width ?
             (video->info.width - present_width) / 2u : 0u,
@@ -96,6 +106,7 @@ static void doom_present(const uint32_t *pixels, uint32_t width,
     };
     if (demon_display_submit(video->display, &request) != 0u) return;
     ++video->frames;
+    }
     if (video->frames == 1u) {
         uint32_t hash = 2166136261u;
         for (uint32_t i = 0u; i < width * height; ++i) {
@@ -129,8 +140,41 @@ static void doom_present(const uint32_t *pixels, uint32_t width,
 }
 
 static void doom_set_title(const char *title, void *opaque) {
-    (void)title;
-    (void)opaque;
+    struct doom_video *video = (struct doom_video *)opaque;
+    if (video != 0 && video->x_display != 0 && video->x_window != None)
+        (void)XStoreName(video->x_display, video->x_window,
+                         title != 0 ? title : "Freedoom");
+}
+
+static uint16_t doom_x_key_code(unsigned int code) {
+    if (code == 0x48u || code == 0x4Bu || code == 0x4Du || code == 0x50u)
+        return (uint16_t)(0x100u | code);
+    return (uint16_t)code;
+}
+
+static int doom_poll_input(struct input_event *input, void *opaque) {
+    struct doom_video *video = (struct doom_video *)opaque;
+    if (video == 0 || input == 0) return 0;
+    if (video->x_display == 0) return demon_port_poll_input(input);
+    while (XPending(video->x_display)) {
+        XEvent event;
+        if (XNextEvent(video->x_display, &event) != 0) return 0;
+        if (event.type == ClientMessage &&
+            event.xclient.message_type == DEMONX_CLIENT_CLOSE_MESSAGE) {
+            video->x_window = None;
+            video->quit_requested = 1u;
+            continue;
+        }
+        if (event.type != KeyPress && event.type != KeyRelease) continue;
+        *input = (struct input_event){
+            .type = event.type == KeyPress ? INPUT_KEY_DOWN : INPUT_KEY_UP,
+            .code = doom_x_key_code(event.xkey.keycode),
+            .value = event.xkey.value,
+            .modifiers = event.xkey.state,
+        };
+        return 1;
+    }
+    return 0;
 }
 
 uint64_t doom_main(void) {
@@ -140,7 +184,11 @@ uint64_t doom_main(void) {
         demon_port_write("DOOM_ENGINE_READY\n");
         return 0u;
     }
-    if (!demon_port_init_dynamic(DOOM_HEAP_BYTES)) return 10u;
+    if (!demon_port_init_dynamic(DOOM_HEAP_BYTES)) {
+        demon_port_write("DOOM_WINDOW_HEAP_FAILED\n");
+        return 10u;
+    }
+    demon_port_write("DOOM_WINDOW_HEAP_READY\n");
     char program[] = "doom";
     char iwad_option[] = "-iwad";
     char iwad_path[] = "/games/freedoom/freedoom1.wad";
@@ -152,7 +200,7 @@ uint64_t doom_main(void) {
                          warp_option, episode, map, 0};
     const int argument_count = test_mode == 2u ? 7 : 4;
     struct doom_video video = {
-        .display = demon_service_open(7u),
+        .display = DEMON_INVALID_HANDLE,
         .surface_factory = demon_service_open(9u),
         .surface = DEMON_INVALID_HANDLE,
         .info = {0u, 0u, 0u, 0u, 0u},
@@ -161,11 +209,26 @@ uint64_t doom_main(void) {
         .scale = 1u,
         .game_ready = 0u,
         .automated_exit = test_mode == 2u,
+        .x_display = XOpenDisplay(":5"),
+        .x_window = None,
+        .quit_requested = 0u,
     };
-    if (video.display == DEMON_INVALID_HANDLE ||
-        video.surface_factory == DEMON_INVALID_HANDLE ||
-        demon_display_info(video.display, &video.info) == DEMON_INVALID_HANDLE)
+    if (video.surface_factory == DEMON_INVALID_HANDLE) {
+        demon_port_write("DOOM_WINDOW_SURFACE_SERVICE_FAILED\n");
         return 11u;
+    }
+    if (video.x_display != 0) {
+        video.info.width = (uint64_t)XDisplayWidth(video.x_display, 0);
+        video.info.height = (uint64_t)XDisplayHeight(video.x_display, 0);
+        video.info.max_transfer_pixels = DOOM_WIDTH;
+    } else {
+        video.display = demon_service_open(7u);
+        if (video.display == DEMON_INVALID_HANDLE ||
+            demon_display_info(video.display, &video.info) == DEMON_INVALID_HANDLE) {
+            demon_port_write("DOOM_WINDOW_DEMONX_CONNECT_FAILED\n");
+            return 11u;
+        }
+    }
     uint64_t scale = video.info.width / DOOM_WIDTH;
     const uint64_t vertical_scale = video.info.height / DOOM_HEIGHT;
     if (vertical_scale < scale) scale = vertical_scale;
@@ -183,15 +246,44 @@ uint64_t doom_main(void) {
     }
     video.surface = demon_surface_create(video.surface_factory,
                                          DOOM_WIDTH, DOOM_HEIGHT);
-    if (video.surface == DEMON_INVALID_HANDLE) return 12u;
+    if (video.surface == DEMON_INVALID_HANDLE) {
+        demon_port_write("DOOM_WINDOW_SURFACE_CREATE_FAILED\n");
+        return 12u;
+    }
+    if (video.x_display != 0) {
+        video.scale = 1u;
+        video.x_window = XCreateSimpleWindow(video.x_display,
+            XDefaultRootWindow(video.x_display), 80, 100,
+            DOOM_WINDOW_WIDTH, DOOM_WINDOW_HEIGHT,
+            0u, 0u, 0xff000000u);
+        if (video.x_window == None ||
+            !DemonXAttachSurface(video.x_display, video.x_window,
+                                 video.surface, DOOM_WIDTH, DOOM_HEIGHT)) {
+            demon_port_write("DOOM_WINDOW_ATTACH_FAILED\n");
+            return 13u;
+        }
+        (void)XStoreName(video.x_display, video.x_window, "Freedoom");
+        (void)XSelectInput(video.x_display, video.x_window,
+            KeyPressMask | KeyReleaseMask | FocusChangeMask |
+            StructureNotifyMask);
+        (void)XMapWindow(video.x_display, video.x_window);
+        demon_port_write("DOOM_WINDOW_READY surface=320x200 window=480x300\n");
+    }
     const struct demon_doom_backend backend = {
         .present = doom_present,
         .set_title = doom_set_title,
+        .poll_input = doom_poll_input,
         .context = &video,
     };
     demon_doom_install_backend(&backend);
     demon_port_write("DOOM_FULL_ENGINE_START\n");
     doomgeneric_Create(argument_count, arguments);
-    for (;;) doomgeneric_Tick();
+    for (;;) {
+        doomgeneric_Tick();
+        if (video.quit_requested) {
+            demon_port_write("FREEDOOM_WINDOW_CLOSE\n");
+            I_Quit();
+        }
+    }
     return 0u;
 }

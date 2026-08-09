@@ -9,6 +9,7 @@
 #define SYSCALL_CHANNEL_SEND 16u
 #define SYSCALL_CHANNEL_RECEIVE 17u
 #define SYSCALL_HANDLE_CLOSE 8u
+#define SYSCALL_HANDLE_QUERY 7u
 #define SYSCALL_SERVICE_OPEN 5u
 #define SYSCALL_SURFACE_CREATE 22u
 #define SYSCALL_SURFACE_WRITE 23u
@@ -1225,6 +1226,30 @@ static int parse_request(const char *reply_name) {
         protocol_error(10u, opcode, incoming.client_id);
         return 1;
     }
+    if (opcode == DEMONX_ATTACH_SURFACE && incoming.payload_length == 16u) {
+        struct demonx_window *target = find_window(id);
+        const uint32_t supplied = read32(&incoming.payload[8]);
+        const uint16_t width = read16(&incoming.payload[12]);
+        const uint16_t height = read16(&incoming.payload[14]);
+        if (target == NULL || target->owner_client != incoming.client_id ||
+            target->mapped != 0u || supplied == 0u ||
+            supplied == DEMONX_FALLBACK_SURFACE || width == 0u ||
+            height == 0u || width > DEMONX_WINDOW_MAX_WIDTH ||
+            height > DEMONX_WINDOW_MAX_HEIGHT ||
+            syscall2(SYSCALL_HANDLE_QUERY, supplied, 0u) != width ||
+            syscall2(SYSCALL_HANDLE_QUERY, supplied, 1u) != height) {
+            if (supplied != 0u && supplied != DEMONX_FALLBACK_SURFACE)
+                (void)syscall1(SYSCALL_HANDLE_CLOSE, supplied);
+            protocol_error(2u, opcode, id);
+            return 1;
+        }
+        if (target->surface_handle != 0u &&
+            target->surface_handle != DEMONX_FALLBACK_SURFACE)
+            (void)syscall1(SYSCALL_HANDLE_CLOSE, target->surface_handle);
+        target->surface_handle = supplied;
+        target->compositor_surface = 0u;
+        return 0;
+    }
     if (opcode == DEMONX_CHANGE_SAVE_SET &&
         incoming.payload_length == 8u) {
         struct demonx_window *target = find_window(id);
@@ -2261,6 +2286,20 @@ static int send_outgoing(const char *reply_name) {
 static int process_native_input(const struct demon_window_message *message,
                                 const char *reply_name) {
     struct demonx_window *window = find_window(message->window_id);
+    if (message->opcode == DEMON_WINDOW_CLOSE) {
+        if (window == NULL) return 1;
+        const uint32_t client = window->owner_client;
+        const uint32_t window_id = window->id;
+        clear_outgoing(client);
+        outgoing.flags = DEMONX_FLAG_EVENT;
+        outgoing.payload_length = 32u;
+        outgoing.payload[0] = DEMONX_CLIENT_MESSAGE;
+        outgoing.payload[1] = 32u;
+        write32(&outgoing.payload[4], window_id);
+        write32(&outgoing.payload[8], DEMONX_CLIENT_CLOSE_MESSAGE);
+        destroy_window_state(window);
+        return send_outgoing(reply_name);
+    }
     const int is_key = message->opcode == DEMON_WINDOW_KEY;
     const int is_pointer = message->opcode == 11u ||
                            message->opcode == DEMON_WINDOW_POINTER;
@@ -2365,6 +2404,7 @@ uint64_t demonx_main(const char *service_name, const char *reply_name) {
         if (native->version == DEMON_WINDOW_PROTOCOL_VERSION &&
             (native->opcode == DEMON_WINDOW_KEY ||
              native->opcode == DEMON_WINDOW_POINTER ||
+             native->opcode == DEMON_WINDOW_CLOSE ||
              native->opcode == 11u)) {
             if (!process_native_input(native, reply_name)) return 126u;
             continue;

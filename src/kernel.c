@@ -1218,6 +1218,31 @@ void kernel_main(uint32_t multiboot_magic, uintptr_t multiboot_info) {
     serial_write(" status="); serial_write_u64(portcheck_status);
     serial_write("\n");
     boot_status("Native port runtime", "dynamic heap, reuse, files, timing, and input ABI passed");
+    /* Butterscotch D1 is deliberately a bounded parser smoke: a genuine
+       upstream GameMaker test package and upstream binary_utils.h execute in
+       ring 3, then exit. Interactive boots leave it installed for MakoBox;
+       scripted boots run it here so packaging, RAMFS, PortKit, ELF loading,
+       and the parser are one tested contract. */
+    if (test_mode) {
+        const uint32_t butterscotch_pid = userspace_spawn_path(0u,
+            "/system/bin/butterscotch-core.elf", 33u, "butterscotch-core",
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_CONSOLE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_PROCESS) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_STORAGE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_SURFACE) |
+            CAPABILITY_SERVICE_BIT(CAPABILITY_SERVICE_AUDIO));
+        if (butterscotch_pid == 0u || !userspace_run_init())
+            boot_fatal("Butterscotch D1 core failed to start");
+        uint64_t butterscotch_status = UINT64_MAX;
+        if (!scheduler_reap(0u, butterscotch_pid, &butterscotch_status) ||
+            butterscotch_status != 0u)
+            boot_fatal("Butterscotch D1 core did not exit cleanly");
+        serial_write("BUTTERSCOTCH_CORE_RING3_OK pid=");
+        serial_write_u64(butterscotch_pid);
+        serial_write(" status="); serial_write_u64(butterscotch_status);
+        serial_write("\n");
+        boot_status("Butterscotch port D1", "upstream package parser executed in ring 3");
+    }
     /* The ClassiCube core runs a full render/input smoke that exits itself, so
        the kernel can reap it and assert an exit status on the scripted smoke
        ISO. On the interactive ISO the same executable becomes a persistent

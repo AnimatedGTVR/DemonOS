@@ -44,6 +44,7 @@ uintptr_t scheduler_block_current_timeout(uintptr_t frame_address,
 bool scheduler_wake(uint32_t pid, uint64_t result, uint64_t detail);
 bool scheduler_terminate(uint32_t pid, uint64_t exit_code);
 bool scheduler_reap(uint32_t parent_pid, uint32_t child_pid, uint64_t *exit_code);
+uint32_t scheduler_reap_exited(uint32_t parent_pid, uint64_t *exit_code);
 bool scheduler_has_live_users(void);
 bool scheduler_has_ready_users(void);
 

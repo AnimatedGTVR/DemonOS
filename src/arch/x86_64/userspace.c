@@ -893,6 +893,21 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
             else if (frame->rsi == 4u) frame->rax = info.max_transfer_pixels;
             else if (frame->rsi == 5u) frame->rax = info.width | (info.height << 32u);
             else frame->rax = UINT64_MAX;
+        } else if (service == CAPABILITY_SERVICE_SURFACE) {
+            uint32_t object_id;
+            const uint32_t *pixels;
+            size_t pixel_count;
+            uint32_t width, height;
+            if (!capability_resolve_object(scheduler_current_pid(), frame->rdi,
+                                           CAPABILITY_RIGHT_QUERY, &service,
+                                           &object_id) ||
+                !surface_data(object_id, &pixels, &pixel_count,
+                              &width, &height))
+                frame->rax = UINT64_MAX;
+            else if (frame->rsi == 0u) frame->rax = width;
+            else if (frame->rsi == 1u) frame->rax = height;
+            else if (frame->rsi == 2u) frame->rax = pixel_count;
+            else frame->rax = UINT64_MAX;
         } else
             frame->rax = UINT64_MAX;
         return frame_address;
@@ -1513,6 +1528,17 @@ uintptr_t syscall_dispatch(uintptr_t frame_address) {
             return frame_address;
         }
         return scheduler_on_wait(frame_address, pid);
+    }
+    if (number == 51u) {
+        /* Non-blocking child reap for event-loop parents. A compositor must
+           be able to collect a game that exits without turning its input/IPC
+           wait into waitpid(), and without leaking the finite process slot. */
+        uint64_t status = 0u;
+        const uint32_t child = scheduler_reap_exited(scheduler_current_pid(),
+                                                     &status);
+        frame->rax = child != 0u ? child : UINT64_MAX;
+        frame->rdx = status;
+        return frame_address;
     }
     frame->rax = (uint64_t)-1;
     return frame_address;
