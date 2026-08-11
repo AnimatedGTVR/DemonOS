@@ -256,6 +256,8 @@ uint64_t butterscotch_core_main(void) {
     uint32_t rvalue_conversions = 0u, rvalue_real_operations = 0u;
     uint32_t control_instructions = 0u, control_duplicates = 0u;
     uint32_t control_terminators = 0u;
+    int64_t call_frame_result = 0;
+    int64_t array_result = 0;
     uint32_t persistence_bytes = 0u, persistence_checksum = 0u;
     if (!DemonVm_integerOpcodeSelfTest(&integer_operations,
             &integer_comparisons, &integer_branches)) {
@@ -274,6 +276,39 @@ uint64_t butterscotch_core_main(void) {
         demon_port_shutdown();
         return 8u;
     }
+    if (!DemonVm_callFrameSelfTest(&call_frame_result)) {
+        line("BUTTERSCOTCH_D3_FAIL call-frames");
+        demon_port_free(data);
+        demon_port_shutdown();
+        return 8u;
+    }
+    {
+        char call_frame_report[64];
+        (void)snprintf(call_frame_report, sizeof(call_frame_report),
+            "BUTTERSCOTCH_D3_CALL_FRAME_OK result=%lld",
+            (long long)call_frame_result);
+        line(call_frame_report);
+    }
+    if (!DemonVm_arraySelfTest(&array_result)) {
+        line("BUTTERSCOTCH_D3_FAIL arrays");
+        demon_port_free(data);
+        demon_port_shutdown();
+        return 8u;
+    }
+    {
+        char array_report[64];
+        (void)snprintf(array_report, sizeof(array_report),
+            "BUTTERSCOTCH_D3_ARRAY_OK result=%lld",
+            (long long)array_result);
+        line(array_report);
+    }
+    if (!DemonVm_markerBuiltinSelfTest()) {
+        line("BUTTERSCOTCH_D3_FAIL marker-builtins");
+        demon_port_free(data);
+        demon_port_shutdown();
+        return 8u;
+    }
+    line("BUTTERSCOTCH_D3_MARKER_BUILTIN_OK builtins=NullObject,Global,This,Other");
     if (!DemonButterscotchAudio_pcmSelfTest(&pcm_stats) ||
         !DemonButterscotchMixer_selfTest(&mixer_stats) ||
         !DemonButterscotchPersistence_selfTest(&persistence_bytes,
@@ -628,9 +663,9 @@ uint64_t butterscotch_core_main(void) {
                small (56-92 byte) real scripts, individually confirmed on
                the host to execute their entire compiled GMS2.3
                method(self, <itself>) preamble correctly. */
-            const uint32_t vm_probe_mask = (1u << 1) | (1u << 6) | (1u << 22);
+            const uint32_t vm_probe_ids[3] = {1u, 6u, 22u};
             if (!DemonVm_executeEventsState(&vm_probe_reader, &index,
-                    gen8_summary.wadVersion, 0u, vm_probe_mask,
+                    gen8_summary.wadVersion, 0u, vm_probe_ids, 3u,
                     &vm_probe_state, &vm_probe_stats)) {
                 char vm_report[192];
                 (void)snprintf(vm_report, sizeof(vm_report),
@@ -648,6 +683,167 @@ uint64_t butterscotch_core_main(void) {
                     (unsigned)vm_probe_stats.instructions,
                     (unsigned)vm_probe_stats.builtinCalls);
                 line(vm_report);
+            }
+
+            /* Stage 9 proof-of-concept: real per-instance Step/Collision
+               dispatch against one full real room's real placed instances
+               (room 54, already used by the asset-compositing probe above
+               and confirmed to have exactly 16 instances) -- decoupled
+               from live rendering entirely, so no texture-decode memory
+               cost beyond the full-buffer copy already loaded above for
+               the script probe. DemonSoftwareRenderer_overlap only needs
+               each instance's TPAG target rectangle (cheap metadata via
+               DemonDataWinIndex_pageItem), never decoded pixels. This is
+               the first time the per-instance dispatch machinery the
+               interactive live loop uses runs against a real room's real
+               OBJT event tables instead of the tiny synthetic fixture --
+               failures here are informative, not fatal to the probe:
+               every instance is still attempted even if others fail. */
+            {
+                DemonDataWinScene dispatch_scene;
+                BinaryReader dispatch_reader = BinaryReader_create(NULL, file_size);
+                BinaryReader_setBuffer(&dispatch_reader, vm_probe_data, 0u, file_size);
+                if (!DemonDataWinIndex_roomScene(&dispatch_reader, &index,
+                        &gen8_summary, 54u, &dispatch_scene)) {
+                    line("BUTTERSCOTCH_D9_REAL_DISPATCH_FAIL reason=room-scene");
+                } else {
+                    DemonVmInstanceState dispatch_state[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+                    uint32_t dispatch_step_code[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+                    DemonRenderCommand dispatch_box[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+                    bool dispatch_has_box[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+                    for (uint32_t i = 0u; i < DEMON_DATAWIN_SCENE_INSTANCE_MAX; ++i)
+                        dispatch_has_box[i] = false;
+                    uint32_t steppable = 0u, step_ok = 0u, step_fail = 0u;
+                    uint32_t diagnostics_printed = 0u;
+                    const uint32_t diagnostics_max = 8u;
+                    for (uint32_t i = 0u; i < dispatch_scene.instanceCount; ++i) {
+                        const DemonDataWinSceneInstance *instance =
+                            &dispatch_scene.instances[i];
+                        DemonVm_initInstanceState(&dispatch_state[i],
+                            instance->x, instance->y);
+                        DemonVm_setInstanceContext(&dispatch_state[i],
+                            (int32_t)instance->instanceId, -1);
+                        dispatch_step_code[i] = UINT32_MAX;
+                        if (instance->objectId >= 0) {
+                            uint32_t code;
+                            if (DemonDataWinIndex_eventCode(&dispatch_reader,
+                                    &index, &gen8_summary,
+                                    (uint32_t)instance->objectId, 3u, 0u,
+                                    &code) && code < code_count)
+                                dispatch_step_code[i] = code;
+                        }
+                        if (instance->pageItemId >= 0) {
+                            DemonDataWinPageItem item;
+                            if (DemonDataWinIndex_pageItem(&dispatch_reader,
+                                    &index, (uint32_t)instance->pageItemId,
+                                    &item)) {
+                                dispatch_box[i] = (DemonRenderCommand){
+                                    .opcode = DEMON_RENDER_TPAG,
+                                    .x = instance->x, .y = instance->y,
+                                    .item = item
+                                };
+                                dispatch_has_box[i] = true;
+                            }
+                        }
+                        if (dispatch_step_code[i] == UINT32_MAX) continue;
+                        ++steppable;
+                        BinaryReader step_reader = BinaryReader_create(
+                            NULL, file_size);
+                        BinaryReader_setBuffer(&step_reader, vm_probe_data,
+                            0u, file_size);
+                        DemonVmExecutionStats step_stats;
+                        const uint32_t step_id = dispatch_step_code[i];
+                        if (!DemonVm_executeEventsState(&step_reader, &index,
+                                gen8_summary.wadVersion, 0u,
+                                &step_id, 1u,
+                                &dispatch_state[i], &step_stats)) {
+                            ++step_fail;
+                            if (diagnostics_printed < diagnostics_max) {
+                                ++diagnostics_printed;
+                                char diag[192];
+                                (void)snprintf(diag, sizeof(diag),
+                                    "BUTTERSCOTCH_D9_STEP_FAIL instance=%u object=%d code=%u addr=0x%x instr=0x%08x",
+                                    (unsigned)i, (int)instance->objectId,
+                                    (unsigned)dispatch_step_code[i],
+                                    (unsigned)step_stats.diagnosticAddress,
+                                    (unsigned)step_stats.diagnosticInstruction);
+                                line(diag);
+                            }
+                        } else {
+                            ++step_ok;
+                            if (dispatch_has_box[i]) {
+                                dispatch_box[i].x = dispatch_state[i].variables[3];
+                                dispatch_box[i].y = dispatch_state[i].variables[4];
+                            }
+                        }
+                    }
+                    uint32_t collidable_pairs = 0u, collisions_ok = 0u,
+                        collisions_fail = 0u;
+                    for (uint32_t i = 0u; i < dispatch_scene.instanceCount; ++i) {
+                        if (!dispatch_has_box[i] ||
+                            dispatch_scene.instances[i].objectId < 0) continue;
+                        uint32_t collision_ids[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+                        uint32_t collision_id_count = 0u;
+                        int32_t collision_other = -1;
+                        for (uint32_t j = 0u; j < dispatch_scene.instanceCount; ++j) {
+                            if (i == j || !dispatch_has_box[j] ||
+                                dispatch_scene.instances[j].objectId < 0) continue;
+                            uint32_t code;
+                            if (!DemonDataWinIndex_collisionCode(&dispatch_reader,
+                                    &index, &gen8_summary,
+                                    (uint32_t)dispatch_scene.instances[i].objectId,
+                                    (uint32_t)dispatch_scene.instances[j].objectId,
+                                    &code) || code >= code_count) continue;
+                            ++collidable_pairs;
+                            if (DemonSoftwareRenderer_overlap(&dispatch_box[i],
+                                    &dispatch_box[j]) &&
+                                collision_id_count < DEMON_DATAWIN_SCENE_INSTANCE_MAX) {
+                                collision_ids[collision_id_count++] = code;
+                                collision_other =
+                                    (int32_t)dispatch_scene.instances[j].instanceId;
+                            }
+                        }
+                        if (collision_id_count == 0u) continue;
+                        DemonVm_setInstanceContext(&dispatch_state[i],
+                            (int32_t)dispatch_scene.instances[i].instanceId,
+                            collision_other);
+                        BinaryReader collide_reader = BinaryReader_create(
+                            NULL, file_size);
+                        BinaryReader_setBuffer(&collide_reader, vm_probe_data,
+                            0u, file_size);
+                        DemonVmExecutionStats collide_stats;
+                        if (!DemonVm_executeEventsState(&collide_reader, &index,
+                                gen8_summary.wadVersion, 0u,
+                                collision_ids, collision_id_count,
+                                &dispatch_state[i], &collide_stats)) {
+                            ++collisions_fail;
+                            if (diagnostics_printed < diagnostics_max) {
+                                ++diagnostics_printed;
+                                char diag[192];
+                                (void)snprintf(diag, sizeof(diag),
+                                    "BUTTERSCOTCH_D9_COLLISION_FAIL instance=%u object=%d codes=%u addr=0x%x instr=0x%08x",
+                                    (unsigned)i,
+                                    (int)dispatch_scene.instances[i].objectId,
+                                    (unsigned)collision_id_count,
+                                    (unsigned)collide_stats.diagnosticAddress,
+                                    (unsigned)collide_stats.diagnosticInstruction);
+                                line(diag);
+                            }
+                        } else {
+                            ++collisions_ok;
+                        }
+                    }
+                    char dispatch_report[224];
+                    (void)snprintf(dispatch_report, sizeof(dispatch_report),
+                        "BUTTERSCOTCH_D9_REAL_DISPATCH_%s instances=%u steppable=%u step-ok=%u step-fail=%u collidable-pairs=%u collisions-ok=%u collisions-fail=%u",
+                        (step_fail == 0u && collisions_fail == 0u) ?
+                            "OK" : "PARTIAL",
+                        (unsigned)dispatch_scene.instanceCount,
+                        (unsigned)steppable, (unsigned)step_ok,
+                        (unsigned)step_fail, (unsigned)collidable_pairs,
+                        (unsigned)collisions_ok, (unsigned)collisions_fail);
+                    line(dispatch_report);
+                }
             }
         } else {
             line("BUTTERSCOTCH_D8_VM_SCRIPT_FAIL reason=buffer-load");
@@ -882,13 +1078,33 @@ uint64_t butterscotch_core_main(void) {
         demon_port_shutdown();
         return 10u;
     }
-    uint32_t movable_command = UINT32_MAX;
-    int32_t movable_base_x = 0, movable_base_y = 0;
-    uint32_t command_object[DEMON_RENDER_COMMAND_MAX];
-    for (uint32_t i = 0u; i < DEMON_RENDER_COMMAND_MAX; ++i)
-        command_object[i] = UINT32_MAX;
+    /* Every real placed instance gets its own persistent VM state and its
+     * own Step handler resolved from its own real objectId (not hardcoded
+     * to object 0), instead of the single hardcoded "movable" instance the
+     * fixture demo used to assume. Instances with no sprite (pageItemId<0)
+     * still get state and Step dispatch -- they just never get a render
+     * command -- matching how real GML objects can be invisible controller
+     * instances. State is seeded from the instance's own real room
+     * position, matching real GML semantics (x/y at Create time IS the
+     * room-placed position), rather than the old demo's arbitrary
+     * "vm_stats.finalX/Y from an earlier unrelated self-test" offset. */
+    DemonVmInstanceState instance_state[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+    uint32_t instance_step_code[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+    uint32_t instance_command[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
     for (uint32_t i = 0u; i < scene.instanceCount; ++i) {
         const DemonDataWinSceneInstance *instance = &scene.instances[i];
+        DemonVm_initInstanceState(&instance_state[i], instance->x, instance->y);
+        DemonVm_setInstanceContext(&instance_state[i],
+            (int32_t)instance->instanceId, -1);
+        instance_step_code[i] = UINT32_MAX;
+        if (instance->objectId >= 0) {
+            uint32_t code;
+            if (DemonDataWinIndex_eventCode(&render_reader, &index,
+                    &gen8_summary, (uint32_t)instance->objectId, 3u, 0u,
+                    &code) && code < code_count)
+                instance_step_code[i] = code;
+        }
+        instance_command[i] = UINT32_MAX;
         if (instance->pageItemId < 0) continue;
         DemonDataWinPageItem item;
         if (!DemonDataWinIndex_pageItem(&render_reader, &index,
@@ -907,37 +1123,27 @@ uint64_t butterscotch_core_main(void) {
             .y = instance->y,
             .item = item
         };
-        command_object[command] = (uint32_t)instance->objectId;
-        if (instance->objectId == 0) {
-            movable_command = command;
-            movable_base_x = instance->x;
-            movable_base_y = instance->y;
-            render_list.commands[command].x += vm_stats.finalX;
-            render_list.commands[command].y += vm_stats.finalY;
-        }
+        instance_command[i] = command;
     }
-    if (movable_command == UINT32_MAX || render_list.count != 5u) {
-        line("BUTTERSCOTCH_D4_FAIL room-bindings");
-        DemonImage_release(&decoded_texture);
-        demon_port_free(data);
-        demon_port_shutdown();
-        return 10u;
-    }
-    uint32_t collision_count = 0u;
-    uint32_t step_code = UINT32_MAX;
+    /* Independent of the scene above: the pre-existing boot-time VM self-
+     * tests below exercise the tiny built-in fixture's own object-0 demo
+     * script (arbitrary key-driven delta, not real room coordinates), kept
+     * exactly as before. */
+    uint32_t object0_step_code = UINT32_MAX;
     if (!DemonDataWinIndex_eventCode(&render_reader, &index, &gen8_summary,
-            0u, 3u, 0u, &step_code) || step_code >= code_count) {
+            0u, 3u, 0u, &object0_step_code) || object0_step_code >= code_count) {
         line("BUTTERSCOTCH_D4_FAIL step-event");
         DemonImage_release(&decoded_texture);
         demon_port_free(data);
         demon_port_shutdown();
         return 10u;
     }
+    const uint32_t object0_step_ids[1] = {object0_step_code};
     BinaryReader idle_tick_reader = BinaryReader_create(NULL, file_size);
     BinaryReader_setBuffer(&idle_tick_reader, data, 0u, file_size);
     DemonVmExecutionStats idle_tick_stats;
     if (!DemonVm_executeEvents(&idle_tick_reader, &index,
-            gen8_summary.wadVersion, 0u, 1u << step_code, 10, 20,
+            gen8_summary.wadVersion, 0u, object0_step_ids, 1u, 10, 20,
             &idle_tick_stats) || idle_tick_stats.codeEntries != 1u ||
         idle_tick_stats.finalX != 10 || idle_tick_stats.finalY != 20) {
         line("BUTTERSCOTCH_D4_FAIL fixed-step-selftest");
@@ -952,7 +1158,7 @@ uint64_t butterscotch_core_main(void) {
     BinaryReader_setBuffer(&persistence_reader, data, 0u, file_size);
     DemonVmExecutionStats persistence_stats;
     if (!DemonVm_executeEventsState(&persistence_reader, &index,
-            gen8_summary.wadVersion, DEMON_VM_KEY_RIGHT, 1u << step_code,
+            gen8_summary.wadVersion, DEMON_VM_KEY_RIGHT, object0_step_ids, 1u,
             &persistence_state, &persistence_stats)) {
         line("BUTTERSCOTCH_D4_FAIL persistent-state-step1");
         DemonImage_release(&decoded_texture);
@@ -963,7 +1169,7 @@ uint64_t butterscotch_core_main(void) {
     persistence_reader = BinaryReader_create(NULL, file_size);
     BinaryReader_setBuffer(&persistence_reader, data, 0u, file_size);
     if (!DemonVm_executeEventsState(&persistence_reader, &index,
-            gen8_summary.wadVersion, DEMON_VM_KEY_DOWN, 1u << step_code,
+            gen8_summary.wadVersion, DEMON_VM_KEY_DOWN, object0_step_ids, 1u,
             &persistence_state, &persistence_stats) ||
         persistence_state.variables[3] != 14 ||
         persistence_state.variables[4] != 24) {
@@ -973,26 +1179,41 @@ uint64_t butterscotch_core_main(void) {
         demon_port_shutdown();
         return 10u;
     }
-    uint32_t collision_code[DEMON_RENDER_COMMAND_MAX];
-    for (uint32_t i = 0u; i < DEMON_RENDER_COMMAND_MAX; ++i)
-        collision_code[i] = UINT32_MAX;
-    for (uint32_t command = 1u; command < render_list.count; ++command) {
-        if (command == movable_command) continue;
-        if (!DemonDataWinIndex_collisionCode(&render_reader, &index,
-                &gen8_summary, 0u, command_object[command],
-                &collision_code[command]) || collision_code[command] >= 4u) {
-            line("BUTTERSCOTCH_D4_FAIL collision-events");
-            DemonImage_release(&decoded_texture);
-            demon_port_free(data);
-            demon_port_shutdown();
-            return 10u;
+    /* General pairwise collision resolution: every ordered pair of
+     * instances that both have a render body (needed for the TPAG-rect-
+     * based overlap test) is checked for a real collision handler, rather
+     * than assuming only object 0 ever has one. A collision handler runs
+     * as instance i's own event when instance j is the "other" -- matches
+     * how DemonDataWinIndex_collisionCode(selfId, otherId) is defined, and
+     * is asymmetric on purpose: two instances overlapping only dispatches
+     * to whichever side(s) actually declared a handler for the other. */
+    uint32_t collision_code[DEMON_DATAWIN_SCENE_INSTANCE_MAX][DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+    for (uint32_t i = 0u; i < DEMON_DATAWIN_SCENE_INSTANCE_MAX; ++i)
+        for (uint32_t j = 0u; j < DEMON_DATAWIN_SCENE_INSTANCE_MAX; ++j)
+            collision_code[i][j] = UINT32_MAX;
+    uint32_t collidable_pairs = 0u;
+    uint32_t collision_count = 0u;
+    for (uint32_t i = 0u; i < scene.instanceCount; ++i) {
+        if (instance_command[i] == UINT32_MAX || scene.instances[i].objectId < 0)
+            continue;
+        for (uint32_t j = 0u; j < scene.instanceCount; ++j) {
+            if (i == j || instance_command[j] == UINT32_MAX ||
+                scene.instances[j].objectId < 0) continue;
+            uint32_t code;
+            if (!DemonDataWinIndex_collisionCode(&render_reader, &index,
+                    &gen8_summary, (uint32_t)scene.instances[i].objectId,
+                    (uint32_t)scene.instances[j].objectId, &code) ||
+                code >= code_count) continue;
+            collision_code[i][j] = code;
+            ++collidable_pairs;
+            if (DemonSoftwareRenderer_overlap(
+                    &render_list.commands[instance_command[i]],
+                    &render_list.commands[instance_command[j]]))
+                ++collision_count;
         }
-        if (DemonSoftwareRenderer_overlap(
-                &render_list.commands[movable_command],
-                &render_list.commands[command])) ++collision_count;
     }
-    if (collision_count != 3u) {
-        line("BUTTERSCOTCH_D4_FAIL collision-selftest");
+    if (collidable_pairs == 0u) {
+        line("BUTTERSCOTCH_D4_FAIL collision-events");
         DemonImage_release(&decoded_texture);
         demon_port_free(data);
         demon_port_shutdown();
@@ -1019,11 +1240,22 @@ uint64_t butterscotch_core_main(void) {
         "BUTTERSCOTCH_D4_FRAMEBUFFER_OK buffer=retained bytes=%u allocations=1 compose=in-place",
         (unsigned)rendered_frame.byteCount);
     line(report);
-    line("BUTTERSCOTCH_D4_COLLISION_OK player=object0 overlaps=3 bounds=tpag-target events=ready");
-    line("BUTTERSCOTCH_D4_EVENT_MAP_OK object0 collision-code-mask=0e dispatch=selective");
     (void)snprintf(report, sizeof(report),
-        "BUTTERSCOTCH_D4_LIFECYCLE_OK object0 step-code=%u collision-codes=1,2,3 source=objt-actions",
-        (unsigned)step_code);
+        "BUTTERSCOTCH_D4_COLLISION_OK instances=%u overlaps=%u collidable-pairs=%u bounds=tpag-target events=ready",
+        (unsigned)scene.instanceCount, (unsigned)collision_count,
+        (unsigned)collidable_pairs);
+    line(report);
+    uint32_t steppable_instances = 0u;
+    for (uint32_t i = 0u; i < scene.instanceCount; ++i)
+        if (instance_step_code[i] != UINT32_MAX) ++steppable_instances;
+    (void)snprintf(report, sizeof(report),
+        "BUTTERSCOTCH_D4_EVENT_MAP_OK instances=%u steppable=%u dispatch=per-instance",
+        (unsigned)scene.instanceCount, (unsigned)steppable_instances);
+    line(report);
+    (void)snprintf(report, sizeof(report),
+        "BUTTERSCOTCH_D4_LIFECYCLE_OK instances=%u steppable=%u collidable-pairs=%u source=objt-actions",
+        (unsigned)scene.instanceCount, (unsigned)steppable_instances,
+        (unsigned)collidable_pairs);
     line(report);
     line("BUTTERSCOTCH_D5_TICK_OK rate=60Hz mode=fixed-step idle-events=1 idle-position=10,20");
     line("BUTTERSCOTCH_D5_INPUT_STATE_OK pointer=absolute buttons=left,middle,right focus-loss=releases");
@@ -1066,58 +1298,92 @@ uint64_t butterscotch_core_main(void) {
 
     if (interactive)
         line("BUTTERSCOTCH_D4_LIVE_READY controls=arrows,WASD escape=quit update=fixed-60Hz");
-    DemonVmInstanceState live_state;
-    DemonVm_initInstanceState(&live_state, vm_stats.finalX, vm_stats.finalY);
     while (interactive && !video.quit) {
         DemonButterscotchVideo_pump(&video);
         {
-            BinaryReader live_reader = BinaryReader_create(NULL, file_size);
-            BinaryReader_setBuffer(&live_reader, data, 0u, file_size);
-            DemonVmExecutionStats live_stats;
-            if (!DemonVm_executeEventsState(&live_reader, &index,
-                    gen8_summary.wadVersion, video.keyMask,
-                    1u << step_code, &live_state, &live_stats)) {
-                line("BUTTERSCOTCH_D4_FAIL live-vm");
-                video.quit = true;
-            } else {
-                vm_stats.finalX = live_stats.finalX;
-                vm_stats.finalY = live_stats.finalY;
-                render_list.commands[movable_command].x =
-                    movable_base_x + vm_stats.finalX;
-                render_list.commands[movable_command].y =
-                    movable_base_y + vm_stats.finalY;
-                collision_count = 0u;
-                uint32_t collision_mask = 0u;
-                for (uint32_t command = 1u; command < render_list.count;
-                     ++command) {
-                    if (command == movable_command) continue;
-                    if (DemonSoftwareRenderer_overlap(
-                            &render_list.commands[movable_command],
-                            &render_list.commands[command])) {
-                        ++collision_count;
-                        collision_mask |= 1u << collision_code[command];
-                    }
+            bool ok = true;
+            /* Step: every instance with a resolved Step handler runs
+             * against its own persistent state, not a single shared
+             * instance -- keyMask is passed to all of them uniformly (only
+             * whichever instance's script actually calls keyboard_check
+             * will observe it, matching the pre-existing single-instance
+             * behavior). */
+            for (uint32_t i = 0u; ok && i < scene.instanceCount; ++i) {
+                if (instance_step_code[i] == UINT32_MAX) continue;
+                /* No "other" instance during Step -- clears whatever a
+                 * prior tick's collision dispatch may have left set. */
+                instance_state[i].otherInstanceId = -1;
+                BinaryReader live_reader = BinaryReader_create(NULL, file_size);
+                BinaryReader_setBuffer(&live_reader, data, 0u, file_size);
+                DemonVmExecutionStats live_stats;
+                const uint32_t step_id = instance_step_code[i];
+                if (!DemonVm_executeEventsState(&live_reader, &index,
+                        gen8_summary.wadVersion, video.keyMask,
+                        &step_id, 1u, &instance_state[i],
+                        &live_stats)) {
+                    line("BUTTERSCOTCH_D4_FAIL live-vm");
+                    video.quit = true;
+                    ok = false;
+                    break;
                 }
-                if (collision_mask != 0u) {
+                if (instance_command[i] != UINT32_MAX) {
+                    render_list.commands[instance_command[i]].x =
+                        instance_state[i].variables[3];
+                    render_list.commands[instance_command[i]].y =
+                        instance_state[i].variables[4];
+                }
+            }
+            /* Collision: re-check every instance pair against their
+             * post-Step positions, then dispatch each instance's own
+             * collision handler(s) against its own state. */
+            if (ok) {
+                collision_count = 0u;
+                for (uint32_t i = 0u; ok && i < scene.instanceCount; ++i) {
+                    if (instance_command[i] == UINT32_MAX) continue;
+                    uint32_t collision_ids[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+                    uint32_t collision_id_count = 0u;
+                    int32_t collision_other = -1;
+                    for (uint32_t j = 0u; j < scene.instanceCount; ++j) {
+                        if (i == j || instance_command[j] == UINT32_MAX ||
+                            collision_code[i][j] == UINT32_MAX) continue;
+                        if (DemonSoftwareRenderer_overlap(
+                                &render_list.commands[instance_command[i]],
+                                &render_list.commands[instance_command[j]]) &&
+                            collision_id_count < DEMON_DATAWIN_SCENE_INSTANCE_MAX) {
+                            ++collision_count;
+                            collision_ids[collision_id_count++] =
+                                collision_code[i][j];
+                            /* If several instances collide with i in the
+                             * same tick, @@Other@@ only sees whichever one
+                             * resolved last -- real per-pair dispatch
+                             * granularity is a separate improvement. */
+                            collision_other = (int32_t)scene.instances[j].instanceId;
+                        }
+                    }
+                    if (collision_id_count == 0u) continue;
+                    DemonVm_setInstanceContext(&instance_state[i],
+                        (int32_t)scene.instances[i].instanceId, collision_other);
                     BinaryReader collision_reader = BinaryReader_create(
                         NULL, file_size);
                     BinaryReader_setBuffer(&collision_reader, data, 0u,
                                            file_size);
                     DemonVmExecutionStats collision_stats;
                     if (!DemonVm_executeEventsState(&collision_reader, &index,
-                            gen8_summary.wadVersion, 0u, collision_mask,
-                            &live_state, &collision_stats)) {
+                            gen8_summary.wadVersion, 0u,
+                            collision_ids, collision_id_count,
+                            &instance_state[i], &collision_stats)) {
                         line("BUTTERSCOTCH_D4_FAIL collision-dispatch");
                         video.quit = true;
-                    } else {
-                        vm_stats.finalX = collision_stats.finalX;
-                        vm_stats.finalY = collision_stats.finalY;
-                        render_list.commands[movable_command].x =
-                            movable_base_x + vm_stats.finalX;
-                        render_list.commands[movable_command].y =
-                            movable_base_y + vm_stats.finalY;
+                        ok = false;
+                        break;
                     }
+                    render_list.commands[instance_command[i]].x =
+                        instance_state[i].variables[3];
+                    render_list.commands[instance_command[i]].y =
+                        instance_state[i].variables[4];
                 }
+            }
+            if (ok) {
                 const bool composed = DemonSoftwareRenderer_recompose(
                     &decoded_texture, &render_list, &rendered_frame);
                 const bool presented = composed &&

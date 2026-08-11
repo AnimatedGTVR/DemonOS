@@ -28,6 +28,14 @@ typedef struct {
 typedef struct {
     int32_t variables[DEMON_VM_INSTANCE_VARIABLE_MAX];
     bool initialized;
+    /* The real GameMaker instance ID this state belongs to, and (for a
+     * collision dispatch) the "other" instance's ID -- -1 for none/not
+     * applicable. Defaulted by DemonVm_initInstanceState; set by
+     * DemonVm_setInstanceContext wherever real per-instance dispatch
+     * actually knows these (core_main.c's live loop and headless probes),
+     * not by the fixture self-tests. */
+    int32_t instanceId;
+    int32_t otherInstanceId;
 } DemonVmInstanceState;
 
 enum demon_vm_key_mask {
@@ -49,14 +57,22 @@ bool DemonVm_executeFixtureInput(BinaryReader *reader,
 bool DemonVm_executeEvents(BinaryReader *reader,
                            const DemonDataWinIndex *index,
                            uint8_t wadVersion, uint32_t keyMask,
-                           uint32_t codeMask, int32_t initialX,
-                           int32_t initialY, DemonVmExecutionStats *stats);
+                           const uint32_t *codeIds, uint32_t codeIdCount,
+                           int32_t initialX, int32_t initialY,
+                           DemonVmExecutionStats *stats);
 void DemonVm_initInstanceState(DemonVmInstanceState *state,
                                int32_t initialX, int32_t initialY);
+void DemonVm_setInstanceContext(DemonVmInstanceState *state,
+                                int32_t instanceId, int32_t otherInstanceId);
+/* codeIds/codeIdCount name the exact real CODE-chunk entries to run this
+ * call, in order -- not a bitmask. A uint32_t bitmask can only ever
+ * address 32 of a real game's CODE entries (Deltarune Ch1 alone has 1680);
+ * `1u << codeId` for any real codeId >= 32 is undefined behavior and was
+ * silently running the wrong script entirely rather than failing closed. */
 bool DemonVm_executeEventsState(BinaryReader *reader,
                                 const DemonDataWinIndex *index,
                                 uint8_t wadVersion, uint32_t keyMask,
-                                uint32_t codeMask,
+                                const uint32_t *codeIds, uint32_t codeIdCount,
                                 DemonVmInstanceState *state,
                                 DemonVmExecutionStats *stats);
 bool DemonVm_integerOpcodeSelfTest(uint32_t *operations,
@@ -66,5 +82,8 @@ bool DemonVm_rvalueSelfTest(uint32_t *conversions, uint32_t *realOperations);
 bool DemonVm_controlOpcodeSelfTest(uint32_t *instructions,
                                    uint32_t *duplicates,
                                    uint32_t *terminators);
+bool DemonVm_callFrameSelfTest(int64_t *result);
+bool DemonVm_arraySelfTest(int64_t *result);
+bool DemonVm_markerBuiltinSelfTest(void);
 
 #endif

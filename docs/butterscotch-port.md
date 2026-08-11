@@ -76,15 +76,108 @@ test package shipped in the upstream repository. The executable validates:
 - native resolution of ROOM instances through OBJT sprite IDs, SPRT frame
   pointers, and TPAG records; the fixture's five real instances and four
   drawable objects now determine scene placement without hard-coded slots;
-- strict AABB collision state derived from each TPAG target rectangle; the
-  fixture player resolves as object 0 and correctly overlaps its three wall
-  objects, ready for selective collision-event dispatch;
+- strict AABB collision state derived from each TPAG target rectangle;
 - collision event/action tables resolved from OBJT event type 4 to their CODE
   entries; live updates execute Step first, recompute overlaps, then dispatch
   only the collision handlers associated with objects still touching;
-- generic OBJT event/subtype/action lookup now discovers the player's Step
-  and collision CODE entries from the resource graph; the frame loop no
-  longer assumes that Step is CODE entry zero;
+- generic OBJT event/subtype/action lookup discovers each instance's own
+  Step and collision CODE entries from the resource graph;
+- **general per-instance Step and Collision dispatch**: every real placed
+  instance in the loaded room gets its own persistent VM state (seeded from
+  its own real room position, not a shared/arbitrary offset) and its own
+  Step handler resolved from its own real `objectId` via
+  `DemonDataWinIndex_eventCode`, instead of the previous hard-coded
+  single "object 0 is the only movable instance" assumption (which also
+  hard-required the room to have exactly 5 render commands, so it could
+  not even boot against a real game's differently-shaped room). Collision
+  resolution is now all-pairs: every ordered instance pair with a real
+  handler and an overlapping TPAG rectangle dispatches to whichever
+  instance(s) actually declared that handler, matching
+  `DemonDataWinIndex_collisionCode(selfId, otherId)`'s real asymmetric
+  semantics rather than assuming one fixed "self." This is exercised by
+  the boot-time fixture scene (`BUTTERSCOTCH_D4_COLLISION_OK`/
+  `_EVENT_MAP_OK`/`_LIFECYCLE_OK`, now reporting real instance/steppable/
+  collidable-pair counts instead of fixed "object0" text). Not yet
+  covered: room transitions, event types other than Step/Collision
+  (Create, Destroy, Alarm, Draw, etc.), parent-chain event inheritance,
+  and more than one room loaded at once — and the *live/rendered* dispatch
+  path is currently only reached by the `fixture` build profile, since the
+  `deltarune-ch1`/`undertale-demo` profiles exit after the D1-D8 probes
+  before reaching it (real multi-page texture atlas support and a
+  full-buffer-VM-vs-decoded-textures memory budget the current renderer
+  doesn't have yet — see the headless dispatch proof below for the
+  decoupled-from-rendering alternative that *does* run against real data);
+- **real per-instance dispatch proof (headless, no rendering)**: a new
+  boot-time probe (`BUTTERSCOTCH_D9_REAL_DISPATCH_OK`/`_PARTIAL`) runs the
+  same per-instance Step/Collision dispatch above against one full real
+  room (Deltarune Ch1's room 54, 16 real placed instances) — decoupled
+  from rendering entirely, since collision AABB checks only need each
+  instance's TPAG rectangle metadata, not decoded pixels. Confirmed
+  against the real, legitimately-owned data: of 16 real instances, 2
+  declare a real Step handler; 1 runs its entire real compiled Step script
+  to completion end to end (the first real per-object gameplay script, not
+  just a compiled-preamble fragment, to fully execute), the other fails
+  partway through a real `CALL` instruction at a real code address —
+  reported with the failing instance/object/code id and VM diagnostic
+  fields (`BUTTERSCOTCH_D9_STEP_FAIL`/`_COLLISION_FAIL`) rather than a
+  bare failure, so what's missing is identifiable rather than opaque. 0 of
+  the 16 instances had a resolved collision handler against another
+  instance in this specific room;
+- **`call_builtin` arity-gate fix + four GMS2.3 marker builtins**: the
+  D9 probe's real `CALL` failure above was traced by hand (walking the
+  same FUNC occurrence-chain format `build_references` parses, against the
+  real `data.win`) to a call to `@@NullObject@@` with zero arguments — a
+  trivial GMS2.3-compiler-emitted marker (pushed before `method()` for
+  struct literals/anonymous constructors, confirmed against upstream
+  `vm_builtins.c:14451-14455`) that just returns a constant, not a deep
+  semantic gap. The real bug was structural: `call_builtin` hardcoded every
+  non-`method`/non-array builtin behind a single `arguments == 1u` gate, so
+  any 0-argument (or 2+ argument) builtin failed closed before its name was
+  even checked. Fixed by gating each builtin's own arity individually, and
+  added the four trivial 0-argument GMS2.3 markers this exposed:
+  `@@NullObject@@` (`INSTANCE_NOONE = -4`), `@@Global@@`
+  (`INSTANCE_GLOBAL = -5`), `@@This@@`/`@@Other@@` (the real current/other
+  instance ID, with `@@Other@@` falling back to self when there's no
+  "other" — matches upstream's real behavior). `@@This@@`/`@@Other@@`
+  needed threading a real GameMaker `instanceId` into `DemonVmInstanceState`/
+  `Vm` for the first time (`DemonVm_setInstanceContext`), wired from the
+  real per-instance dispatch sites (the live loop and the D9 probe).
+  Proven by `DemonVm_markerBuiltinSelfTest` (all four, including the
+  fallback case) and confirmed against real data: re-running the D9 probe
+  after this fix showed the previously-failing `@@NullObject@@` call
+  succeed and execution advance further into the same real script before
+  hitting what looked like a stack-underflow at a later `POPZ` — this
+  turned out to be a red herring, see the `codeId` bullet below. Not yet
+  covered: `@@NewGMLObject@@`/`@@CopyStatic@@`/`@@GetInstance@@` (real
+  struct/instance semantics), `@@try_hook@@`/`@@try_unhook@@`/
+  `@@finish_catch@@`/`@@finish_finally@@`/`@@throw@@` (exceptions), and
+  per-pair (rather than merged-array) collision dispatch granularity for
+  `@@Other@@`'s accuracy when several instances collide with one instance
+  in the same tick;
+- **`codeMask` bitmask → explicit `codeIds` list (a real, previously
+  silent, correctness bug)**: chasing the stack-underflow above with live
+  per-instruction tracing showed the VM executing a *completely different,
+  unrelated real script* than the one actually dispatched. Root cause:
+  every per-instance dispatch call selected its target via `1u << codeId`,
+  and Deltarune's real player Step handler is CODE index **761** —
+  `1u << 761` is undefined behavior in C (shift ≥ type width), silently
+  wrapping to some unrelated small bit rather than failing closed. This
+  wasn't a corner case: a `uint32_t` bitmask can only ever address 32 of a
+  real game's CODE entries (Deltarune has 1680), so *any* object whose
+  Step/Collision handler landed at CODE index ≥ 32 was silently running
+  the wrong script entirely. Fixed by replacing `codeMask: uint32_t`
+  throughout `DemonVm_executeEventsState`/`DemonVm_executeEvents` with an
+  explicit `const uint32_t *codeIds, uint32_t codeIdCount` — no bit-width
+  ceiling, no bit tricks on either side of the call. Confirmed against
+  real data: re-running the D9 probe now shows dispatch genuinely reaching
+  real CODE 761 (`gml_Object_obj_mainchara_Step_0`, the actual player Step
+  script) and a second previously-misdispatched real instance (CODE 1142),
+  both failing on *new, real, identifiable* opcode gaps instead —
+  `OP_PUSHGLB` (`0xC2`, a dedicated global-variable-read opcode real
+  bytecode uses instead of the generic variable-push path this VM already
+  handles) and `OP_PUSH` with an Int64-typed operand (`type1==3`, only the
+  Double case of that extra-operand-size class is handled today). Neither
+  fixed yet — natural next investigation;
 - a fixed 60 Hz scheduler executes Step even with no input, then performs
   collision dispatch and rendering; idle-tick validation proves that one
   Step runs while preserving an unmoving instance's coordinates;
@@ -120,7 +213,49 @@ test package shipped in the upstream repository. The executable validates:
   coordinates and republishes the surface at a capped 60 Hz;
 - an offscreen surface boot test so graphics transfer is verified without
   making the automated kernel smoke test wait on an interactive window;
-- allocation, file access, execution, and clean exit in ring 3.
+- allocation, file access, execution, and clean exit in ring 3;
+- real nested GML script/function calls: `OP_CALL` resolves to a user-defined
+  `CODE` entry (by name, the same way builtins already were) when it isn't
+  one of the three hardcoded builtins, instead of only ever failing closed.
+  A bounded call-frame stack (8 deep) gives each nested call its own
+  argument/local storage, popped from and restored to the caller's shared
+  value stack rather than recursing through C; arguments are passed
+  positionally and locals/arguments are addressed through the active
+  frame using each variable's real `VARI` `instanceType` (confirmed against
+  real Deltarune Ch1 data: `-6`/`argument0`, `-7`/local, distinct from the
+  existing `-1` self and `-5` global paths, which are unchanged). Proven by
+  `DemonVm_callFrameSelfTest` (synthetic two-script call/return/argument
+  round trip) and by the boot-time `BUTTERSCOTCH_D8_VM_SCRIPT_OK` probe
+  against real Deltarune Ch1 CODE entries. Not yet covered: structs,
+  exceptions, and stack isolation between frames (a callee can currently
+  read a caller's leftover stack values below its own call base if it pops
+  more than it pushed — a correctness gap for buggy/malicious bytecode, not
+  a crash);
+- basic single-dimension GML arrays: `OP_BREAK`'s `BREAK_PUSHAF`/`BREAK_POPAF`
+  sub-opcodes (confirmed against real Deltarune Ch1 data: 358/589
+  occurrences respectively in its CODE chunk) read and write array elements,
+  and the `@@NewGMLArray@@`/`array_create` builtins construct them (array
+  literals compile to a plain call, confirmed against upstream
+  `vm_builtins.c`). Rather than porting upstream's reference-counted,
+  copy-on-write `GMLArray` model, arrays here are always deep-copied
+  whenever they enter persistent storage (a variable, an array element, a
+  call argument), so each storage location uniquely owns its array and a
+  plain release-before-overwrite is always memory-safe — the one exception
+  is the array-reference operand of a `BREAK_PUSHAF`/`BREAK_POPAF` pair,
+  which stays a live shared reference (identified by the real
+  `VARTYPE_ARRAYPUSHAF`/`VARTYPE_ARRAYPOPAF` tag GameMaker embeds in the
+  preceding `PUSH` instruction's own operand) so in-place element writes
+  are actually visible afterward. Proven by `DemonVm_arraySelfTest`
+  (synthetic array-create/read/write/read-back round trip). Not yet
+  covered: multi-dimensional arrays (`BREAK_PUSHAC` — zero occurrences in
+  the real fixture data scanned), compound-assignment reference chains
+  (`BREAK_SAVEAREF`/`BREAK_RESTOREAREF`), real by-reference array arguments
+  (this file's always-copy simplification means a callee mutating an array
+  argument does not affect the caller's copy, unlike upstream's default),
+  and values that are read but then discarded off a control-flow path other
+  than `OP_POPZ`/`BREAK_SETOWNER`/top-level `RET` (all of which release
+  them) — those leak rather than double-freeing, a bounded, documented gap
+  consistent with this increment's scope.
 
 The ISO includes only an upstream test `data.win`, not Undertale or any other
 commercial game data. Users must supply game data they are legally allowed to
@@ -128,13 +263,20 @@ run when the full runner is available.
 
 ## Remaining stages
 
-1. **D3 — Full VM:** replace the focused fixture executor with upstream
-   `VMContext`; complete reference-counted `RValue` ownership, nested function
-   call frames, arrays, structs, exceptions, and general object-event dispatch.
+1. **D3 — Full VM:** nested function call frames and basic single-dimension
+   arrays are working (see above). Still remaining: replace the focused
+   fixture executor with upstream `VMContext` semantics more broadly,
+   complete reference-counted `RValue` ownership, multi-dimensional arrays,
+   structs, exceptions, and per-frame stack isolation.
 2. **D4 — Renderer integration:** the native window, retained surface, texture
-   upload, software command list, scaling, resize tracking, and unified input
-   transport are working. Next, translate the rest of upstream's general draw
-   commands and resource variants instead of the currently supported subset.
+   upload, software command list, scaling, resize tracking, unified input
+   transport, and general per-instance Step/Collision dispatch (see above)
+   are working. Next, translate the rest of upstream's general draw commands
+   and resource variants instead of the currently supported subset; wire a
+   real game profile through to the live dispatch loop instead of stopping
+   after the D1-D8 compatibility probes; add the remaining event types
+   (Create, Destroy, Alarm, Draw, room transitions); and raise/replace the
+   16-instance room cap for real rooms that exceed it.
 3. **D5 — Runtime services:** native `SOND`/`AUDO` parsing, WAV PCM decoding,
    resampling, an eight-voice lifecycle mixer, AC'97 output, silent fallback,
    fixed-step timing, checksummed configuration, resize-state persistence, and

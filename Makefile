@@ -2636,11 +2636,11 @@ smoke: $(ISO)
 	@grep -q "BUTTERSCOTCH_D5_PCM_OK codec=wav-pcm source=22050Hz/1ch/8bit frames=4 output=44100Hz/stereo/8 mix=saturating allocation=caller" $(BUILD)/serial.log
 	@grep -q "BUTTERSCOTCH_D5_VOICES_OK capacity=8 played=2 loop-wraps=2 paused-frames=2 controls=play,pause,resume,stop gain=q8 pan=q8" $(BUILD)/serial.log
 	@grep -Eq "BUTTERSCOTCH_D5_PERSISTENCE_OK bytes=32 checksum=[0-9a-f]{8} format=BSCF/1 write=staged-rename corruption=reject path=per-game" $(BUILD)/serial.log
-	@grep -q "BUTTERSCOTCH_D4_RENDER_OK commands=5 frame=320x240 bytes=307200 fnv=0d1e404e room=1024x768 instances=5 bound=4 vm-offset=-4,4" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_RENDER_OK commands=5 frame=320x240 bytes=307200 fnv=62ba33d6 room=1024x768 instances=5 bound=4 vm-offset=-4,4" $(BUILD)/serial.log
 	@grep -q "BUTTERSCOTCH_D4_FRAMEBUFFER_OK buffer=retained bytes=307200 allocations=1 compose=in-place" $(BUILD)/serial.log
-	@grep -q "BUTTERSCOTCH_D4_COLLISION_OK player=object0 overlaps=3 bounds=tpag-target events=ready" $(BUILD)/serial.log
-	@grep -q "BUTTERSCOTCH_D4_EVENT_MAP_OK object0 collision-code-mask=0e dispatch=selective" $(BUILD)/serial.log
-	@grep -q "BUTTERSCOTCH_D4_LIFECYCLE_OK object0 step-code=0 collision-codes=1,2,3 source=objt-actions" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_COLLISION_OK instances=5 overlaps=3 collidable-pairs=3 bounds=tpag-target events=ready" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_EVENT_MAP_OK instances=5 steppable=1 dispatch=per-instance" $(BUILD)/serial.log
+	@grep -q "BUTTERSCOTCH_D4_LIFECYCLE_OK instances=5 steppable=1 collidable-pairs=3 source=objt-actions" $(BUILD)/serial.log
 	@grep -q "BUTTERSCOTCH_D5_TICK_OK rate=60Hz mode=fixed-step idle-events=1 idle-position=10,20" $(BUILD)/serial.log
 	@grep -q "BUTTERSCOTCH_D5_INPUT_STATE_OK pointer=absolute buttons=left,middle,right focus-loss=releases" $(BUILD)/serial.log
 	@grep -Eq "BUTTERSCOTCH_D5_AUDIO_OK rate=44100 channels=2 bits=16 available=[01] submitted=[01] buffers=[01] frames=(0|256) fallback=silent" $(BUILD)/serial.log
