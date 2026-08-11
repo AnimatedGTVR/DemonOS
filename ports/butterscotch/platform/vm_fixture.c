@@ -9,6 +9,7 @@
 #include <demon/portkit.h>
 
 #include "binary_utils.h"
+#include "software_renderer.h"
 
 #define OP_CONV 0x07u
 #define OP_MUL 0x08u
@@ -189,6 +190,11 @@ typedef struct {
      * default and upstream's real fallback-to-self behavior for Other). */
     int32_t selfInstanceId;
     int32_t otherInstanceId;
+    /* The room's real placed instances, for world-aware builtins like
+     * place_meeting -- NULL/0 unless the caller's DemonVmInstanceState had
+     * DemonVm_setWorld called on it. */
+    const DemonVmWorldInstance *world;
+    uint32_t worldCount;
     Frame frames[CALL_STACK_MAX];
     uint32_t depth;
     /* Heap allocated (CALL_STACK_MAX * VM_FRAME_SLOTS values, ~12 KiB) --
@@ -748,6 +754,62 @@ static bool call_builtin(Vm *vm, uint32_t function, uint32_t arguments) {
         const int32_t other = vm->otherInstanceId >= 0 ?
             vm->otherInstanceId : vm->selfInstanceId;
         return push(vm, (Value){VALUE_INT, other, 0.0, NULL});
+    }
+    if (function_name_equals(vm, function, "place_meeting")) {
+        /* place_meeting(x, y, obj) -- AABB-only approximation of upstream's
+         * real spatial-grid + precise-pixel collision query
+         * (vm_builtins.c:11330-11387), reusing this VM's already-tested
+         * TPAG-rect overlap math instead of porting the real engine. No
+         * parent-chain object-inheritance matching (exact objectId match
+         * only) and no spatial grid (linear scan over vm->worldCount,
+         * bounded by the room-instance cap). Target resolution matches
+         * upstream (vm.c:2163-2173): self/other resolve to the real
+         * instance IDs this VM already tracks; noone never matches. */
+        if (arguments != 3u) return false;
+        Value args[3];
+        for (uint32_t k = 3u; k-- > 0u;)
+            if (!pop(vm, &args[k])) return false;
+        ++vm->stats->builtinCalls;
+        double testX, testY;
+        if (!numeric_value(args[0], &testX) || !numeric_value(args[1], &testY) ||
+            args[2].kind != VALUE_INT)
+            return push(vm, (Value){VALUE_BOOL, 0, 0.0, NULL});
+        int32_t target = (int32_t)args[2].value;
+        if (target == -1) {                    /* INSTANCE_SELF */
+            target = vm->selfInstanceId;
+        } else if (target == -2) {              /* INSTANCE_OTHER */
+            target = vm->otherInstanceId >= 0 ? vm->otherInstanceId : -4;
+        }
+        if (target == -4 || vm->world == NULL) /* INSTANCE_NOONE */
+            return push(vm, (Value){VALUE_BOOL, 0, 0.0, NULL});
+        const DemonVmWorldInstance *caller = NULL;
+        for (uint32_t i = 0u; i < vm->worldCount; ++i) {
+            if (vm->world[i].instanceId == vm->selfInstanceId) {
+                caller = &vm->world[i];
+                break;
+            }
+        }
+        if (caller == NULL || !caller->hasBox)
+            return push(vm, (Value){VALUE_BOOL, 0, 0.0, NULL});
+        const DemonRenderCommand callerBox = (DemonRenderCommand){
+            .opcode = DEMON_RENDER_TPAG,
+            .x = (int32_t)testX, .y = (int32_t)testY, .item = caller->item
+        };
+        bool found = false;
+        for (uint32_t i = 0u; !found && i < vm->worldCount; ++i) {
+            const DemonVmWorldInstance *other = &vm->world[i];
+            if (other == caller || !other->hasBox) continue;
+            const bool matches = target == -3 /* INSTANCE_ALL */ ||
+                other->instanceId == target || other->objectId == target;
+            if (!matches) continue;
+            const DemonRenderCommand otherBox = (DemonRenderCommand){
+                .opcode = DEMON_RENDER_TPAG,
+                .x = other->x, .y = other->y, .item = other->item
+            };
+            if (DemonSoftwareRenderer_overlap(&callerBox, &otherBox))
+                found = true;
+        }
+        return push(vm, (Value){VALUE_BOOL, found ? 1 : 0, 0.0, NULL});
     }
     if (arguments != 1u) return false;
     Value argument;
@@ -1774,6 +1836,124 @@ bool DemonVm_wideOpcodeSelfTest(void) {
     return ok;
 }
 
+/* Proves place_meeting's target resolution (self/other/all/object-index/
+ * instance-id) and AABB overlap, same synthetic-file style as the other
+ * self-tests -- but since call_builtin never needs a name-address chain
+ * longer than one occurrence otherwise in this file, six independent
+ * single-occurrence FUNC records (all named "place_meeting") are used
+ * instead of one six-occurrence chain, sidestepping needing real chain
+ * deltas at all (CALL's own type1=15 encoding carries no operand bytes
+ * this VM reads, so there's nowhere to put a delta word without it
+ * colliding with the next real instruction).
+ *
+ * World: caller (id=1, obj=10) and two candidates, all with the same
+ * 10x10 box shape -- other1 (id=2, obj=20) at (5,5), overlapping the
+ * caller's box when the caller is tested at (0,0); other2 (id=3, obj=20)
+ * far away at (100,100). vm.otherInstanceId is set to other2 (id=3) so
+ * the INSTANCE_OTHER case resolves to a real, different instance than
+ * INSTANCE_SELF. */
+bool DemonVm_placeMeetingSelfTest(void) {
+    uint8_t file[208];
+    memset(file, 0, sizeof(file));
+
+    BinaryUtils_writeUint32(file + 0, 13u);
+    memcpy(file + 4, "place_meeting", 13u);
+
+    BinaryUtils_writeUint32(file + 32, 6u);             /* FUNC functionCount */
+    const uint32_t callAddr[6] = {120u, 136u, 152u, 168u, 184u, 200u};
+    for (uint32_t i = 0u; i < 6u; ++i) {
+        const uint32_t rec = 36u + i * 12u;
+        BinaryUtils_writeUint32(file + rec, 4u);        /* namePtr */
+        BinaryUtils_writeUint32(file + rec + 4u, 1u);   /* occurrences */
+        BinaryUtils_writeUint32(file + rec + 8u, callAddr[i]);
+    }
+
+    /* Test A: place_meeting(0, 0, 20) -- object-index match, overlaps. */
+    BinaryUtils_writeUint32(file + 108, 0x84000000u);
+    BinaryUtils_writeUint32(file + 112, 0x84000000u);
+    BinaryUtils_writeUint32(file + 116, 0x84000014u);   /* obj=20 */
+    BinaryUtils_writeUint32(file + 120, 0xd90f0003u);
+    /* Test B: place_meeting(200, 200, 20) -- object-index match, no overlap. */
+    BinaryUtils_writeUint32(file + 124, 0x840000c8u);
+    BinaryUtils_writeUint32(file + 128, 0x840000c8u);
+    BinaryUtils_writeUint32(file + 132, 0x84000014u);
+    BinaryUtils_writeUint32(file + 136, 0xd90f0003u);
+    /* Test C: place_meeting(0, 0, all) -- overlaps other1. */
+    BinaryUtils_writeUint32(file + 140, 0x84000000u);
+    BinaryUtils_writeUint32(file + 144, 0x84000000u);
+    BinaryUtils_writeUint32(file + 148, 0x8400fffdu);   /* INSTANCE_ALL=-3 */
+    BinaryUtils_writeUint32(file + 152, 0xd90f0003u);
+    /* Test D: place_meeting(0, 0, 2) -- instance-id match (other1). */
+    BinaryUtils_writeUint32(file + 156, 0x84000000u);
+    BinaryUtils_writeUint32(file + 160, 0x84000000u);
+    BinaryUtils_writeUint32(file + 164, 0x84000002u);
+    BinaryUtils_writeUint32(file + 168, 0xd90f0003u);
+    /* Test E: place_meeting(0, 0, other) -- resolves to other2 (far away). */
+    BinaryUtils_writeUint32(file + 172, 0x84000000u);
+    BinaryUtils_writeUint32(file + 176, 0x84000000u);
+    BinaryUtils_writeUint32(file + 180, 0x8400fffeu);   /* INSTANCE_OTHER=-2 */
+    BinaryUtils_writeUint32(file + 184, 0xd90f0003u);
+    /* Test F: place_meeting(0, 0, self) -- caller excludes itself. */
+    BinaryUtils_writeUint32(file + 188, 0x84000000u);
+    BinaryUtils_writeUint32(file + 192, 0x84000000u);
+    BinaryUtils_writeUint32(file + 196, 0x8400ffffu);   /* INSTANCE_SELF=-1 */
+    BinaryUtils_writeUint32(file + 200, 0xd90f0003u);
+
+    DemonDataWinIndex index;
+    memset(&index, 0, sizeof(index));
+    index.count = 2u;
+    index.chunks[0] = (DemonDataWinChunk){
+        DATAWIN_TAG('V', 'A', 'R', 'I'), 0u, 20u, 12u};
+    index.chunks[1] = (DemonDataWinChunk){
+        DATAWIN_TAG('F', 'U', 'N', 'C'), 0u, 32u, 76u};
+
+    BinaryReader reader = BinaryReader_create(NULL, sizeof(file));
+    BinaryReader_setBuffer(&reader, file, 0u, sizeof(file));
+
+    const DemonDataWinPageItem box = {
+        0u, 0u, 10u, 10u, 0u, 0u, 10u, 10u, 10u, 10u, 0
+    };
+    const DemonVmWorldInstance world[3] = {
+        { 1, 10, 0, 0, box, true },     /* caller */
+        { 2, 20, 5, 5, box, true },     /* other1: overlaps caller at (0,0) */
+        { 3, 20, 100, 100, box, true }, /* other2: far away */
+    };
+
+    DemonVmExecutionStats stats;
+    memset(&stats, 0, sizeof(stats));
+    Vm vm;
+    memset(&vm, 0, sizeof(vm));
+    vm.file = file;
+    vm.fileSize = sizeof(file);
+    vm.func = DemonDataWinIndex_find(&index, DATAWIN_TAG('F', 'U', 'N', 'C'));
+    vm.stats = &stats;
+    vm.selfInstanceId = 1;
+    vm.otherInstanceId = 3;
+    vm.world = world;
+    vm.worldCount = 3u;
+    if (!build_references(&reader, &index, &vm, 16u)) {
+        vm_destroy(&vm);
+        return false;
+    }
+
+    Value result;
+    bool ok = execute_code(&vm, file + 108u, 108u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 1;
+    ok = ok && execute_code(&vm, file + 124u, 124u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 0;
+    ok = ok && execute_code(&vm, file + 140u, 140u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 1;
+    ok = ok && execute_code(&vm, file + 156u, 156u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 1;
+    ok = ok && execute_code(&vm, file + 172u, 172u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 0;
+    ok = ok && execute_code(&vm, file + 188u, 188u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 0;
+
+    vm_destroy(&vm);
+    return ok;
+}
+
 bool DemonVm_executeFixture(BinaryReader *reader,
                             const DemonDataWinIndex *index,
                             uint8_t wadVersion,
@@ -1822,6 +2002,13 @@ void DemonVm_setInstanceContext(DemonVmInstanceState *state,
     state->otherInstanceId = otherInstanceId;
 }
 
+void DemonVm_setWorld(DemonVmInstanceState *state,
+                      const DemonVmWorldInstance *world, uint32_t worldCount) {
+    if (state == NULL) return;
+    state->world = world;
+    state->worldCount = worldCount;
+}
+
 bool DemonVm_executeEventsState(BinaryReader *reader,
                                 const DemonDataWinIndex *index,
                                 uint8_t wadVersion, uint32_t keyMask,
@@ -1851,6 +2038,8 @@ bool DemonVm_executeEventsState(BinaryReader *reader,
     vm.keyMask = keyMask;
     vm.selfInstanceId = state->instanceId;
     vm.otherInstanceId = state->otherInstanceId;
+    vm.world = state->world;
+    vm.worldCount = state->worldCount;
     if (vm.file == NULL || !build_references(reader, index, &vm, wadVersion)) {
         vm_destroy(&vm);
         return false;

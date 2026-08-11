@@ -316,6 +316,13 @@ uint64_t butterscotch_core_main(void) {
         return 8u;
     }
     line("BUTTERSCOTCH_D3_WIDE_OPCODE_OK opcodes=PUSHLOC,PUSHGLB,PUSH.int64,PUSH.float");
+    if (!DemonVm_placeMeetingSelfTest()) {
+        line("BUTTERSCOTCH_D3_FAIL place-meeting");
+        demon_port_free(data);
+        demon_port_shutdown();
+        return 8u;
+    }
+    line("BUTTERSCOTCH_D3_PLACE_MEETING_OK targets=self,other,all,object,instance");
     if (!DemonButterscotchAudio_pcmSelfTest(&pcm_stats) ||
         !DemonButterscotchMixer_selfTest(&mixer_stats) ||
         !DemonButterscotchPersistence_selfTest(&persistence_bytes,
@@ -752,6 +759,32 @@ uint64_t butterscotch_core_main(void) {
                                 dispatch_has_box[i] = true;
                             }
                         }
+                    }
+                    /* World data for place_meeting-style builtins: built
+                     * once from every instance's pre-Step position, shared
+                     * by every instance's Step dispatch this pass -- real
+                     * GML's own per-instance dispatch order already makes
+                     * this genuinely order-dependent, so using pre-tick
+                     * positions uniformly is a reasonable, documented
+                     * approximation rather than a new kind of
+                     * incorrectness. */
+                    DemonVmWorldInstance dispatch_world[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+                    for (uint32_t i = 0u; i < dispatch_scene.instanceCount; ++i) {
+                        dispatch_world[i] = (DemonVmWorldInstance){
+                            .instanceId = (int32_t)dispatch_scene.instances[i].instanceId,
+                            .objectId = dispatch_scene.instances[i].objectId,
+                            .x = dispatch_scene.instances[i].x,
+                            .y = dispatch_scene.instances[i].y,
+                            .item = dispatch_has_box[i] ? dispatch_box[i].item :
+                                (DemonDataWinPageItem){0},
+                            .hasBox = dispatch_has_box[i]
+                        };
+                    }
+                    for (uint32_t i = 0u; i < dispatch_scene.instanceCount; ++i) {
+                        const DemonDataWinSceneInstance *instance =
+                            &dispatch_scene.instances[i];
+                        DemonVm_setWorld(&dispatch_state[i], dispatch_world,
+                            dispatch_scene.instanceCount);
                         if (dispatch_step_code[i] == UINT32_MAX) continue;
                         ++steppable;
                         BinaryReader step_reader = BinaryReader_create(
@@ -1309,6 +1342,31 @@ uint64_t butterscotch_core_main(void) {
         DemonButterscotchVideo_pump(&video);
         {
             bool ok = true;
+            /* World data for place_meeting-style builtins: rebuilt every
+             * tick from each instance's position at the start of that
+             * tick (before this tick's Step runs), shared by every
+             * instance's Step dispatch this tick -- real GML's own
+             * per-instance dispatch order already makes this genuinely
+             * order-dependent, so pre-tick positions uniformly is a
+             * reasonable, documented approximation. */
+            DemonVmWorldInstance live_world[DEMON_DATAWIN_SCENE_INSTANCE_MAX];
+            for (uint32_t i = 0u; i < scene.instanceCount; ++i) {
+                const bool hasBox = instance_command[i] != UINT32_MAX;
+                live_world[i] = (DemonVmWorldInstance){
+                    .instanceId = (int32_t)scene.instances[i].instanceId,
+                    .objectId = scene.instances[i].objectId,
+                    .x = hasBox ? render_list.commands[instance_command[i]].x :
+                        scene.instances[i].x,
+                    .y = hasBox ? render_list.commands[instance_command[i]].y :
+                        scene.instances[i].y,
+                    .item = hasBox ? render_list.commands[instance_command[i]].item :
+                        (DemonDataWinPageItem){0},
+                    .hasBox = hasBox
+                };
+            }
+            for (uint32_t i = 0u; i < scene.instanceCount; ++i)
+                DemonVm_setWorld(&instance_state[i], live_world,
+                    scene.instanceCount);
             /* Step: every instance with a resolved Step handler runs
              * against its own persistent state, not a single shared
              * instance -- keyMask is passed to all of them uniformly (only

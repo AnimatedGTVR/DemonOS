@@ -238,6 +238,35 @@ test package shipped in the upstream repository. The executable validates:
   script calls it — a fundamentally larger, more open-ended category of
   work than the mechanical VM-completeness gaps (opcodes, literal types,
   conversions) this session's increments closed one at a time;
+- **basic world-query capability + `place_meeting`**: the first
+  world-aware builtin this VM supports — every builtin before this is
+  self-contained and never needs to look at *other* instances. Rather
+  than porting upstream's real spatial grid and precise per-pixel
+  collision (`vm_builtins.c:11330-11387`), added a bounded, AABB-only
+  approximation reusing the same TPAG-rect overlap math the existing
+  Step/Collision dispatch already uses and has already proven
+  (`DemonSoftwareRenderer_overlap`): a new `DemonVmWorldInstance` array
+  (position + TPAG rect per real placed instance, no decoded pixels, no
+  spatial grid — a bounded linear scan) threaded into `Vm` via
+  `DemonVmInstanceState`/`DemonVm_setWorld`, mirroring exactly how
+  `selfInstanceId`/`otherInstanceId` were added for `@@This@@`/`@@Other@@`.
+  Target resolution matches upstream (`vm.c:2163-2173`): `self`/`other`
+  reuse the instance IDs this VM already tracks; `all`, a real object
+  index, and a real instance ID are the other three shapes
+  `place_meeting` itself switches on. No parent-chain object-inheritance
+  matching (exact object-index match only) — a documented simplification.
+  Both real per-instance dispatch sites (the live loop and the D9 probe)
+  now build this world data once per tick/run from each instance's
+  pre-Step position. Proven by `DemonVm_placeMeetingSelfTest` (self/other/
+  all/object-index/instance-id target resolution, a true-overlap and a
+  false-no-overlap case, and confirms a caller never matches itself) and
+  confirmed against real data: re-running the D9 probe shows the player's
+  real script advance by over 7600 bytes further — `place_meeting` was
+  gating a large chunk of real gameplay logic — before hitting a real call
+  to `collision_rectangle(x1, y1, x2, y2, obj, prec, notme)`, a closely
+  related spatial-query builtin that can reuse this same world-query
+  infrastructure (an explicit rectangle instead of the caller's own
+  sprite), not yet implemented;
 - a fixed 60 Hz scheduler executes Step even with no input, then performs
   collision dispatch and rendering; idle-tick validation proves that one
   Step runs while preserving an unmoving instance's coordinates;

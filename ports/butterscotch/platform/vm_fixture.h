@@ -24,6 +24,18 @@ typedef struct {
     uint32_t diagnosticStackDepth;
 } DemonVmExecutionStats;
 
+/* One real placed instance's position + sprite rect, for AABB-only
+ * collision-query builtins (place_meeting) -- deliberately not decoded
+ * pixels or a real spatial grid, matching the same TPAG-rect approach the
+ * existing Step/Collision dispatch already uses. */
+typedef struct {
+    int32_t instanceId;
+    int32_t objectId;
+    int32_t x, y;
+    DemonDataWinPageItem item;
+    bool hasBox;
+} DemonVmWorldInstance;
+
 #define DEMON_VM_INSTANCE_VARIABLE_MAX 8u
 typedef struct {
     int32_t variables[DEMON_VM_INSTANCE_VARIABLE_MAX];
@@ -36,6 +48,10 @@ typedef struct {
      * not by the fixture self-tests. */
     int32_t instanceId;
     int32_t otherInstanceId;
+    /* The room's real placed instances, for world-aware builtins like
+     * place_meeting -- NULL/0 unless DemonVm_setWorld is called. */
+    const DemonVmWorldInstance *world;
+    uint32_t worldCount;
 } DemonVmInstanceState;
 
 enum demon_vm_key_mask {
@@ -64,6 +80,8 @@ void DemonVm_initInstanceState(DemonVmInstanceState *state,
                                int32_t initialX, int32_t initialY);
 void DemonVm_setInstanceContext(DemonVmInstanceState *state,
                                 int32_t instanceId, int32_t otherInstanceId);
+void DemonVm_setWorld(DemonVmInstanceState *state,
+                      const DemonVmWorldInstance *world, uint32_t worldCount);
 /* codeIds/codeIdCount name the exact real CODE-chunk entries to run this
  * call, in order -- not a bitmask. A uint32_t bitmask can only ever
  * address 32 of a real game's CODE entries (Deltarune Ch1 alone has 1680);
@@ -86,5 +104,6 @@ bool DemonVm_callFrameSelfTest(int64_t *result);
 bool DemonVm_arraySelfTest(int64_t *result);
 bool DemonVm_markerBuiltinSelfTest(void);
 bool DemonVm_wideOpcodeSelfTest(void);
+bool DemonVm_placeMeetingSelfTest(void);
 
 #endif
