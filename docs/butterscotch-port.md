@@ -203,9 +203,41 @@ test package shipped in the upstream repository. The executable validates:
   (round-trips a value through `PUSHGLB`/`PUSHLOC` and a real >32-bit
   Int64 literal that would visibly fail if truncated, plus an independent
   Float-literal check) and confirmed against real data: re-running the D9
-  probe shows both previously-failing real instances advance further still
-  (their addresses moved forward again) before hitting `OP_CONV` gaps —
-  the natural next investigation;
+  probe showed both previously-failing real instances advance further
+  still before hitting `OP_CONV` gaps, fixed in the next bullet;
+- **`OP_CONV` gaps + `GML_TYPE_INT16` push**: extended `OP_CONV`'s
+  Variable↔numeric conversions with real semantics confirmed against
+  upstream's actual fast path and `RValue_toBool`
+  (`vm.c:3153-3204`, `rvalue.h:485-502`) — Int64↔Variable passthrough
+  (the second real-data failure from the previous fix); Variable→Bool's
+  *full* truthiness matrix (`>0` for integers, `>0.5` for reals — not a
+  naive "nonzero" test, confirmed a negative-int case that a naive test
+  would get wrong — plus non-empty-string, any bound function/method,
+  and false for arrays/undefined, matching `RValue_toBool` exactly rather
+  than only passing through values already boolean); and Variable→Int32
+  truncation (this VM has no separate Int32/Int64 kind, so an
+  already-`VALUE_INT` source must still be explicitly narrowed to real
+  int32 range here rather than passed through). Also added `OP_PUSH` with
+  `type1==15` (`GML_TYPE_INT16`), which reads its literal from the
+  instruction's own low 16 bits — the same convention as the existing
+  `OP_PUSHI` — confirmed as the very next real instruction real dispatch
+  hit once the `OP_CONV` gaps were cleared. Proven by extending
+  `DemonVm_wideOpcodeSelfTest` (six new checks pinning the exact
+  truthiness thresholds, the Int32 truncation, the Int64 passthrough, and
+  the Int16 literal) and confirmed against real data: **one of the two
+  real instances (CODE 1142) now runs its entire real Step script to
+  completion** — the first real Deltarune object script, not just the
+  synthetic self-tests or the D8 preamble probe, to execute successfully
+  end to end. The player's own script (CODE 761) advanced substantially
+  further (its failure address moved over 1300 bytes forward) before
+  hitting a real `CALL` to `place_meeting(x, y, obj)` — a genuine
+  collision-query builtin requiring real instance-lookup-by-object-type
+  infrastructure this VM doesn't have. This is the actual "builtin
+  function surface" wall: real GML games call hundreds of distinct
+  builtins, and each unimplemented one is a hard stop the moment a real
+  script calls it — a fundamentally larger, more open-ended category of
+  work than the mechanical VM-completeness gaps (opcodes, literal types,
+  conversions) this session's increments closed one at a time;
 - a fixed 60 Hz scheduler executes Step even with no input, then performs
   collision dispatch and rendering; idle-tick validation proves that one
   Step runs while preserving an unmoving instance's coordinates;

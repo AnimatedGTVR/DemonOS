@@ -923,6 +923,13 @@ static bool execute_code(Vm *vm, const uint8_t *bytes, uint32_t absolute,
                 } else if (type1 == 5u) {
                     if (!push_variable_reference(vm, address, extra))
                         return false;
+                } else if (type1 == 15u) {
+                    /* GML_TYPE_INT16: reads its literal from the
+                     * instruction's own low 16 bits, same convention as
+                     * OP_PUSHI -- confirmed at vm.c:1228-1233. */
+                    if (!push(vm, (Value){VALUE_INT,
+                        (int16_t)(instruction & 0xffffu), 0.0, NULL}))
+                        return false;
                 } else return false;
                 break;
             case OP_PUSHLOC:
@@ -963,12 +970,63 @@ static bool execute_code(Vm *vm, const uint8_t *bytes, uint32_t absolute,
                  * "variable" type used by builtin arguments. */
                 if (type1 == 6u && type2 == 5u && a.kind == VALUE_STRING) {
                     if (!push(vm, a)) return false;
-                } else if (type1 == 2u && type2 == 5u &&
+                } else if ((type1 == 2u || type1 == 3u) && type2 == 5u &&
                            (a.kind == VALUE_INT || a.kind == VALUE_FUNCTION)) {
+                    /* Int32/Int64 -> Variable passthrough -- this VM has no
+                     * separate Int32/Int64 kind (VALUE_INT covers both, via
+                     * int64_t), so both source widths are the same case;
+                     * confirmed against real data (Deltarune's real player
+                     * Step script hits the Int64 case, vm.c:1662/1669). */
                     if (!push(vm, a)) return false;
-                } else if (type1 == 5u && type2 == 4u &&
-                           a.kind == VALUE_BOOL) {
-                    if (!push(vm, a)) return false;
+                } else if (type1 == 5u && type2 == 4u) {
+                    /* Variable -> Bool: full real truthiness matrix
+                     * confirmed against upstream's actual RValue_toBool
+                     * (rvalue.h:485-502) -- ">0"/">0.5" for numbers (not a
+                     * naive "nonzero" test: negative numbers are false),
+                     * a non-empty string, any bound function/method, and
+                     * false for arrays and undefined. */
+                    if (a.kind == VALUE_BOOL) {
+                        if (!push(vm, a)) return false;
+                    } else if (a.kind == VALUE_INT) {
+                        if (!push(vm, (Value){VALUE_BOOL, a.value > 0,
+                            0.0, NULL})) return false;
+                    } else if (a.kind == VALUE_REAL) {
+                        if (!push(vm, (Value){VALUE_BOOL, a.real > 0.5,
+                            0.0, NULL})) return false;
+                    } else if (a.kind == VALUE_FUNCTION) {
+                        if (!push(vm, (Value){VALUE_BOOL, 1, 0.0, NULL}))
+                            return false;
+                    } else if (a.kind == VALUE_ARRAY ||
+                               a.kind == VALUE_UNDEFINED) {
+                        array_release(a);
+                        if (!push(vm, (Value){VALUE_BOOL, 0, 0.0, NULL}))
+                            return false;
+                    } else if (a.kind == VALUE_STRING) {
+                        const uint8_t *text;
+                        uint32_t length;
+                        if (!push(vm, (Value){VALUE_BOOL,
+                            string_value(vm, (uint32_t)a.value, &text,
+                                        &length) && length > 0u,
+                            0.0, NULL})) return false;
+                    } else return false;
+                } else if (type1 == 5u && type2 == 2u) {
+                    /* Variable -> Int32: truncates to real int32 range,
+                     * matching upstream's actual RValue_toInt32 semantics
+                     * (vm.c:3183-3197, 1682) -- this VM stores every
+                     * integer as a 64-bit VALUE_INT regardless of the
+                     * bytecode-declared width, so a source that's already
+                     * VALUE_INT must still be explicitly narrowed here
+                     * rather than passed through unchanged. */
+                    if (a.kind == VALUE_INT) {
+                        if (!push(vm, (Value){VALUE_INT,
+                            (int32_t)a.value, 0.0, NULL})) return false;
+                    } else if (a.kind == VALUE_BOOL) {
+                        if (!push(vm, (Value){VALUE_INT, a.value,
+                            0.0, NULL})) return false;
+                    } else if (a.kind == VALUE_REAL) {
+                        if (!push(vm, (Value){VALUE_INT,
+                            (int32_t)a.real, 0.0, NULL})) return false;
+                    } else return false;
                 } else if (type1 == 2u && type2 == 0u &&
                            a.kind == VALUE_INT) {
                     if (!push(vm, (Value){VALUE_REAL, 0, (double)a.value, NULL}))
@@ -1605,7 +1663,7 @@ bool DemonVm_markerBuiltinSelfTest(void) {
  *             literal (2.5), run as its own execute_code call reusing the
  *             same build_references-backed Vm. */
 bool DemonVm_wideOpcodeSelfTest(void) {
-    uint8_t file[116];
+    uint8_t file[200];
     memset(file, 0, sizeof(file));
 
     BinaryUtils_writeUint32(file + 16, (uint32_t)-1);   /* VARI[0] "g": self scope */
@@ -1635,6 +1693,35 @@ bool DemonVm_wideOpcodeSelfTest(void) {
 
     BinaryUtils_writeUint32(file + 108, 0xc0010000u);   /* PUSH float (type1=1) */
     BinaryUtils_writeFloat32(file + 112, 2.5f);
+
+    /* OP_CONV coverage: real GML truthiness is ">0" for integers and
+     * ">0.5" for reals (confirmed at vm.c:3165-3181), not a naive
+     * "nonzero" test -- these checks pin the exact threshold, including a
+     * negative-int case that would wrongly read true under a nonzero
+     * test. Also covers Variable->Int32 truncation and the Int64->Variable
+     * passthrough that was this increment's second real-data failure. */
+    BinaryUtils_writeUint32(file + 116, 0x84000005u);   /* PUSHI 5 */
+    BinaryUtils_writeUint32(file + 120, 0x07450000u);   /* CONV var->bool */
+    BinaryUtils_writeUint32(file + 124, 0x8400fffdu);   /* PUSHI -3 */
+    BinaryUtils_writeUint32(file + 128, 0x07450000u);   /* CONV var->bool */
+    BinaryUtils_writeUint32(file + 132, 0xc0000000u);   /* PUSH real 0.3 */
+    BinaryUtils_writeFloat64(file + 136, 0.3);
+    BinaryUtils_writeUint32(file + 144, 0x07450000u);   /* CONV var->bool */
+    BinaryUtils_writeUint32(file + 148, 0xc0000000u);   /* PUSH real 0.7 */
+    BinaryUtils_writeFloat64(file + 152, 0.7);
+    BinaryUtils_writeUint32(file + 160, 0x07450000u);   /* CONV var->bool */
+    BinaryUtils_writeUint32(file + 164, 0xc0000000u);   /* PUSH real 3.9 */
+    BinaryUtils_writeFloat64(file + 168, 3.9);
+    BinaryUtils_writeUint32(file + 176, 0x07250000u);   /* CONV var->int32 */
+    BinaryUtils_writeUint32(file + 180, 0xc0030000u);   /* PUSH int64 */
+    BinaryUtils_writeInt64(file + 184, 5000000000LL);
+    BinaryUtils_writeUint32(file + 192, 0x07530000u);   /* CONV int64->var */
+
+    /* GML_TYPE_INT16 (type1==15) reads its literal from the instruction's
+     * own low 16 bits, same convention as OP_PUSHI -- confirmed at
+     * vm.c:1228-1233, and this is the real instruction real Deltarune
+     * data hit (0xc00f0000-shaped). */
+    BinaryUtils_writeUint32(file + 196, 0xc00ffff9u);   /* PUSH int16 (type1=15) -7 */
 
     DemonDataWinIndex index;
     memset(&index, 0, sizeof(index));
@@ -1666,6 +1753,22 @@ bool DemonVm_wideOpcodeSelfTest(void) {
         result.value == 5000000042LL;
     ok = ok && execute_code(&vm, file + 108u, 108u, 8u) && vm.top == 1u &&
         pop(&vm, &result) && result.kind == VALUE_REAL && result.real == 2.5;
+
+    ok = ok && execute_code(&vm, file + 116u, 116u, 8u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 1;
+    ok = ok && execute_code(&vm, file + 124u, 124u, 8u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 0;
+    ok = ok && execute_code(&vm, file + 132u, 132u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 0;
+    ok = ok && execute_code(&vm, file + 148u, 148u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_BOOL && result.value == 1;
+    ok = ok && execute_code(&vm, file + 164u, 164u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_INT && result.value == 3;
+    ok = ok && execute_code(&vm, file + 180u, 180u, 16u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_INT &&
+        result.value == 5000000000LL;
+    ok = ok && execute_code(&vm, file + 196u, 196u, 4u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_INT && result.value == -7;
 
     vm_destroy(&vm);
     return ok;
