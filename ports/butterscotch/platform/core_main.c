@@ -309,6 +309,13 @@ uint64_t butterscotch_core_main(void) {
         return 8u;
     }
     line("BUTTERSCOTCH_D3_MARKER_BUILTIN_OK builtins=NullObject,Global,This,Other");
+    if (!DemonVm_wideOpcodeSelfTest()) {
+        line("BUTTERSCOTCH_D3_FAIL wide-opcodes");
+        demon_port_free(data);
+        demon_port_shutdown();
+        return 8u;
+    }
+    line("BUTTERSCOTCH_D3_WIDE_OPCODE_OK opcodes=PUSHLOC,PUSHGLB,PUSH.int64,PUSH.float");
     if (!DemonButterscotchAudio_pcmSelfTest(&pcm_stats) ||
         !DemonButterscotchMixer_selfTest(&mixer_stats) ||
         !DemonButterscotchPersistence_selfTest(&persistence_bytes,

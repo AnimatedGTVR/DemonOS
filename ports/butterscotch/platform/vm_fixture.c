@@ -35,6 +35,8 @@
 #define OP_B 0xb6u
 #define OP_BT 0xb7u
 #define OP_PUSH 0xc0u
+#define OP_PUSHLOC 0xc1u
+#define OP_PUSHGLB 0xc2u
 #define OP_CALL 0xd9u
 #define OP_BREAK 0xffu
 #define VALUE_STACK_MAX 32u
@@ -792,6 +794,35 @@ static void resume_caller(Vm *vm, const uint8_t **bytes, uint32_t *absolute,
     *ip = frame->ip;
 }
 
+/* Resolves and pushes a variable reference by the referencing instruction's
+ * own address -- shared by OP_PUSH's type1==5 (GML_TYPE_VARIABLE) case and
+ * OP_PUSHLOC/OP_PUSHGLB (dedicated local/global variable push opcodes,
+ * confirmed at vm.c:2965-2995 in the pinned upstream source; there is no
+ * corresponding OP_POPLOC/OP_POPGLB -- writes always go through the single
+ * existing OP_POP). VARI occurrence chains record every address a variable
+ * is referenced from regardless of which opcode does the referencing, so
+ * the same address-based resolve() this file already uses for plain PUSH
+ * works unchanged for these too -- no new resolution mechanism needed. */
+static bool push_variable_reference(Vm *vm, uint32_t address,
+                                    const uint8_t *extra) {
+    Value *slot;
+    uint32_t reference;
+    if (!resolve(vm->vars, vm->varRefs, address, &reference) ||
+        (slot = variable_slot(vm, reference)) == NULL)
+        return false;
+    /* The operand word's top byte is this push's VARTYPE tag (confirmed at
+     * vm.h:28-31,118-119): a ARRAYPUSHAF/POPAF-tagged push feeds an
+     * immediately following BREAK_PUSHAF/POPAF and must stay a live shared
+     * reference into *slot for in-place element mutation to be visible;
+     * any other push clones, so an ordinary `y = arr;` never aliases two
+     * variables onto the same ArrayData. */
+    const uint8_t vartype = (uint8_t)(BinaryUtils_readUint32(extra) >> 24u);
+    if (vartype == VARTYPE_ARRAYPUSHAF || vartype == VARTYPE_ARRAYPOPAF)
+        return push(vm, *slot);
+    Value cloned;
+    return array_clone(*slot, &cloned) && push(vm, cloned);
+}
+
 static bool execute_code(Vm *vm, const uint8_t *bytes, uint32_t absolute,
                          uint32_t length) {
     uint32_t ip = 0u;
@@ -850,6 +881,28 @@ static bool execute_code(Vm *vm, const uint8_t *bytes, uint32_t absolute,
                     memcpy(&value, &bits, sizeof(value));
                     if (!push(vm, (Value){VALUE_REAL, 0, value, NULL}))
                         return false;
+                } else if (type1 == 1u) {
+                    /* GML_TYPE_FLOAT: 4-byte float, promoted to this VM's
+                     * one double-typed VALUE_REAL representation -- same
+                     * as upstream's GMLReal, which is uniformly a double
+                     * internally regardless of the wire type (confirmed at
+                     * vm.c:1124-1126). */
+                    uint32_t bits = BinaryUtils_readUint32(extra);
+                    float value;
+                    memcpy(&value, &bits, sizeof(value));
+                    if (!push(vm, (Value){VALUE_REAL, 0, (double)value, NULL}))
+                        return false;
+                } else if (type1 == 3u) {
+                    /* GML_TYPE_INT64: 8-byte signed literal. Value.value is
+                     * already int64_t, so no truncation risk here unlike
+                     * PUSHI's 16-bit or type1==2's 32-bit literals. */
+                    if (!push(vm, (Value){VALUE_INT,
+                        (int64_t)BinaryUtils_readUint64(extra), 0.0, NULL}))
+                        return false;
+                } else if (type1 == 4u) {
+                    if (!push(vm, (Value){VALUE_BOOL,
+                        BinaryUtils_readInt32(extra) != 0, 0.0, NULL}))
+                        return false;
                 } else if (type1 == 6u) {
                     if (!push(vm, (Value){VALUE_STRING,
                         BinaryUtils_readInt32(extra), 0.0, NULL})) return false;
@@ -868,30 +921,18 @@ static bool execute_code(Vm *vm, const uint8_t *bytes, uint32_t absolute,
                     } else if (!push(vm, (Value){VALUE_INT,
                         BinaryUtils_readInt32(extra), 0.0, NULL})) return false;
                 } else if (type1 == 5u) {
-                    Value *slot;
-                    if (!resolve(vm->vars, vm->varRefs, address,
-                                 &reference) ||
-                        (slot = variable_slot(vm, reference)) == NULL)
+                    if (!push_variable_reference(vm, address, extra))
                         return false;
-                    /* The operand word's top byte is this push's VARTYPE
-                     * tag (confirmed at vm.h:28-31,118-119): a
-                     * ARRAYPUSHAF/POPAF-tagged push feeds an immediately
-                     * following BREAK_PUSHAF/POPAF and must stay a live
-                     * shared reference into *slot for in-place element
-                     * mutation to be visible; any other push clones, so an
-                     * ordinary `y = arr;` never aliases two variables onto
-                     * the same ArrayData. */
-                    const uint8_t vartype =
-                        (uint8_t)(BinaryUtils_readUint32(extra) >> 24u);
-                    if (vartype == VARTYPE_ARRAYPUSHAF ||
-                        vartype == VARTYPE_ARRAYPOPAF) {
-                        if (!push(vm, *slot)) return false;
-                    } else {
-                        Value cloned;
-                        if (!array_clone(*slot, &cloned) ||
-                            !push(vm, cloned)) return false;
-                    }
                 } else return false;
+                break;
+            case OP_PUSHLOC:
+            case OP_PUSHGLB:
+                /* Always a variable push regardless of type1 -- confirmed
+                 * real data already showed type1==5 for an observed
+                 * OP_PUSHGLB, consistent with plain PUSH's own
+                 * GML_TYPE_VARIABLE tag, so no divergent handling here. */
+                if (!push_variable_reference(vm, address, extra))
+                    return false;
                 break;
             case OP_PUSHI:
                 if (!push(vm, (Value){VALUE_INT,
@@ -1538,6 +1579,93 @@ bool DemonVm_markerBuiltinSelfTest(void) {
     vm.otherInstanceId = 99;
     ok = ok && execute_code(&vm, file + 140u, 140u, 4u) && vm.top == 1u &&
         pop(&vm, &result) && result.kind == VALUE_INT && result.value == 99;
+
+    vm_destroy(&vm);
+    return ok;
+}
+
+/* Proves OP_PUSHLOC/OP_PUSHGLB (dedicated local/global variable-push
+ * opcodes real GameMaker bytecode uses instead of the generic
+ * OP_PUSH type1==5 path -- confirmed real data hit OP_PUSHGLB) and the
+ * OP_PUSH literal types this file didn't have cases for yet
+ * (type1==3 int64, type1==1 float), same synthetic-file style as
+ * DemonVm_arraySelfTest. Layout:
+ *
+ *   [0..52)   VARI: header (12B) + 2 records -- "g" (flat/self scope,
+ *             occurrences at the POP/PUSHGLB below) and "loc" (local
+ *             scope, occurrences at the POP/PUSHLOC below)
+ *   [52..56)  FUNC: functionCount=0 (no calls in this test)
+ *   [56..108) bytecode: pushes an 8-byte int64 literal (5000000000 --
+ *             deliberately past INT32_MAX, so a truncation bug would
+ *             produce a visibly wrong result) and stores it into "g" via
+ *             plain POP; stores 42 into "loc"; reads both back via
+ *             PUSHGLB/PUSHLOC (not the generic PUSH path) and adds them,
+ *             left on the stack for the natural-end convention
+ *   [108..116) a second, independent snippet: pushes a 4-byte float
+ *             literal (2.5), run as its own execute_code call reusing the
+ *             same build_references-backed Vm. */
+bool DemonVm_wideOpcodeSelfTest(void) {
+    uint8_t file[116];
+    memset(file, 0, sizeof(file));
+
+    BinaryUtils_writeUint32(file + 16, (uint32_t)-1);   /* VARI[0] "g": self scope */
+    BinaryUtils_writeUint32(file + 20, 0u);
+    BinaryUtils_writeUint32(file + 24, 2u);             /* occurrences */
+    BinaryUtils_writeUint32(file + 28, 68u);            /* firstAddress: POP g */
+
+    BinaryUtils_writeUint32(file + 36, (uint32_t)-7);   /* VARI[1] "loc": local scope */
+    BinaryUtils_writeUint32(file + 40, 0u);             /* varIndex 0 */
+    BinaryUtils_writeUint32(file + 44, 2u);             /* occurrences */
+    BinaryUtils_writeUint32(file + 48, 80u);            /* firstAddress: POP loc */
+
+    BinaryUtils_writeUint32(file + 52, 0u);             /* FUNC functionCount */
+
+    BinaryUtils_writeUint32(file + 56, 0xc0030000u);    /* PUSH int64 (type1=3) */
+    BinaryUtils_writeInt64(file + 60, 5000000000LL);
+    BinaryUtils_writeUint32(file + 68, 0x45050000u);    /* POP g */
+    BinaryUtils_writeUint32(file + 72, 20u);            /* chain delta g: 68->88 */
+    BinaryUtils_writeUint32(file + 76, 0x8400002au);    /* PUSHI 42 */
+    BinaryUtils_writeUint32(file + 80, 0x45050000u);    /* POP loc */
+    BinaryUtils_writeUint32(file + 84, 16u);            /* chain delta loc: 80->96 */
+    BinaryUtils_writeUint32(file + 88, 0xc2050000u);    /* PUSHGLB g */
+    BinaryUtils_writeUint32(file + 92, 0xa0000000u);    /* tag: normal, last occurrence */
+    BinaryUtils_writeUint32(file + 96, 0xc1050000u);    /* PUSHLOC loc */
+    BinaryUtils_writeUint32(file + 100, 0xa0000000u);   /* tag: normal, last occurrence */
+    BinaryUtils_writeUint32(file + 104, 0x0c000000u);   /* ADD */
+
+    BinaryUtils_writeUint32(file + 108, 0xc0010000u);   /* PUSH float (type1=1) */
+    BinaryUtils_writeFloat32(file + 112, 2.5f);
+
+    DemonDataWinIndex index;
+    memset(&index, 0, sizeof(index));
+    index.count = 2u;
+    index.chunks[0] = (DemonDataWinChunk){
+        DATAWIN_TAG('V', 'A', 'R', 'I'), 0u, 0u, 52u};
+    index.chunks[1] = (DemonDataWinChunk){
+        DATAWIN_TAG('F', 'U', 'N', 'C'), 0u, 52u, 4u};
+
+    BinaryReader reader = BinaryReader_create(NULL, sizeof(file));
+    BinaryReader_setBuffer(&reader, file, 0u, sizeof(file));
+
+    DemonVmExecutionStats stats;
+    memset(&stats, 0, sizeof(stats));
+    Vm vm;
+    memset(&vm, 0, sizeof(vm));
+    vm.file = file;
+    vm.fileSize = sizeof(file);
+    vm.func = DemonDataWinIndex_find(&index, DATAWIN_TAG('F', 'U', 'N', 'C'));
+    vm.stats = &stats;
+    if (!build_references(&reader, &index, &vm, 16u)) {
+        vm_destroy(&vm);
+        return false;
+    }
+
+    Value result;
+    bool ok = execute_code(&vm, file + 56u, 56u, 52u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_INT &&
+        result.value == 5000000042LL;
+    ok = ok && execute_code(&vm, file + 108u, 108u, 8u) && vm.top == 1u &&
+        pop(&vm, &result) && result.kind == VALUE_REAL && result.real == 2.5;
 
     vm_destroy(&vm);
     return ok;

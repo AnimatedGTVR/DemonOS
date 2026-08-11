@@ -85,5 +85,6 @@ bool DemonVm_controlOpcodeSelfTest(uint32_t *instructions,
 bool DemonVm_callFrameSelfTest(int64_t *result);
 bool DemonVm_arraySelfTest(int64_t *result);
 bool DemonVm_markerBuiltinSelfTest(void);
+bool DemonVm_wideOpcodeSelfTest(void);
 
 #endif

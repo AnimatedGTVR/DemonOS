@@ -176,8 +176,36 @@ test package shipped in the upstream repository. The executable validates:
   `OP_PUSHGLB` (`0xC2`, a dedicated global-variable-read opcode real
   bytecode uses instead of the generic variable-push path this VM already
   handles) and `OP_PUSH` with an Int64-typed operand (`type1==3`, only the
-  Double case of that extra-operand-size class is handled today). Neither
-  fixed yet — natural next investigation;
+  Double case of that extra-operand-size class is handled today);
+- **`OP_PUSHLOC`/`OP_PUSHGLB` + missing `OP_PUSH` literal types**: checked
+  against upstream (`vm.c:2965-2995`, `vm.h:93-95`) — `OP_PUSHLOC`/
+  `OP_PUSHGLB` (`0xC1`/`0xC2`) are dedicated local/global variable-push
+  opcodes the real compiler emits instead of the generic `OP_PUSH
+  type1==5` path (no corresponding `OP_POPLOC`/`OP_POPGLB` exists; writes
+  always go through the one existing `OP_POP`, unaffected). Their embedded
+  operand encodes a real VARI table index directly
+  (`resolveVarDef`/`resolveVarOperand`, `vm.c:220-223,449-454`), but VARI
+  occurrence chains already record every address a variable is referenced
+  from regardless of opcode, so both reuse this file's existing
+  address-based `resolve()`/VARTYPE-tag-aware clone-or-share logic
+  unchanged (extracted into a shared `push_variable_reference` helper) —
+  no new resolution mechanism needed. Also added the three `OP_PUSH`
+  literal types that were missing cases despite this file's extra-operand
+  sizing already handling their byte widths correctly: `type1==3` (Int64,
+  confirmed at `rvalue.h:31`, stored directly since `Value.value` is
+  already `int64_t` — no truncation risk unlike `PUSHI`'s 16-bit or
+  `type1==2`'s 32-bit literals), `type1==1` (Float, promoted to this VM's
+  one double-typed `VALUE_REAL`, matching how upstream's `GMLReal` is
+  uniformly a double internally too), and `type1==4` (Bool). `OP_PUSHBLTN`
+  (`0xC3`, real engine builtin-variable accessors like `room_speed`,
+  resolved through a getter dispatch table — a meaningfully different
+  mechanism) is not yet implemented. Proven by `DemonVm_wideOpcodeSelfTest`
+  (round-trips a value through `PUSHGLB`/`PUSHLOC` and a real >32-bit
+  Int64 literal that would visibly fail if truncated, plus an independent
+  Float-literal check) and confirmed against real data: re-running the D9
+  probe shows both previously-failing real instances advance further still
+  (their addresses moved forward again) before hitting `OP_CONV` gaps —
+  the natural next investigation;
 - a fixed 60 Hz scheduler executes Step even with no input, then performs
   collision dispatch and rendering; idle-tick validation proves that one
   Step runs while preserving an unmoving instance's coordinates;
